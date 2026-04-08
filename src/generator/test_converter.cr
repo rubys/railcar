@@ -84,9 +84,31 @@ module Ruby2CR
 
       io = IO::Memory.new
       io << "require \"spec\"\n"
-      io << "require \"http/client\"\n"
+      io << "require \"http/server\"\n"
+      io << "require \"ecr\"\n"
+      io << "require \"../src/routes\"\n"
       io << "require \"../src/models/*\"\n"
       io << "require \"./spec_helper\"\n\n"
+
+      # Test helper for mock requests
+      io << "include Ruby2CR::RouteHelpers\n\n"
+      io << "record TestResponse, status_code : Int32, headers : HTTP::Headers, body : String\n\n"
+
+      io << "def mock_request(method : String, path : String, body : String? = nil) : TestResponse\n"
+      io << "  request = HTTP::Request.new(method, path)\n"
+      io << "  if body\n"
+      io << "    request.body = body\n"
+      io << "    request.headers[\"Content-Type\"] = \"application/x-www-form-urlencoded\"\n"
+      io << "  end\n"
+      io << "  output = IO::Memory.new\n"
+      io << "  response = HTTP::Server::Response.new(output)\n"
+      io << "  context = HTTP::Server::Context.new(request, response)\n"
+      io << "  router = Ruby2CR::Router.new\n"
+      io << "  router.dispatch(context)\n"
+      io << "  response.close\n"
+      io << "  output.rewind\n"
+      io << "  TestResponse.new(response.status_code, response.headers, output.gets_to_end)\n"
+      io << "end\n\n"
 
       describe_name = klass.name.chomp("Test")
       io << "describe \"#{describe_name}\" do\n"
@@ -96,7 +118,6 @@ module Ruby2CR
       io << "    setup_fixtures(db)\n"
       io << "  end\n\n"
 
-      # Convert setup block instance variables
       setup_vars = extract_setup_vars(klass)
 
       if body = klass.body
@@ -234,9 +255,9 @@ module Ruby2CR
           when "assert_select"
             emit_assert_select(stmt, io, indent)
           when "assert_difference"
-            emit_assert_difference(stmt, io, indent)
+            emit_assert_difference(stmt, io, indent, controller_test: true)
           when "assert_no_difference"
-            emit_assert_no_difference(stmt, io, indent)
+            emit_assert_no_difference(stmt, io, indent, controller_test: true)
           else
             emit_assertion(stmt, io, indent)
           end
@@ -270,24 +291,27 @@ module Ruby2CR
       end
     end
 
-    private def self.emit_assert_difference(call : Prism::CallNode, io : IO, indent : String)
+    private def self.emit_assert_difference(call : Prism::CallNode, io : IO, indent : String, controller_test : Bool = false)
       args = call.arg_nodes
       expr = args[0]?.is_a?(Prism::StringNode) ? args[0].as(Prism::StringNode).value : "count"
       diff = args[1]?.is_a?(Prism::IntegerNode) ? args[1].as(Prism::IntegerNode).value : 1
 
-      # Convert "Article.count" to Crystal
       model_count = expr.gsub(/(\w+)\.count/) { |m| "Ruby2CR::#{m}" }
 
       io << indent << "before_count = #{model_count}\n"
       if block = call.block
         if block.is_a?(Prism::BlockNode) && (body = block.body)
-          emit_test_body(body, io, indent)
+          if controller_test
+            emit_controller_test_body(body, io, indent)
+          else
+            emit_test_body(body, io, indent)
+          end
         end
       end
       io << indent << "(#{model_count} - before_count).should eq #{diff}\n"
     end
 
-    private def self.emit_assert_no_difference(call : Prism::CallNode, io : IO, indent : String)
+    private def self.emit_assert_no_difference(call : Prism::CallNode, io : IO, indent : String, controller_test : Bool = false)
       args = call.arg_nodes
       expr = args[0]?.is_a?(Prism::StringNode) ? args[0].as(Prism::StringNode).value : "count"
       model_count = expr.gsub(/(\w+)\.count/) { |m| "Ruby2CR::#{m}" }
@@ -295,13 +319,17 @@ module Ruby2CR
       io << indent << "before_count = #{model_count}\n"
       if block = call.block
         if block.is_a?(Prism::BlockNode) && (body = block.body)
-          emit_test_body(body, io, indent)
+          if controller_test
+            emit_controller_test_body(body, io, indent)
+          else
+            emit_test_body(body, io, indent)
+          end
         end
       end
       io << indent << "#{model_count}.should eq before_count\n"
     end
 
-    # HTTP request helpers
+    # HTTP request helpers — uses mock_request instead of HTTP::Client
     private def self.emit_http_call(call : Prism::CallNode, method : String, io : IO, indent : String)
       args = call.arg_nodes
       url = expr_to_crystal(args[0])
@@ -320,24 +348,18 @@ module Ruby2CR
 
       case method
       when "GET"
-        io << indent << "response = HTTP::Client.get(\"http://localhost:3000\#"
-        io << "{" << url << "}\")\n"
+        io << indent << "response = mock_request(\"GET\", #{url})\n"
       when "POST"
-        body = params_str || "\"\""
-        io << indent << "response = HTTP::Client.post(\"http://localhost:3000\#"
-        io << "{" << url << "}\", body: " << body << ", headers: HTTP::Headers{\"Content-Type\" => \"application/x-www-form-urlencoded\"})\n"
+        body = params_str || "nil"
+        io << indent << "response = mock_request(\"POST\", #{url}, #{body})\n"
       when "PATCH"
         if params_str
-          io << indent << "response = HTTP::Client.post(\"http://localhost:3000\#"
-          io << "{" << url << "}\", body: \"_method=patch&\#"
-          io << "{" << params_str << "}\", headers: HTTP::Headers{\"Content-Type\" => \"application/x-www-form-urlencoded\"})\n"
+          io << indent << "response = mock_request(\"POST\", #{url}, \"_method=patch&\" + #{params_str})\n"
         else
-          io << indent << "response = HTTP::Client.post(\"http://localhost:3000\#"
-          io << "{" << url << "}\", body: \"_method=patch\", headers: HTTP::Headers{\"Content-Type\" => \"application/x-www-form-urlencoded\"})\n"
+          io << indent << "response = mock_request(\"POST\", #{url}, \"_method=patch\")\n"
         end
       when "DELETE"
-        io << indent << "response = HTTP::Client.post(\"http://localhost:3000\#"
-        io << "{" << url << "}\", body: \"_method=delete\", headers: HTTP::Headers{\"Content-Type\" => \"application/x-www-form-urlencoded\"})\n"
+        io << indent << "response = mock_request(\"POST\", #{url}, \"_method=delete\")\n"
       end
     end
 
@@ -359,11 +381,30 @@ module Ruby2CR
     private def self.emit_assert_select(call : Prism::CallNode, io : IO, indent : String)
       args = call.arg_nodes
       selector = args[0]?.is_a?(Prism::StringNode) ? args[0].as(Prism::StringNode).value : ""
+
       if args.size > 1 && args[1].is_a?(Prism::StringNode)
+        # assert_select "h1", "Articles" → body contains "Articles"
         expected = args[1].as(Prism::StringNode).value
         io << indent << "response.body.should contain #{expected.inspect}\n"
       else
-        io << indent << "response.body.should contain #{selector.inspect}\n"
+        # Convert CSS selectors to string presence checks
+        # #id → id="id"
+        # .class → class="...class..."
+        # tag → <tag
+        check = if selector.starts_with?("#")
+                   id = selector.lchop("#").split(" ").first.split(".").first
+                   "id=\"#{id}\""
+                 elsif selector.starts_with?(".")
+                   cls = selector.lchop(".")
+                   cls
+                 elsif selector.includes?("#") || selector.includes?(".")
+                   # Complex selector — just check for key parts
+                   parts = selector.split(/[\s#.]/).reject(&.empty?)
+                   parts.first
+                 else
+                   "<#{selector}"
+                 end
+        io << indent << "response.body.should contain #{check.inspect}\n"
       end
     end
 
@@ -459,8 +500,14 @@ module Ruby2CR
             end
           else
             if method.ends_with?("_url")
-              # Convert _url helpers to paths
-              method.chomp("_url") + "_path"
+              # Convert _url helpers to paths, keeping args
+              path_method = method.chomp("_url") + "_path"
+              if args.empty?
+                path_method
+              else
+                arg_strs = args.map { |a| expr_to_crystal(a) }
+                "#{path_method}(#{arg_strs.join(", ")})"
+              end
             elsif args.empty?
               method
             else

@@ -647,6 +647,8 @@ module Ruby2CR
           io << "require \"db\"\n"
           io << "require \"sqlite3\"\n"
           io << "require \"../src/models/*\"\n\n"
+          io << "# Flash store for controller tests\n"
+          io << "FLASH_STORE = {} of String => {notice: String?, alert: String?}\n\n"
 
           # DB setup function
           io << "def setup_test_database : DB::Database\n"
