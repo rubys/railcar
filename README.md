@@ -1,22 +1,30 @@
 # ruby2cr
 
-A Rails-to-Crystal transpiler. Converts a Ruby on Rails application into an equivalent Crystal web application.
+Converts a Ruby on Rails application into a Crystal web application.
 
-**Status:** Early proof of concept.
+**Status:** Early proof of concept. Tested against a Rails blog demo (articles, comments, nested resources). The architecture is designed for incremental extension -- new Rails patterns are added by writing composable filters.
 
 ## What it does
 
-Given a Rails app directory, ruby2cr extracts migrations, models, controllers, routes, views, fixtures, and tests, then generates a complete Crystal application that compiles and runs.
+Given a Rails app directory, ruby2cr parses the source code, applies a chain of AST transformations, and generates a Crystal application that compiles and runs.
 
 ```
-Rails App (Ruby)
+Source (.rb or .cr)
     |
     v
-Extractors (Prism parser via FFI)
+Parse (Prism for Ruby, Crystal parser for Crystal)
     |
     v
-Crystal App (models, controllers, views, routes, tests)
+Crystal AST (canonical intermediate representation)
+    |
+    v
+Filter chain (composable transformations)
+    |
+    v
+Crystal source output (via Crystal.format)
 ```
+
+Both Ruby and Crystal input files are supported. This means you can start with a Rails app, generate the Crystal version, then gradually rewrite individual files in Crystal as you learn the language. The pipeline handles both seamlessly.
 
 ## Prerequisites
 
@@ -49,27 +57,35 @@ crystal build src/app.cr
 make test
 ```
 
-Downloads a sample Rails blog app and runs the spec suite against it.
+Downloads a sample Rails blog app and runs the 240-test spec suite.
 
-## How it works
+## What works
 
-- **Schema extraction** -- parses Rails migrations to derive table schemas and column types
-- **Model extraction** -- parses model files for associations, validations
-- **Controller extraction** -- parses controllers for actions, before_actions, strong params
-- **Route extraction** -- parses `config/routes.rb` for resources, nested resources, root
-- **ERB conversion** -- converts ERB templates to Crystal ECR via AST transformation
-- **Test conversion** -- converts Minitest to Crystal spec format
-- **Runtime** -- a Crystal ORM that mirrors ActiveRecord using macros (validations, associations, query chaining)
+The blog demo exercises these patterns:
 
-## Limitations
+- **Models** -- `has_many`, `belongs_to`, `validates` (presence, length), `dependent: :destroy`
+- **Controllers** -- CRUD actions, `before_action`, strong params, `respond_to`, `redirect_to` with flash, `render` with status codes
+- **Views** -- ERB to ECR conversion, `link_to`, `button_to`, `form_with`, partials, `render @collection`
+- **Routes** -- `resources`, nested resources, `root`
+- **Tests** -- Minitest to Crystal spec, model and controller tests, fixtures with dependency ordering
+- **Runtime** -- ActiveRecord-like ORM with macros, query chaining, validations, associations
 
-This is a proof of concept. It handles conventional Rails patterns (CRUD controllers, standard associations, form helpers) but does not support:
+## What needs work
 
-- Runtime metaprogramming (`eval`, `method_missing`, dynamic `send`)
-- Most gems (Devise, Pundit, etc.)
-- ActionCable / WebSockets
-- ActiveStorage, ActionMailer
-- Background jobs
+This is a proof of concept. Many common Rails patterns are not yet implemented:
+
+- **Models** -- scopes, enums, callbacks (beyond stripping), polymorphic associations, `has_one :through`, custom validators
+- **Controllers** -- filters beyond `before_action`, rescue_from, streaming, multi-format responses
+- **Views** -- Turbo Streams (currently stripped), Action Text, complex form builders, content_for
+- **Gems** -- Devise, Pundit, Sidekiq, and other common gems each need their own filters
+- **Infrastructure** -- ActionCable/WebSockets, ActiveStorage, ActionMailer, background jobs
+- **Runtime metaprogramming** -- `eval`, `method_missing`, dynamic `send` cannot be transpiled
+
+The filter architecture is designed so each of these can be added incrementally. See [ARCHITECTURE.md](ARCHITECTURE.md) for how to contribute.
+
+## Relationship to ruby2js
+
+ruby2cr is a sibling project to [ruby2js](https://www.ruby2js.com/), which transpiles Ruby to JavaScript. They share the same Prism parser, the same inflector, and the same architectural philosophy: parse source, transform an AST through composable filters, serialize the result. Knowledge from one project transfers to the other.
 
 ## License
 
