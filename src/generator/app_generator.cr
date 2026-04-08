@@ -16,39 +16,48 @@ module Ruby2CR
   class AppGenerator
     getter rails_dir : String
     getter output_dir : String
+    getter schemas : Array(TableSchema) = [] of TableSchema
+    getter route_set : RouteSet = RouteSet.new
+    getter models : Hash(String, ModelInfo) = {} of String => ModelInfo
 
     def initialize(@rails_dir, @output_dir)
     end
 
     def generate
+      app_name = File.basename(rails_dir)
       puts "Generating Crystal app from #{rails_dir}..."
 
+      # Extract metadata first (used by multiple generators)
+      @schemas = SchemaExtractor.extract_all(File.join(rails_dir, "db/migrate"))
+      routes_path = File.join(rails_dir, "config/routes.rb")
+      @route_set = RouteExtractor.extract_file(routes_path) if File.exists?(routes_path)
+      load_models
+
       copy_runtime
-      generate_shard_yml
+      generate_shard_yml(app_name)
       generate_models
       generate_route_helpers
       generate_views
       generate_controllers
       generate_routes
-      generate_app_entry
+      generate_app_entry(app_name)
 
       puts "Done! Output in #{output_dir}/"
-      puts "  crystal build src/app.cr -o blog"
+      puts "  cd #{output_dir} && shards install && crystal build src/app.cr -o #{app_name}"
+    end
+
+    private def load_models
+      Dir.glob(File.join(rails_dir, "app/models/*.rb")).each do |path|
+        model = ModelExtractor.extract_file(path)
+        next unless model
+        next if model.name == "ApplicationRecord"
+        @models[model.name] = model
+      end
     end
 
     # Copy runtime files
     private def copy_runtime
-      # Try multiple paths to find the runtime source
-      candidates = [
-        File.expand_path("../runtime", __DIR__),
-        File.expand_path("../../src/runtime", __DIR__),
-      ]
-      runtime_src = candidates.find { |p| Dir.exists?(p) }
-      unless runtime_src
-        puts "  Warning: runtime source not found, skipping copy"
-        return
-      end
-
+      runtime_src = File.expand_path("../runtime", __DIR__)
       runtime_dst = File.join(output_dir, "src/runtime")
       mkdir(runtime_dst)
       mkdir(File.join(runtime_dst, "helpers"))
@@ -60,9 +69,9 @@ module Ruby2CR
     end
 
     # Generate shard.yml
-    private def generate_shard_yml
+    private def generate_shard_yml(app_name : String)
       write_file(File.join(output_dir, "shard.yml"), <<-YAML
-      name: blog
+      name: #{app_name}
       version: 0.1.0
 
       dependencies:
@@ -81,26 +90,18 @@ module Ruby2CR
       models_dir = File.join(output_dir, "src/models")
       mkdir(models_dir)
 
-      schemas = SchemaExtractor.extract_all(File.join(rails_dir, "db/migrate"))
       schema_map = {} of String => TableSchema
       schemas.each { |s| schema_map[s.name] = s }
 
-      model_files = Dir.glob(File.join(rails_dir, "app/models/*.rb")).sort
-      model_files.each do |path|
-        model = ModelExtractor.extract_file(path)
-        next unless model
-        next if model.name == "ApplicationRecord"
-
+      models.each do |name, model|
         table_name = CrystalEmitter.pluralize(
-          model.name.gsub(/([A-Z])/) { |m| "_#{m.downcase}" }.lstrip('_')
+          name.gsub(/([A-Z])/) { |m| "_#{m.downcase}" }.lstrip('_')
         )
         schema = schema_map[table_name]?
         next unless schema
 
         source = CrystalEmitter.generate(schema, model)
-        # Fix requires for the output directory structure
-        source = source.gsub("../runtime/", "../runtime/")
-        filename = File.basename(path, ".rb") + ".cr"
+        filename = table_name.gsub(/s$/, "") + ".cr"
         write_file(File.join(models_dir, filename), source)
         puts "  models/#{filename}"
       end
@@ -111,10 +112,6 @@ module Ruby2CR
       helpers_dir = File.join(output_dir, "src/helpers")
       mkdir(helpers_dir)
 
-      routes_path = File.join(rails_dir, "config/routes.rb")
-      return unless File.exists?(routes_path)
-
-      route_set = RouteExtractor.extract_file(routes_path)
       source = RouteGenerator.generate_helpers(route_set)
       write_file(File.join(helpers_dir, "route_helpers.cr"), source)
       puts "  helpers/route_helpers.cr"
@@ -135,7 +132,6 @@ module Ruby2CR
       views_src = File.join(rails_dir, "app/views")
       return unless Dir.exists?(views_src)
 
-      # Process each controller's views
       Dir.each_child(views_src) do |controller_dir|
         full_path = File.join(views_src, controller_dir)
         next unless File.directory?(full_path)
@@ -147,7 +143,6 @@ module Ruby2CR
         Dir.glob(File.join(full_path, "*.html.erb")).each do |erb_path|
           basename = File.basename(erb_path, ".html.erb")
           ecr_name = "#{basename}.ecr"
-
           ecr_source = ERBConverter.convert_file(erb_path, basename, controller_dir)
           write_file(File.join(views_dst, ecr_name), ecr_source)
           puts "  views/#{controller_dir}/#{ecr_name}"
@@ -182,16 +177,17 @@ module Ruby2CR
 
     private def generate_controller_file(info : ControllerInfo, controller_name : String) : String
       singular = CrystalEmitter.singularize(controller_name)
-      model_class = CrystalEmitter.classify(controller_name)
+      model_class = CrystalEmitter.classify(singular)
 
-      # Check which before_actions set which variables
-      set_actions = info.before_actions.select { |ba| ba.method_name.starts_with?("set_") }
-      has_set_model = !set_actions.empty?
+      # Determine nested resource parent from routes
+      nested_parent = find_nested_parent(controller_name)
 
       io = IO::Memory.new
+
+      # Requires — derive from associations and route structure
       io << "require \"../models/#{singular}\"\n"
-      if controller_name == "comments"
-        io << "require \"../models/article\"\n"
+      if nested_parent
+        io << "require \"../models/#{nested_parent}\"\n"
       end
       io << "require \"../helpers/route_helpers\"\n"
       io << "require \"../helpers/view_helpers\"\n\n"
@@ -221,12 +217,12 @@ module Ruby2CR
       io << "      end\n"
       io << "    end\n\n"
 
-      # Partial helpers
+      # Partial helpers — scan for partials in this controller's views
       io << generate_partial_helpers(controller_name)
 
-      # Public actions with full rendering
+      # Public actions
       info.actions.reject(&.is_private).each do |action|
-        io << generate_full_action(action, info, controller_name, singular, model_class, has_set_model, nil)
+        io << generate_action_with_wiring(action, info, controller_name, singular, model_class, nested_parent)
         io << "\n"
       end
 
@@ -235,146 +231,107 @@ module Ruby2CR
       io.to_s
     end
 
+    # Find nested parent from route structure
+    private def find_nested_parent(controller_name : String) : String?
+      route_set.routes.each do |route|
+        if route.controller == controller_name && route.path.includes?("_id")
+          # Extract parent from path like /articles/:article_id/comments
+          if match = route.path.match(/:(\w+)_id/)
+            return match[1]
+          end
+        end
+      end
+      nil
+    end
+
+    # Generate partial helpers by scanning view files
     private def generate_partial_helpers(controller_name : String) : String
       io = IO::Memory.new
-      case controller_name
-      when "articles"
-        io << "    private def render_article_partial(article : Article) : String\n"
-        io << "      String.build do |__str__|\n"
-        io << "        ECR.embed(\"src/views/articles/_article.ecr\", __str__)\n"
-        io << "      end\n"
-        io << "    end\n\n"
-        io << "    private def render_form_partial(article : Article) : String\n"
-        io << "      String.build do |__str__|\n"
-        io << "        ECR.embed(\"src/views/articles/_form.ecr\", __str__)\n"
-        io << "      end\n"
-        io << "    end\n\n"
-        io << "    private def render_comment_partial(article : Article, comment : Comment) : String\n"
-        io << "      String.build do |__str__|\n"
-        io << "        ECR.embed(\"src/views/comments/_comment.ecr\", __str__)\n"
-        io << "      end\n"
-        io << "    end\n\n"
+
+      # Scan for partial templates in this controller's views
+      views_dir = File.join(rails_dir, "app/views/#{controller_name}")
+      if Dir.exists?(views_dir)
+        Dir.glob(File.join(views_dir, "_*.html.erb")).each do |path|
+          partial_name = File.basename(path, ".html.erb").lchop("_")
+          singular = CrystalEmitter.singularize(controller_name)
+          model_class = CrystalEmitter.classify(singular)
+
+          # Determine params: the partial variable is the singular model name
+          io << "    private def render_#{partial_name}_partial(#{singular} : #{model_class}) : String\n"
+          io << "      String.build do |__str__|\n"
+          io << "        ECR.embed(\"src/views/#{controller_name}/_#{partial_name}.ecr\", __str__)\n"
+          io << "      end\n"
+          io << "    end\n\n"
+        end
       end
+
+      # Also scan other controllers' views for partials this controller might render
+      views_root = File.join(rails_dir, "app/views")
+      if Dir.exists?(views_root)
+        Dir.each_child(views_root) do |other_dir|
+          next if other_dir == controller_name || other_dir == "layouts"
+          other_path = File.join(views_root, other_dir)
+          next unless File.directory?(other_path)
+
+          Dir.glob(File.join(other_path, "_*.html.erb")).each do |path|
+            partial_name = File.basename(path, ".html.erb").lchop("_")
+            other_singular = CrystalEmitter.singularize(other_dir)
+            other_model = CrystalEmitter.classify(other_singular)
+
+            # Check if this controller's views reference this partial
+            # For now, generate it if this is a nested resource relationship
+            parent = find_nested_parent(other_dir)
+            if parent && CrystalEmitter.pluralize(parent) == controller_name
+              singular = CrystalEmitter.singularize(controller_name)
+              model_class = CrystalEmitter.classify(singular)
+              io << "    private def render_#{partial_name}_partial(#{singular} : #{model_class}, #{other_singular} : #{other_model}) : String\n"
+              io << "      String.build do |__str__|\n"
+              io << "        ECR.embed(\"src/views/#{other_dir}/_#{partial_name}.ecr\", __str__)\n"
+              io << "      end\n"
+              io << "    end\n\n"
+            end
+          end
+        end
+      end
+
       io.to_s
     end
 
-    private def generate_full_action(action : ControllerAction, info : ControllerInfo, controller_name : String, singular : String, model_class : String, has_set_model : Bool, set_only_unused : Nil) : String
+    # Generate a controller action with full wiring (before_action, view rendering)
+    private def generate_action_with_wiring(action : ControllerAction, info : ControllerInfo, controller_name : String, singular : String, model_class : String, nested_parent : String?) : String
       io = IO::Memory.new
       name = action.name
       needs_id = {"show", "edit", "update", "destroy"}.includes?(name)
       needs_params = {"create", "update"}.includes?(name)
 
-      # Check if any before_action applies to this action
       needs_before = info.before_actions.any? do |ba|
         ba.only.nil? || ba.only.not_nil!.includes?(name)
       end
 
+      # Method signature
       io << "    def #{name}(response : HTTP::Server::Response"
       io << ", id : Int64" if needs_id
       io << ", params : Hash(String, String)" if needs_params
-      # Nested controllers need parent id
-      if controller_name == "comments"
-        io << ", article_id : Int64" if {"create"}.includes?(name)
-        io << ", article_id : Int64" if name == "destroy"
+      if nested_parent
+        io << ", #{nested_parent}_id : Int64" if needs_params || needs_id
       end
       io << ")\n"
 
       indent = "      "
 
-      # Before action: set model
+      # Before action: set parent and/or model
       if needs_before
-        if controller_name == "comments"
-          io << indent << "article = Article.find(article_id)\n"
-        elsif needs_id
+        if nested_parent
+          parent_model = CrystalEmitter.classify(nested_parent)
+          io << indent << "#{nested_parent} = #{parent_model}.find(#{nested_parent}_id)\n"
+        end
+        if needs_id && !nested_parent
           io << indent << "#{singular} = #{model_class}.find(id)\n"
         end
       end
 
-      # Action body — use hand-crafted patterns for the blog demo
-      case "#{controller_name}##{name}"
-      when "articles#index"
-        io << indent << "articles = Article.includes(:comments).order(created_at: :desc).to_a\n"
-        io << indent << "flash = FLASH_STORE.delete(\"default\") || {notice: nil, alert: nil}\n"
-        io << indent << "notice = flash[:notice]\n"
-        io << indent << "response.print layout(\"Articles\") {\n"
-        io << indent << "  String.build do |__str__|\n"
-        io << indent << "    ECR.embed(\"src/views/articles/index.ecr\", __str__)\n"
-        io << indent << "  end\n"
-        io << indent << "}\n"
-      when "articles#show"
-        io << indent << "flash = FLASH_STORE.delete(\"default\") || {notice: nil, alert: nil}\n"
-        io << indent << "notice = flash[:notice]\n"
-        io << indent << "response.print layout(article.title) {\n"
-        io << indent << "  String.build do |__str__|\n"
-        io << indent << "    ECR.embed(\"src/views/articles/show.ecr\", __str__)\n"
-        io << indent << "  end\n"
-        io << indent << "}\n"
-      when "articles#new"
-        io << indent << "article = Article.new\n"
-        io << indent << "response.print layout(\"New Article\") {\n"
-        io << indent << "  String.build do |__str__|\n"
-        io << indent << "    ECR.embed(\"src/views/articles/new.ecr\", __str__)\n"
-        io << indent << "  end\n"
-        io << indent << "}\n"
-      when "articles#edit"
-        io << indent << "response.print layout(\"Edit Article\") {\n"
-        io << indent << "  String.build do |__str__|\n"
-        io << indent << "    ECR.embed(\"src/views/articles/edit.ecr\", __str__)\n"
-        io << indent << "  end\n"
-        io << indent << "}\n"
-      when "articles#create"
-        io << indent << "article = Article.new(extract_model_params(params, \"article\"))\n"
-        io << indent << "if article.save\n"
-        io << indent << "  FLASH_STORE[\"default\"] = {notice: \"Article was successfully created.\", alert: nil}\n"
-        io << indent << "  response.status_code = 302\n"
-        io << indent << "  response.headers[\"Location\"] = article_path(article)\n"
-        io << indent << "else\n"
-        io << indent << "  response.status_code = 422\n"
-        io << indent << "  response.print layout(\"New Article\") {\n"
-        io << indent << "    String.build do |__str__|\n"
-        io << indent << "      ECR.embed(\"src/views/articles/new.ecr\", __str__)\n"
-        io << indent << "    end\n"
-        io << indent << "  }\n"
-        io << indent << "end\n"
-      when "articles#update"
-        io << indent << "if article.update(extract_model_params(params, \"article\"))\n"
-        io << indent << "  FLASH_STORE[\"default\"] = {notice: \"Article was successfully updated.\", alert: nil}\n"
-        io << indent << "  response.status_code = 302\n"
-        io << indent << "  response.headers[\"Location\"] = article_path(article)\n"
-        io << indent << "else\n"
-        io << indent << "  response.status_code = 422\n"
-        io << indent << "  response.print layout(\"Edit Article\") {\n"
-        io << indent << "    String.build do |__str__|\n"
-        io << indent << "      ECR.embed(\"src/views/articles/edit.ecr\", __str__)\n"
-        io << indent << "    end\n"
-        io << indent << "  }\n"
-        io << indent << "end\n"
-      when "articles#destroy"
-        io << indent << "article.destroy\n"
-        io << indent << "FLASH_STORE[\"default\"] = {notice: \"Article was successfully destroyed.\", alert: nil}\n"
-        io << indent << "response.status_code = 302\n"
-        io << indent << "response.headers[\"Location\"] = articles_path\n"
-      when "comments#create"
-        io << indent << "comment = article.comments.build(extract_model_params(params, \"comment\"))\n"
-        io << indent << "if comment.save\n"
-        io << indent << "  FLASH_STORE[\"default\"] = {notice: \"Comment was successfully created.\", alert: nil}\n"
-        io << indent << "else\n"
-        io << indent << "  FLASH_STORE[\"default\"] = {notice: nil, alert: \"Could not create comment.\"}\n"
-        io << indent << "end\n"
-        io << indent << "response.status_code = 302\n"
-        io << indent << "response.headers[\"Location\"] = article_path(article)\n"
-      when "comments#destroy"
-        io << indent << "comment = article.comments.find(id)\n"
-        io << indent << "comment.destroy\n"
-        io << indent << "FLASH_STORE[\"default\"] = {notice: \"Comment was successfully deleted.\", alert: nil}\n"
-        io << indent << "response.status_code = 302\n"
-        io << indent << "response.headers[\"Location\"] = article_path(article)\n"
-      else
-        # Generic: use the AST-based generator
-        if body = action.body
-          io << ControllerGenerator.generate_action(action, controller_name).lines[1..-2].join("\n") << "\n"
-        end
-      end
+      # Use the AST-based generator for the action body
+      io << ControllerGenerator.generate_action(action, controller_name, render_view: true).lines[1..-2].join("\n") << "\n"
 
       io << "    end\n"
       io.to_s
@@ -382,18 +339,14 @@ module Ruby2CR
 
     # Generate the route matching file
     private def generate_routes
-      routes_path = File.join(rails_dir, "config/routes.rb")
-      return unless File.exists?(routes_path)
-
-      route_set = RouteExtractor.extract_file(routes_path)
-      source = generate_routes_file(route_set)
+      source = generate_routes_file
       write_file(File.join(output_dir, "src/routes.cr"), source)
       puts "  routes.cr"
     end
 
-    private def generate_routes_file(route_set : RouteSet) : String
+    private def generate_routes_file : String
       io = IO::Memory.new
-      io << "# Generated route matching from config/routes.rb\n\n"
+      io << "# Generated route matching\n\n"
       io << "require \"./controllers/*\"\n"
       io << "require \"./helpers/route_helpers\"\n"
       io << "require \"./helpers/view_helpers\"\n\n"
@@ -406,7 +359,6 @@ module Ruby2CR
       controllers = Set(String).new
       route_set.routes.each { |r| controllers << r.controller }
       controllers.each do |ctrl|
-        # Capitalize each word: "articles" → "Articles"
         class_name = ctrl.split("_").map(&.capitalize).join + "Controller"
         io << "    getter #{ctrl}_controller = #{class_name}.new\n"
       end
@@ -440,9 +392,9 @@ module Ruby2CR
       route_set.routes.each do |route|
         next if route.path.includes?(":")
         io << "      when {\"#{route.method}\", \"#{route.path}\"}\n"
-        io << "        #{route.controller}_controller.#{route.action}(response"
-        io << ", params" if {"create"}.includes?(route.action)
-        io << ")\n"
+        args = ["response"]
+        args << "params" if {"create"}.includes?(route.action)
+        io << "        #{route.controller}_controller.#{route.action}(#{args.join(", ")})\n"
       end
 
       io << "      else\n"
@@ -475,10 +427,11 @@ module Ruby2CR
           args = ["response"]
           args << "id" if {"show", "edit", "update", "destroy"}.includes?(r.action)
           args << "params" if {"create", "update"}.includes?(r.action)
-          # For nested, pass parent id
+          # Pass parent IDs for nested resources
           if r.path.includes?("_id")
-            parent_params = param_names.select { |n| n.ends_with?("_id") }
-            parent_params.each { |p| args << p unless args.includes?(p) }
+            param_names.select { |n| n.ends_with?("_id") }.each do |p|
+              args << p unless args.includes?(p)
+            end
           end
           io << "            #{r.controller}_controller.#{r.action}(#{args.join(", ")})\n"
         end
@@ -500,78 +453,178 @@ module Ruby2CR
       io.to_s
     end
 
-    # Generate the app entry point
-    private def generate_app_entry
-      write_file(File.join(output_dir, "src/app.cr"), <<-CR
-      require "http/server"
-      require "ecr"
-      require "db"
-      require "sqlite3"
-      require "./routes"
-      require "./models/*"
+    # Generate the app entry point with DB setup from schemas
+    private def generate_app_entry(app_name : String)
+      io = IO::Memory.new
+      io << "require \"http/server\"\n"
+      io << "require \"ecr\"\n"
+      io << "require \"db\"\n"
+      io << "require \"sqlite3\"\n"
+      io << "require \"./routes\"\n"
+      io << "require \"./models/*\"\n\n"
+      io << "# Flash message store\n"
+      io << "FLASH_STORE = {} of String => {notice: String?, alert: String?}\n\n"
+      io << "# Database setup\n"
+      io << "db = DB.open(\"sqlite3:./#{app_name}.db\")\n"
 
-      # Flash message store
-      FLASH_STORE = {} of String => {notice: String?, alert: String?}
+      # Set db on all models
+      models.each_key do |name|
+        io << "Ruby2CR::#{name}.db = db\n"
+      end
+      io << "\n"
 
-      # Database setup
-      db = DB.open("sqlite3:./blog.db")
-      Ruby2CR::Article.db = db
-      Ruby2CR::Comment.db = db
+      # Generate DDL from schemas
+      schemas.each do |schema|
+        io << "db.exec <<-SQL\n"
+        io << "  CREATE TABLE IF NOT EXISTS #{schema.name} (\n"
+        io << "    id INTEGER PRIMARY KEY AUTOINCREMENT"
+        schema.columns.each do |col|
+          not_null = col.type == "datetime" || col.options["null"]? != "true" ? " NOT NULL" : ""
+          sql_type = case col.type
+                     when "string", "text" then "TEXT"
+                     when "integer"        then "INTEGER"
+                     when "float"          then "REAL"
+                     when "boolean"        then "INTEGER"
+                     when "datetime"       then "TEXT"
+                     else                       "TEXT"
+                     end
+          refs = ""
+          if col.name.ends_with?("_id")
+            ref_table = CrystalEmitter.pluralize(col.name.chomp("_id"))
+            refs = " REFERENCES #{ref_table}(id)"
+          end
+          io << ",\n    #{col.name} #{sql_type}#{not_null}#{refs}"
+        end
+        io << "\n  )\nSQL\n\n"
+      end
 
-      db.exec <<-SQL
-        CREATE TABLE IF NOT EXISTS articles (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          title TEXT NOT NULL,
-          body TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        )
-      SQL
-
-      db.exec <<-SQL
-        CREATE TABLE IF NOT EXISTS comments (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          article_id INTEGER NOT NULL REFERENCES articles(id),
-          commenter TEXT NOT NULL,
-          body TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        )
-      SQL
-
-      # Seed if empty
-      if Ruby2CR::Article.count == 0
-        a1 = Ruby2CR::Article.create!(
-          title: "Getting Started with Rails",
-          body: "Rails is a web application framework running on the Ruby programming language. It makes building web apps faster and easier with conventions over configuration."
-        )
-        a1.comments.create!(commenter: "Alice", body: "Great introduction! Rails really does make development faster.")
-        a1.comments.create!(commenter: "Bob", body: "I love how Rails handles database migrations automatically.")
-
-        a2 = Ruby2CR::Article.create!(
-          title: "Understanding MVC Architecture",
-          body: "MVC stands for Model-View-Controller. Models handle data and business logic, Views display information to users, and Controllers coordinate between them."
-        )
-        a2.comments.create!(commenter: "Carol", body: "This pattern really helps keep code organized!")
-
-        Ruby2CR::Article.create!(
-          title: "Ruby2JS: Rails Everywhere",
-          body: "Ruby2JS transpiles Ruby to JavaScript, enabling Rails applications to run in browsers, on Node.js, and at the edge. Same code, different runtimes."
-        )
+      # Seed data from db/seeds.rb if it exists
+      seeds_path = File.join(rails_dir, "db/seeds.rb")
+      if File.exists?(seeds_path)
+        io << "# Seed data\n"
+        io << generate_seeds(seeds_path)
+        io << "\n"
       end
 
       # Start server
-      router = Ruby2CR::Router.new
-      server = HTTP::Server.new do |context|
-        router.dispatch(context)
+      io << "# Start server\n"
+      io << "router = Ruby2CR::Router.new\n"
+      io << "server = HTTP::Server.new do |context|\n"
+      io << "  router.dispatch(context)\n"
+      io << "end\n\n"
+      io << "address = server.bind_tcp(\"0.0.0.0\", 3000)\n"
+      io << "puts \"#{app_name} running at http://\#" << "{address}\"\n"
+      io << "server.listen\n"
+
+      write_file(File.join(output_dir, "src/app.cr"), io.to_s)
+      puts "  app.cr"
+    end
+
+    # Generate seed code from db/seeds.rb
+    private def generate_seeds(seeds_path : String) : String
+      source = File.read(seeds_path)
+      ast = Prism.parse(source)
+      io = IO::Memory.new
+
+      stmts = ast.statements
+      return "" unless stmts.is_a?(Prism::StatementsNode)
+
+      # Find the guard clause and first model name
+      first_model = models.keys.first? || "Model"
+      io << "if Ruby2CR::#{first_model}.count == 0\n"
+
+      stmts.body.each do |stmt|
+        case stmt
+        when Prism::CallNode
+          if stmt.name == "return"
+            next # Skip the guard clause
+          end
+          # puts statement at end
+          if stmt.name == "puts"
+            next
+          end
+        when Prism::IfNode, Prism::GenericNode
+          next # Skip guard clause
+        end
+
+        emit_seed_statement(stmt, io, "  ")
       end
 
-      address = server.bind_tcp("0.0.0.0", 3000)
-      puts "Blog running at http://\#{address}"
-      server.listen
-      CR
-      )
-      puts "  app.cr"
+      io << "end\n"
+      io.to_s
+    end
+
+    private def emit_seed_statement(node : Prism::Node, io : IO, indent : String)
+      case node
+      when Prism::LocalVariableWriteNode
+        var = node.name
+        value = seed_expr(node.value)
+        io << indent << var << " = " << value << "\n"
+      when Prism::CallNode
+        io << indent << seed_expr(node) << "\n"
+      end
+    end
+
+    private def seed_expr(node : Prism::Node) : String
+      case node
+      when Prism::CallNode
+        receiver = node.receiver
+        method = node.name
+        args = node.arg_nodes
+
+        recv_str = receiver ? seed_expr(receiver) : nil
+
+        case method
+        when "create!", "create"
+          kwargs = args.map { |a| seed_kwargs(a) }.join(", ")
+          if recv_str
+            "#{recv_str}.create!(#{kwargs})"
+          else
+            "create!(#{kwargs})"
+          end
+        when "comments"
+          "#{recv_str}.comments" if recv_str
+        else
+          if recv_str
+            arg_strs = args.map { |a| seed_expr(a) }
+            if arg_strs.empty?
+              "#{recv_str}.#{method}"
+            else
+              "#{recv_str}.#{method}(#{arg_strs.join(", ")})"
+            end
+          else
+            arg_strs = args.map { |a| seed_expr(a) }
+            "#{method}(#{arg_strs.join(", ")})"
+          end
+        end || "nil"
+      when Prism::ConstantReadNode
+        "Ruby2CR::#{node.name}"
+      when Prism::LocalVariableReadNode
+        node.name
+      when Prism::StringNode
+        node.value.inspect
+      when Prism::IntegerNode
+        node.value.to_s
+      when Prism::SymbolNode
+        ":#{node.value}"
+      else
+        "nil"
+      end
+    end
+
+    private def seed_kwargs(node : Prism::Node) : String
+      case node
+      when Prism::KeywordHashNode
+        node.elements.map do |el|
+          if el.is_a?(Prism::AssocNode) && el.key.is_a?(Prism::SymbolNode)
+            "#{el.key.as(Prism::SymbolNode).value}: #{seed_expr(el.value_node)}"
+          else
+            ""
+          end
+        end.reject(&.empty?).join(", ")
+      else
+        seed_expr(node)
+      end
     end
 
     private def generate_layout : String
@@ -608,7 +661,6 @@ module Ruby2CR
     end
 
     private def write_file(path : String, content : String)
-      # Dedent heredoc-style content
       lines = content.lines
       if lines.size > 1
         min_indent = lines.reject(&.blank?).map { |l| l.size - l.lstrip.size }.min? || 0

@@ -13,8 +13,11 @@ require "./crystal_emitter"
 
 module Ruby2CR
   class ControllerGenerator
+    # Actions that render a view template (vs redirect)
+    RENDER_ACTIONS = {"index", "show", "new", "edit"}
+
     # Generate Crystal method source for a controller action
-    def self.generate_action(action : ControllerAction, controller_name : String) : String
+    def self.generate_action(action : ControllerAction, controller_name : String, render_view : Bool = false) : String
       io = IO::Memory.new
       singular = CrystalEmitter.singularize(controller_name)
 
@@ -23,8 +26,31 @@ module Ruby2CR
       io << ", params : Hash(String, String)" if needs_params?(action.name)
       io << ")\n"
 
+      # For view-rendering actions, consume flash
+      if render_view && RENDER_ACTIONS.includes?(action.name)
+        io << "    flash = FLASH_STORE.delete(\"default\") || {notice: nil, alert: nil}\n"
+        io << "    notice = flash[:notice]\n"
+      end
+
       if body = action.body
         emit_body(body, io, controller_name, singular, action.name, "    ")
+      end
+
+      # For view-rendering actions, add the template render
+      if render_view && RENDER_ACTIONS.includes?(action.name)
+        title = case action.name
+                when "index" then CrystalEmitter.classify(controller_name)
+                when "show"  then "#{singular}.title"
+                when "new"   then "New #{CrystalEmitter.classify(singular)}"
+                when "edit"  then "Edit #{CrystalEmitter.classify(singular)}"
+                else action.name.capitalize
+                end
+        title_expr = action.name == "show" ? title : title.inspect
+        io << "    response.print layout(#{title_expr}) {\n"
+        io << "      String.build do |__str__|\n"
+        io << "        ECR.embed(\"src/views/#{controller_name}/#{action.name}.ecr\", __str__)\n"
+        io << "      end\n"
+        io << "    }\n"
       end
 
       io << "  end\n"
@@ -79,8 +105,9 @@ module Ruby2CR
         when "redirect_to"
           emit_redirect(node, io, controller, singular, indent)
         when "respond_to"
-          # respond_to block — extract HTML-only behavior
           emit_respond_to(node, io, controller, singular, action_name, indent)
+        when "render"
+          emit_render(node, io, controller, singular, action_name, indent)
         else
           io << indent << expr_to_crystal(node, controller, singular) << "\n"
         end
@@ -129,17 +156,41 @@ module Ruby2CR
                expr_to_crystal(target, controller, singular)
              end
 
-      # Extract notice/alert from kwargs
       notice = extract_keyword_string(args, "notice")
       alert = extract_keyword_string(args, "alert")
 
       if notice
-        io << indent << "set_flash(notice: \"" << notice << "\")\n"
+        io << indent << "FLASH_STORE[\"default\"] = {notice: \"" << notice << "\", alert: nil}\n"
       elsif alert
-        io << indent << "set_flash(alert: \"" << alert << "\")\n"
+        io << indent << "FLASH_STORE[\"default\"] = {notice: nil, alert: \"" << alert << "\"}\n"
       end
       io << indent << "response.status_code = 302\n"
       io << indent << "response.headers[\"Location\"] = " << path << "\n"
+    end
+
+    private def self.emit_render(node : Prism::CallNode, io : IO, controller : String, singular : String, action_name : String, indent : String)
+      args = node.arg_nodes
+      # render :new → render the "new" template
+      # render :edit → render the "edit" template
+      template = case args[0]?
+                 when Prism::SymbolNode then args[0].as(Prism::SymbolNode).value
+                 when Prism::StringNode then args[0].as(Prism::StringNode).value
+                 else action_name
+                 end
+
+      # Check for status: :unprocessable_entity
+      status = extract_keyword_string(args, "status")
+      if status == "unprocessable_entity"
+        io << indent << "response.status_code = 422\n"
+      end
+
+      # Capitalize for title
+      title = template.capitalize + " " + CrystalEmitter.classify(CrystalEmitter.singularize(controller))
+      io << indent << "response.print layout(\"#{title}\") {\n"
+      io << indent << "  String.build do |__str__|\n"
+      io << indent << "    ECR.embed(\"src/views/#{controller}/#{template}.ecr\", __str__)\n"
+      io << indent << "  end\n"
+      io << indent << "}\n"
     end
 
     private def self.emit_respond_to(node : Prism::CallNode, io : IO, controller : String, singular : String, action_name : String, indent : String)
@@ -210,15 +261,32 @@ module Ruby2CR
         "Ruby2CR::#{node.name}"
       when Prism::ArrayNode
         "[#{node.elements.map { |e| expr_to_crystal(e, controller, singular) }.join(", ")}]"
-      when Prism::HashNode
-        pairs = node.elements.map do |el|
+      when Prism::HashNode, Prism::KeywordHashNode
+        elements = case node
+                   when Prism::HashNode then node.elements
+                   when Prism::KeywordHashNode then node.elements
+                   else [] of Prism::Node
+                   end
+        pairs = elements.map do |el|
           if el.is_a?(Prism::AssocNode)
-            "#{expr_to_crystal(el.key, controller, singular)} => #{expr_to_crystal(el.value_node, controller, singular)}"
+            key = el.key
+            val = el.value_node
+            if key.is_a?(Prism::SymbolNode)
+              "#{key.value}: #{expr_to_crystal(val, controller, singular)}"
+            else
+              "#{expr_to_crystal(key, controller, singular)} => #{expr_to_crystal(val, controller, singular)}"
+            end
           else
             ""
           end
         end
-        "{#{pairs.join(", ")}}"
+        pairs.join(", ")
+      when Prism::ParenthesesNode
+        if body = node.body
+          expr_to_crystal(body, controller, singular)
+        else
+          ""
+        end
       else
         "nil /* #{node.class} */"
       end
@@ -344,6 +412,7 @@ module Ruby2CR
           next unless k.is_a?(Prism::SymbolNode) && k.value == key
           v = el.value_node
           return v.as(Prism::StringNode).value if v.is_a?(Prism::StringNode)
+          return v.as(Prism::SymbolNode).value if v.is_a?(Prism::SymbolNode)
         end
       end
       nil

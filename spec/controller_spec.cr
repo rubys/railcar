@@ -74,7 +74,7 @@ describe Ruby2CR::ControllerGenerator do
     source.should contain "def create(response, params"
     source.should contain "article.comments.build"
     source.should contain "save"
-    source.should contain "set_flash"
+    source.should contain "FLASH_STORE"
     source.should contain "302"
   end
 
@@ -88,7 +88,7 @@ describe Ruby2CR::ControllerGenerator do
 
     source.should contain "def destroy(response, id"
     source.should contain "destroy"
-    source.should contain "set_flash"
+    source.should contain "FLASH_STORE"
     source.should contain "302"
   end
 
@@ -116,7 +116,7 @@ describe Ruby2CR::ControllerGenerator do
     source.should contain "def create(response, params"
     source.should contain "Article.new"
     source.should contain "save"
-    source.should contain "set_flash"
+    source.should contain "FLASH_STORE"
   end
 
   it "generates articles#destroy with respond_to" do
