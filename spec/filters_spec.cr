@@ -7,7 +7,14 @@ require "../src/filters/redirect_to_response"
 require "../src/filters/respond_to_html"
 require "../src/filters/strong_params"
 require "../src/filters/render_to_ecr"
+require "../src/filters/strip_callbacks"
+require "../src/filters/controller_signature"
+require "../src/filters/controller_boilerplate"
+require "../src/filters/model_boilerplate"
 require "../src/generator/prism_translator"
+require "../src/generator/schema_extractor"
+require "../src/generator/model_extractor"
+require "../src/generator/controller_extractor"
 
 describe Ruby2CR::InstanceVarToLocal do
   filter = Ruby2CR::InstanceVarToLocal.new
@@ -328,5 +335,73 @@ describe "Full controller pipeline" do
     output.should_not contain "respond_to"
     output.should_not contain "format.html"
     output.should_not contain "format.json"
+  end
+end
+
+describe Ruby2CR::StripCallbacks do
+  filter = Ruby2CR::StripCallbacks.new
+
+  it "strips broadcasts_to" do
+    ast = Ruby2CR::PrismTranslator.translate("broadcasts_to :articles")
+    result = ast.transform(filter)
+    result.to_s.strip.should eq ""
+  end
+
+  it "strips after_create_commit" do
+    ast = Ruby2CR::PrismTranslator.translate("after_create_commit { do_something }")
+    result = ast.transform(filter)
+    result.to_s.strip.should eq ""
+  end
+
+  it "leaves model declarations unchanged" do
+    ast = Ruby2CR::PrismTranslator.translate("has_many :comments, dependent: :destroy")
+    result = ast.transform(filter)
+    result.to_s.should contain "has_many"
+  end
+end
+
+describe "Full model pipeline" do
+  it "transforms Article model through filters" do
+    ruby = <<-RUBY
+    class Article < ApplicationRecord
+      has_many :comments, dependent: :destroy
+      broadcasts_to ->(_article) { "articles" }, inserts_by: :prepend
+      validates :title, presence: true
+      validates :body, presence: true, length: { minimum: 10 }
+    end
+    RUBY
+
+    schema = Ruby2CR::TableSchema.new("articles", [
+      Ruby2CR::Column.new("title", "string"),
+      Ruby2CR::Column.new("body", "text"),
+      Ruby2CR::Column.new("created_at", "datetime"),
+      Ruby2CR::Column.new("updated_at", "datetime"),
+    ])
+    model_info = Ruby2CR::ModelInfo.new("Article", "ApplicationRecord", [
+      Ruby2CR::Association.new(:has_many, "comments", {"dependent" => "destroy"}),
+    ], [
+      Ruby2CR::Validation.new("title", "presence"),
+      Ruby2CR::Validation.new("body", "presence"),
+      Ruby2CR::Validation.new("body", "length", {"minimum" => "10"}),
+    ])
+
+    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    ast = ast.transform(Ruby2CR::StripCallbacks.new)
+    ast = ast.transform(Ruby2CR::ModelBoilerplate.new(schema, model_info))
+
+    output = ast.to_s
+    output.should contain "class Article < ApplicationRecord"
+    output.should contain "model"
+    output.should contain "\"articles\""
+    output.should contain "column(title, String)"
+    output.should contain "column(body, String)"
+    output.should contain "has_many"
+    output.should contain "validates"
+    output.should contain "run_validations"
+    output.should contain "validate_presence_title"
+    output.should contain "validate_length_body"
+    output.should contain "destroy"
+    output.should contain "comments.destroy_all"
+    output.should_not contain "broadcasts_to"
   end
 end
