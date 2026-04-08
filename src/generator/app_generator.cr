@@ -11,6 +11,8 @@ require "./route_extractor"
 require "./erb_converter"
 require "./controller_extractor"
 require "./controller_generator"
+require "./fixture_loader"
+require "./test_converter"
 
 module Ruby2CR
   class AppGenerator
@@ -41,6 +43,7 @@ module Ruby2CR
       generate_controllers
       generate_routes
       generate_app_entry(app_name)
+      generate_tests
 
       puts "Done! Output in #{output_dir}/"
       puts "  cd #{output_dir} && shards install && crystal build src/app.cr -o #{app_name}"
@@ -624,6 +627,89 @@ module Ruby2CR
         end.reject(&.empty?).join(", ")
       else
         seed_expr(node)
+      end
+    end
+
+    # Generate test files
+    private def generate_tests
+      spec_dir = File.join(output_dir, "spec")
+      mkdir(spec_dir)
+
+      # Generate spec_helper with fixture loading
+      fixtures_dir = File.join(rails_dir, "test/fixtures")
+      if Dir.exists?(fixtures_dir)
+        tables = FixtureLoader.load_all(fixtures_dir)
+        fixture_code = FixtureLoader.generate_fixture_helper(tables, models)
+
+        spec_helper = String.build do |io|
+          io << "require \"spec\"\n"
+          io << "require \"db\"\n"
+          io << "require \"sqlite3\"\n"
+          io << "require \"../src/models/*\"\n\n"
+
+          # DB setup function
+          io << "def setup_test_database : DB::Database\n"
+          io << "  db = DB.open(\"sqlite3::memory:\")\n"
+          schemas.each do |schema|
+            io << "  db.exec <<-SQL\n"
+            io << "    CREATE TABLE #{schema.name} (\n"
+            io << "      id INTEGER PRIMARY KEY AUTOINCREMENT"
+            schema.columns.each do |col|
+              sql_type = case col.type
+                         when "string", "text" then "TEXT"
+                         when "integer"        then "INTEGER"
+                         when "float"          then "REAL"
+                         when "boolean"        then "INTEGER"
+                         when "datetime"       then "TEXT"
+                         else                       "TEXT"
+                         end
+              not_null = " NOT NULL"
+              refs = ""
+              if col.name.ends_with?("_id")
+                ref_table = CrystalEmitter.pluralize(col.name.chomp("_id"))
+                refs = " REFERENCES #{ref_table}(id)"
+              end
+              io << ",\n      #{col.name} #{sql_type}#{not_null}#{refs}"
+            end
+            io << "\n    )\n  SQL\n"
+          end
+
+          # Set db on models
+          models.each_key do |name|
+            io << "  Ruby2CR::#{name}.db = db\n"
+          end
+          io << "  db\n"
+          io << "end\n\n"
+
+          io << fixture_code
+        end
+
+        write_file(File.join(spec_dir, "spec_helper.cr"), spec_helper)
+        puts "  spec/spec_helper.cr"
+      end
+
+      # Convert model tests
+      model_tests_dir = File.join(rails_dir, "test/models")
+      if Dir.exists?(model_tests_dir)
+        Dir.glob(File.join(model_tests_dir, "*_test.rb")).each do |path|
+          basename = File.basename(path, ".rb")
+          source = TestConverter.convert_file(path, "model")
+          next if source.empty?
+          write_file(File.join(spec_dir, "#{basename.chomp("_test")}_spec.cr"), source)
+          puts "  spec/#{basename.chomp("_test")}_spec.cr"
+        end
+      end
+
+      # Convert controller tests
+      controller_tests_dir = File.join(rails_dir, "test/controllers")
+      if Dir.exists?(controller_tests_dir)
+        Dir.glob(File.join(controller_tests_dir, "*_test.rb")).each do |path|
+          basename = File.basename(path, ".rb")
+          source = TestConverter.convert_file(path, "controller")
+          next if source.empty?
+          write_file(File.join(spec_dir, "#{basename.chomp("_test")}_spec.cr"), source)
+          puts "  spec/#{basename.chomp("_test")}_spec.cr"
+        end
       end
     end
 
