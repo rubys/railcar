@@ -8,6 +8,8 @@ require "./app_model"
 require "./crystal_emitter"
 require "./erb_converter"
 require "./controller_generator"
+require "./ddl_generator"
+require "./seed_extractor"
 require "./test_converter"
 
 module Ruby2CR
@@ -327,118 +329,9 @@ module Ruby2CR
 
     # Generate the route matching file
     private def generate_routes
-      source = generate_routes_file
+      source = RouteGenerator.generate_router(route_set)
       write_file(File.join(output_dir, "src/routes.cr"), source)
       puts "  routes.cr"
-    end
-
-    private def generate_routes_file : String
-      io = IO::Memory.new
-      io << "# Generated route matching\n\n"
-      io << "require \"./controllers/*\"\n"
-      io << "require \"./helpers/route_helpers\"\n"
-      io << "require \"./helpers/view_helpers\"\n\n"
-      io << "module Ruby2CR\n"
-      io << "  class Router\n"
-      io << "    include RouteHelpers\n"
-      io << "    include ViewHelpers\n\n"
-
-      # Controller instances
-      controllers = Set(String).new
-      route_set.routes.each { |r| controllers << r.controller }
-      controllers.each do |ctrl|
-        class_name = ctrl.split("_").map(&.capitalize).join + "Controller"
-        io << "    getter #{ctrl}_controller = #{class_name}.new\n"
-      end
-      io << "\n"
-
-      io << "    def dispatch(context : HTTP::Server::Context)\n"
-      io << "      request = context.request\n"
-      io << "      response = context.response\n"
-      io << "      path = request.path\n"
-      io << "      method = request.method\n\n"
-      io << "      # Parse form body for POST\n"
-      io << "      params = {} of String => String\n"
-      io << "      if method == \"POST\" && request.body\n"
-      io << "        body = request.body.not_nil!.gets_to_end\n"
-      io << "        HTTP::Params.parse(body) { |key, value| params[key] = value }\n"
-      io << "        if override = params[\"_method\"]?\n"
-      io << "          method = override.upcase\n"
-      io << "        end\n"
-      io << "      end\n\n"
-
-      io << "      case {method, path}\n"
-
-      # Root route
-      if route_set.root_controller
-        io << "      when {\"GET\", \"/\"}\n"
-        io << "        response.status_code = 302\n"
-        io << "        response.headers[\"Location\"] = \"/#{route_set.root_controller}\"\n"
-      end
-
-      # Static routes (no params)
-      route_set.routes.each do |route|
-        next if route.path.includes?(":")
-        io << "      when {\"#{route.method}\", \"#{route.path}\"}\n"
-        args = ["response"]
-        args << "params" if {"create"}.includes?(route.action)
-        io << "        #{route.controller}_controller.#{route.action}(#{args.join(", ")})\n"
-      end
-
-      io << "      else\n"
-      io << "        # Parameterized routes\n"
-
-      param_routes = route_set.routes.select { |r| r.path.includes?(":") }
-      param_routes = param_routes.sort_by { |r| -r.path.count("/") }
-
-      emitted_patterns = Set(String).new
-      first = true
-      param_routes.each do |route|
-        pattern = route.path.gsub(/:(\w+)/, "(\\\\d+)")
-        regex = "^#{pattern}$"
-        next if emitted_patterns.includes?(regex)
-        emitted_patterns << regex
-
-        matching = param_routes.select { |r| r.path.gsub(/:(\w+)/, "(\\\\d+)") == route.path.gsub(/:(\w+)/, "(\\\\d+)") }
-        param_names = route.path.scan(/:(\w+)/).map { |m| m[1] }
-
-        keyword = first ? "if" : "elsif"
-        first = false
-
-        io << "        #{keyword} match = path.match(%r{#{regex}})\n"
-        param_names.each_with_index do |name, i|
-          io << "          #{name} = match[#{i + 1}].to_i64\n"
-        end
-        io << "          case method\n"
-        matching.each do |r|
-          io << "          when \"#{r.method}\"\n"
-          args = ["response"]
-          args << "id" if {"show", "edit", "update", "destroy"}.includes?(r.action)
-          args << "params" if {"create", "update"}.includes?(r.action)
-          # Pass parent IDs for nested resources
-          if r.path.includes?("_id")
-            param_names.select { |n| n.ends_with?("_id") }.each do |p|
-              args << p unless args.includes?(p)
-            end
-          end
-          io << "            #{r.controller}_controller.#{r.action}(#{args.join(", ")})\n"
-        end
-        io << "          else\n"
-        io << "            response.status_code = 404\n"
-        io << "            response.print \"Not found\"\n"
-        io << "          end\n"
-      end
-
-      io << "        else\n"
-      io << "          response.status_code = 404\n"
-      io << "          response.print \"Not found\"\n"
-      io << "        end\n"
-      io << "      end\n"
-      io << "      response.headers[\"Content-Type\"] ||= \"text/html\"\n"
-      io << "    end\n"
-      io << "  end\n"
-      io << "end\n"
-      io.to_s
     end
 
     # Generate the app entry point with DB setup from schemas
@@ -463,35 +356,15 @@ module Ruby2CR
       io << "\n"
 
       # Generate DDL from schemas
-      schemas.each do |schema|
-        io << "db.exec <<-SQL\n"
-        io << "  CREATE TABLE IF NOT EXISTS #{schema.name} (\n"
-        io << "    id INTEGER PRIMARY KEY AUTOINCREMENT"
-        schema.columns.each do |col|
-          not_null = col.type == "datetime" || col.options["null"]? != "true" ? " NOT NULL" : ""
-          sql_type = case col.type
-                     when "string", "text" then "TEXT"
-                     when "integer"        then "INTEGER"
-                     when "float"          then "REAL"
-                     when "boolean"        then "INTEGER"
-                     when "datetime"       then "TEXT"
-                     else                       "TEXT"
-                     end
-          refs = ""
-          if col.name.ends_with?("_id")
-            ref_table = CrystalEmitter.pluralize(col.name.chomp("_id"))
-            refs = " REFERENCES #{ref_table}(id)"
-          end
-          io << ",\n    #{col.name} #{sql_type}#{not_null}#{refs}"
-        end
-        io << "\n  )\nSQL\n\n"
-      end
+      DDLGenerator.generate(schemas, io, if_not_exists: true)
+      io << "\n"
 
       # Seed data from db/seeds.rb if it exists
       seeds_path = File.join(rails_dir, "db/seeds.rb")
       if File.exists?(seeds_path)
         io << "# Seed data\n"
-        io << generate_seeds(seeds_path)
+        first_model = models.keys.first? || "Model"
+        io << SeedExtractor.generate(seeds_path, first_model)
         io << "\n"
       end
 
@@ -507,113 +380,6 @@ module Ruby2CR
 
       write_file(File.join(output_dir, "src/app.cr"), io.to_s)
       puts "  app.cr"
-    end
-
-    # Generate seed code from db/seeds.rb
-    private def generate_seeds(seeds_path : String) : String
-      source = File.read(seeds_path)
-      ast = Prism.parse(source)
-      io = IO::Memory.new
-
-      stmts = ast.statements
-      return "" unless stmts.is_a?(Prism::StatementsNode)
-
-      # Find the guard clause and first model name
-      first_model = models.keys.first? || "Model"
-      io << "if Ruby2CR::#{first_model}.count == 0\n"
-
-      stmts.body.each do |stmt|
-        case stmt
-        when Prism::CallNode
-          if stmt.name == "return"
-            next # Skip the guard clause
-          end
-          # puts statement at end
-          if stmt.name == "puts"
-            next
-          end
-        when Prism::IfNode, Prism::GenericNode
-          next # Skip guard clause
-        end
-
-        emit_seed_statement(stmt, io, "  ")
-      end
-
-      io << "end\n"
-      io.to_s
-    end
-
-    private def emit_seed_statement(node : Prism::Node, io : IO, indent : String)
-      case node
-      when Prism::LocalVariableWriteNode
-        var = node.name
-        value = seed_expr(node.value)
-        io << indent << var << " = " << value << "\n"
-      when Prism::CallNode
-        io << indent << seed_expr(node) << "\n"
-      end
-    end
-
-    private def seed_expr(node : Prism::Node) : String
-      case node
-      when Prism::CallNode
-        receiver = node.receiver
-        method = node.name
-        args = node.arg_nodes
-
-        recv_str = receiver ? seed_expr(receiver) : nil
-
-        case method
-        when "create!", "create"
-          kwargs = args.map { |a| seed_kwargs(a) }.join(", ")
-          if recv_str
-            "#{recv_str}.create!(#{kwargs})"
-          else
-            "create!(#{kwargs})"
-          end
-        when "comments"
-          "#{recv_str}.comments" if recv_str
-        else
-          if recv_str
-            arg_strs = args.map { |a| seed_expr(a) }
-            if arg_strs.empty?
-              "#{recv_str}.#{method}"
-            else
-              "#{recv_str}.#{method}(#{arg_strs.join(", ")})"
-            end
-          else
-            arg_strs = args.map { |a| seed_expr(a) }
-            "#{method}(#{arg_strs.join(", ")})"
-          end
-        end || "nil"
-      when Prism::ConstantReadNode
-        "Ruby2CR::#{node.name}"
-      when Prism::LocalVariableReadNode
-        node.name
-      when Prism::StringNode
-        node.value.inspect
-      when Prism::IntegerNode
-        node.value.to_s
-      when Prism::SymbolNode
-        ":#{node.value}"
-      else
-        "nil"
-      end
-    end
-
-    private def seed_kwargs(node : Prism::Node) : String
-      case node
-      when Prism::KeywordHashNode
-        node.elements.map do |el|
-          if el.is_a?(Prism::AssocNode) && el.key.is_a?(Prism::SymbolNode)
-            "#{el.key.as(Prism::SymbolNode).value}: #{seed_expr(el.value_node)}"
-          else
-            ""
-          end
-        end.reject(&.empty?).join(", ")
-      else
-        seed_expr(node)
-      end
     end
 
     # Generate test files
@@ -637,29 +403,7 @@ module Ruby2CR
           io << "def setup_test_database : DB::Database\n"
           io << "  db = DB.open(\"sqlite3::memory:\")\n"
           io << "  db.exec(\"PRAGMA foreign_keys = ON\")\n"
-          schemas.each do |schema|
-            io << "  db.exec <<-SQL\n"
-            io << "    CREATE TABLE #{schema.name} (\n"
-            io << "      id INTEGER PRIMARY KEY AUTOINCREMENT"
-            schema.columns.each do |col|
-              sql_type = case col.type
-                         when "string", "text" then "TEXT"
-                         when "integer"        then "INTEGER"
-                         when "float"          then "REAL"
-                         when "boolean"        then "INTEGER"
-                         when "datetime"       then "TEXT"
-                         else                       "TEXT"
-                         end
-              not_null = " NOT NULL"
-              refs = ""
-              if col.name.ends_with?("_id")
-                ref_table = CrystalEmitter.pluralize(col.name.chomp("_id"))
-                refs = " REFERENCES #{ref_table}(id)"
-              end
-              io << ",\n      #{col.name} #{sql_type}#{not_null}#{refs}"
-            end
-            io << "\n    )\n  SQL\n"
-          end
+          DDLGenerator.generate(schemas, io, indent: "  ")
 
           # Set db on models
           models.each_key do |name|

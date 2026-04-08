@@ -225,25 +225,113 @@ module Ruby2CR
       io.to_s
     end
 
-    def self.generate_route_matching(route_set : RouteSet) : String
+    # Generate a complete router file with dispatch method
+    def self.generate_router(route_set : RouteSet) : String
       io = IO::Memory.new
-      io << "# Generated route matching from config/routes.rb\n\n"
+      io << "# Generated route matching\n\n"
+      io << "require \"./controllers/*\"\n"
+      io << "require \"./helpers/route_helpers\"\n"
+      io << "require \"./helpers/view_helpers\"\n\n"
+      io << "module Ruby2CR\n"
+      io << "  class Router\n"
+      io << "    include RouteHelpers\n"
+      io << "    include ViewHelpers\n\n"
 
-      # Root redirect
+      # Controller instances
+      controllers = Set(String).new
+      route_set.routes.each { |r| controllers << r.controller }
+      controllers.each do |ctrl|
+        class_name = ctrl.split("_").map(&.capitalize).join + "Controller"
+        io << "    getter #{ctrl}_controller = #{class_name}.new\n"
+      end
+      io << "\n"
+
+      io << "    def dispatch(context : HTTP::Server::Context)\n"
+      io << "      request = context.request\n"
+      io << "      response = context.response\n"
+      io << "      path = request.path\n"
+      io << "      method = request.method\n\n"
+      io << "      # Parse form body for POST\n"
+      io << "      params = {} of String => String\n"
+      io << "      if method == \"POST\" && request.body\n"
+      io << "        body = request.body.not_nil!.gets_to_end\n"
+      io << "        HTTP::Params.parse(body) { |key, value| params[key] = value }\n"
+      io << "        if override = params[\"_method\"]?\n"
+      io << "          method = override.upcase\n"
+      io << "        end\n"
+      io << "      end\n\n"
+
+      io << "      case {method, path}\n"
+
+      # Root route
       if route_set.root_controller
-        io << "when {\"GET\", \"/\"}\n"
-        io << "  response.status_code = 302\n"
-        io << "  response.headers[\"Location\"] = \"/#{route_set.root_controller}\"\n\n"
+        io << "      when {\"GET\", \"/\"}\n"
+        io << "        response.status_code = 302\n"
+        io << "        response.headers[\"Location\"] = \"/#{route_set.root_controller}\"\n"
       end
 
-      # Static routes first (no params)
+      # Static routes (no params)
       route_set.routes.each do |route|
         next if route.path.includes?(":")
-        io << "when {\"#{route.method}\", \"#{route.path}\"}\n"
-        io << "  #{route.controller}_#{route.action}(response)\n\n"
+        io << "      when {\"#{route.method}\", \"#{route.path}\"}\n"
+        args = ["response"]
+        args << "params" if {"create"}.includes?(route.action)
+        io << "        #{route.controller}_controller.#{route.action}(#{args.join(", ")})\n"
       end
 
-      # Parameterized routes need regex matching (handled in else branch)
+      io << "      else\n"
+      io << "        # Parameterized routes\n"
+
+      param_routes = route_set.routes.select { |r| r.path.includes?(":") }
+      param_routes = param_routes.sort_by { |r| -r.path.count("/") }
+
+      emitted_patterns = Set(String).new
+      first = true
+      param_routes.each do |route|
+        pattern = route.path.gsub(/:(\w+)/, "(\\\\d+)")
+        regex = "^#{pattern}$"
+        next if emitted_patterns.includes?(regex)
+        emitted_patterns << regex
+
+        matching = param_routes.select { |r| r.path.gsub(/:(\w+)/, "(\\\\d+)") == route.path.gsub(/:(\w+)/, "(\\\\d+)") }
+        param_names = route.path.scan(/:(\w+)/).map { |m| m[1] }
+
+        keyword = first ? "if" : "elsif"
+        first = false
+
+        io << "        #{keyword} match = path.match(%r{#{regex}})\n"
+        param_names.each_with_index do |name, i|
+          io << "          #{name} = match[#{i + 1}].to_i64\n"
+        end
+        io << "          case method\n"
+        matching.each do |r|
+          io << "          when \"#{r.method}\"\n"
+          args = ["response"]
+          args << "id" if {"show", "edit", "update", "destroy"}.includes?(r.action)
+          args << "params" if {"create", "update"}.includes?(r.action)
+          # Pass parent IDs for nested resources
+          if r.path.includes?("_id")
+            param_names.select { |n| n.ends_with?("_id") }.each do |p|
+              args << p unless args.includes?(p)
+            end
+          end
+          io << "            #{r.controller}_controller.#{r.action}(#{args.join(", ")})\n"
+        end
+        io << "          else\n"
+        io << "            response.status_code = 404\n"
+        io << "            response.print \"Not found\"\n"
+        io << "          end\n"
+      end
+
+      io << "        else\n"
+      io << "          response.status_code = 404\n"
+      io << "          response.print \"Not found\"\n"
+      io << "        end\n"
+      io << "      end\n"
+      io << "      response.headers[\"Content-Type\"] ||= \"text/html\"\n"
+      io << "    end\n"
+      io << "  end\n"
+      io << "end\n"
       io.to_s
     end
   end
