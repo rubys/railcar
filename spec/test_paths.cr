@@ -1,1 +1,1 @@
-BLOG_DIR = File.expand_path("../../demo/blog", __DIR__)
+BLOG_DIR = File.expand_path("../build/demo/blog", __DIR__)

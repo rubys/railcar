@@ -4,7 +4,7 @@
 # This is the same approach used by Prism's Ruby, JavaScript, Java,
 # and Rust bindings.
 
-@[Link(ldflags: "-L/opt/homebrew/lib/ruby/gems/4.0.0/gems/prism-1.9.0/build -lprism")]
+@[Link(ldflags: "-L#{__DIR__}/../../build/lib -lprism")]
 lib LibPrism
   struct PmBuffer
     length : LibC::SizeT

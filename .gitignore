@@ -2,5 +2,6 @@
 /bin/
 /.shards/
 *.dwarf
+/build/
 blog_server
 blog.db
