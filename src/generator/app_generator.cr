@@ -17,6 +17,8 @@ require "../filters/redirect_to_response"
 require "../filters/render_to_ecr"
 require "../filters/model_namespace"
 require "../filters/controller_signature"
+require "../filters/controller_boilerplate"
+require "./source_parser"
 require "./ddl_generator"
 require "./seed_extractor"
 require "./test_converter"
@@ -178,13 +180,13 @@ module Ruby2CR
       singular = CrystalEmitter.singularize(controller_name)
       nested_parent = find_nested_parent(controller_name)
       model_names = models.keys.to_a
+      views_dir = File.join(rails_dir, "app/views")
 
-      # Read the original Ruby source and translate to Crystal AST
-      ruby_path = File.join(rails_dir, "app/controllers/#{controller_name}_controller.rb")
-      ruby_source = File.read(ruby_path)
-      ast = PrismTranslator.translate(ruby_source)
+      # Parse source (works for both .rb and .cr)
+      source_path = File.join(rails_dir, "app/controllers/#{controller_name}_controller.rb")
+      ast = SourceParser.parse(source_path)
 
-      # Apply filter chain — order matters
+      # Apply filter chain — Crystal AST in, Crystal AST out
       ast = ast.transform(InstanceVarToLocal.new)
       ast = ast.transform(ParamsExpect.new)
       ast = ast.transform(RespondToHTML.new)
@@ -192,61 +194,25 @@ module Ruby2CR
       ast = ast.transform(RedirectToResponse.new)
       ast = ast.transform(RenderToECR.new(controller_name))
       ast = ast.transform(ControllerSignature.new(controller_name, nested_parent, info.before_actions, model_names))
+      ast = ast.transform(ControllerBoilerplate.new(controller_name, views_dir, nested_parent))
       ast = ast.transform(ModelNamespace.new(model_names))
 
-      # Serialize the filtered class body
-      filtered_source = ast.to_s
-
-      # Build the final file
-      io = IO::Memory.new
-      io << "require \"../models/#{singular}\"\n"
+      # Build requires + module wrapper
+      requires = [
+        Crystal::Require.new("../models/#{singular}"),
+      ] of Crystal::ASTNode
       if nested_parent
-        io << "require \"../models/#{nested_parent}\"\n"
+        requires << Crystal::Require.new("../models/#{nested_parent}")
       end
-      io << "require \"../helpers/route_helpers\"\n"
-      io << "require \"../helpers/view_helpers\"\n\n"
+      requires << Crystal::Require.new("../helpers/route_helpers")
+      requires << Crystal::Require.new("../helpers/view_helpers")
 
-      # Wrap the filtered output in Ruby2CR module with includes and helpers
-      io << "module Ruby2CR\n"
+      # Wrap in Ruby2CR module
+      mod = Crystal::ModuleDef.new(Crystal::Path.new("Ruby2CR"), body: ast)
+      nodes = requires + [mod] of Crystal::ASTNode
 
-      # Extract class body from the filtered output, inject our helpers
-      lines = filtered_source.lines
-      lines.each_with_index do |line, i|
-        stripped = line.strip
-        if stripped.starts_with?("class ") && stripped.includes?("Controller")
-          io << "  " << stripped << "\n"
-          io << "    include RouteHelpers\n"
-          io << "    include ViewHelpers\n\n"
-          # Extract model params helper
-          io << "    private def extract_model_params(params : Hash(String, String), model : String) : Hash(String, DB::Any)\n"
-          io << "      hash = {} of String => DB::Any\n"
-          io << "      prefix = \"\#" << "{model}[\"\n"
-          io << "      params.each do |k, v|\n"
-          io << "        if k.starts_with?(prefix) && k.ends_with?(\"]\")\n"
-          io << "          field = k[prefix.size..-2]\n"
-          io << "          hash[field] = v.as(DB::Any)\n"
-          io << "        end\n"
-          io << "      end\n"
-          io << "      hash\n"
-          io << "    end\n\n"
-          # Layout helper
-          io << "    private def layout(title : String, &block) : String\n"
-          io << "      content = yield\n"
-          io << "      String.build do |__str__|\n"
-          io << "        ECR.embed(\"src/views/layouts/application.ecr\", __str__)\n"
-          io << "      end\n"
-          io << "    end\n\n"
-          # Partial helpers
-          io << generate_partial_helpers(controller_name)
-        elsif stripped.empty? && i > 0 && i < lines.size - 1
-          io << "\n"
-        else
-          io << "  " << line << "\n"
-        end
-      end
-
-      io << "end\n"
-      io.to_s
+      # Serialize once
+      Crystal::Expressions.new(nodes).to_s + "\n"
     end
 
     # Find nested parent from route structure
@@ -260,59 +226,6 @@ module Ruby2CR
         end
       end
       nil
-    end
-
-    # Generate partial helpers by scanning view files
-    private def generate_partial_helpers(controller_name : String) : String
-      io = IO::Memory.new
-
-      # Scan for partial templates in this controller's views
-      views_dir = File.join(rails_dir, "app/views/#{controller_name}")
-      if Dir.exists?(views_dir)
-        Dir.glob(File.join(views_dir, "_*.html.erb")).each do |path|
-          partial_name = File.basename(path, ".html.erb").lchop("_")
-          singular = CrystalEmitter.singularize(controller_name)
-          model_class = CrystalEmitter.classify(singular)
-
-          # Determine params: the partial variable is the singular model name
-          io << "    private def render_#{partial_name}_partial(#{singular} : #{model_class}) : String\n"
-          io << "      String.build do |__str__|\n"
-          io << "        ECR.embed(\"src/views/#{controller_name}/_#{partial_name}.ecr\", __str__)\n"
-          io << "      end\n"
-          io << "    end\n\n"
-        end
-      end
-
-      # Also scan other controllers' views for partials this controller might render
-      views_root = File.join(rails_dir, "app/views")
-      if Dir.exists?(views_root)
-        Dir.each_child(views_root) do |other_dir|
-          next if other_dir == controller_name || other_dir == "layouts"
-          other_path = File.join(views_root, other_dir)
-          next unless File.directory?(other_path)
-
-          Dir.glob(File.join(other_path, "_*.html.erb")).each do |path|
-            partial_name = File.basename(path, ".html.erb").lchop("_")
-            other_singular = CrystalEmitter.singularize(other_dir)
-            other_model = CrystalEmitter.classify(other_singular)
-
-            # Check if this controller's views reference this partial
-            # For now, generate it if this is a nested resource relationship
-            parent = find_nested_parent(other_dir)
-            if parent && CrystalEmitter.pluralize(parent) == controller_name
-              singular = CrystalEmitter.singularize(controller_name)
-              model_class = CrystalEmitter.classify(singular)
-              io << "    private def render_#{partial_name}_partial(#{singular} : #{model_class}, #{other_singular} : #{other_model}) : String\n"
-              io << "      String.build do |__str__|\n"
-              io << "        ECR.embed(\"src/views/#{other_dir}/_#{partial_name}.ecr\", __str__)\n"
-              io << "      end\n"
-              io << "    end\n\n"
-            end
-          end
-        end
-      end
-
-      io.to_s
     end
 
     # Generate the route matching file
