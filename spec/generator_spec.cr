@@ -117,15 +117,15 @@ describe Ruby2CR::CrystalEmitter do
 
     # Should contain key elements
     source.should contain "class Article < ApplicationRecord"
-    source.should contain "model \"articles\""
-    source.should contain "column title, String"
-    source.should contain "column body, String"
-    source.should contain "column created_at, Time"
-    source.should contain "has_many comments, Comment"
+    source.should contain "model(\"articles\")"
+    source.should contain "column(title, String)"
+    source.should contain "column(body, String)"
+    source.should contain "column(created_at, Time)"
+    source.should contain "has_many(comments, Comment"
     source.should contain "dependent: :destroy"
-    source.should contain "validates title, presence: true"
-    source.should contain "validates body, presence: true"
-    source.should contain "validates body, length: {minimum: 10}"
+    source.should contain "validates(title, presence: true)"
+    source.should contain "validates(body, presence: true)"
+    source.should contain "validates(body, length: {minimum: 10})"
     source.should contain "validate_presence_title"
     source.should contain "validate_length_body"
     source.should contain "comments.destroy_all"
@@ -142,12 +142,12 @@ describe Ruby2CR::CrystalEmitter do
     source = Ruby2CR::CrystalEmitter.generate(schema, model)
 
     source.should contain "class Comment < ApplicationRecord"
-    source.should contain "model \"comments\""
-    source.should contain "column article_id, Int64"
-    source.should contain "column commenter, String"
-    source.should contain "belongs_to article, Article"
-    source.should contain "validates commenter, presence: true"
-    source.should contain "validates body, presence: true"
+    source.should contain "model(\"comments\")"
+    source.should contain "column(article_id, Int64)"
+    source.should contain "column(commenter, String)"
+    source.should contain "belongs_to(article, Article"
+    source.should contain "validates(commenter, presence: true)"
+    source.should contain "validates(body, presence: true)"
   end
 
   it "generates all models from blog demo" do
