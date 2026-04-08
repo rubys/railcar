@@ -163,10 +163,12 @@ module Ruby2CR
         views_dst = File.join(output_dir, "src/views/#{controller_dir}")
         mkdir(views_dst)
 
-        Dir.glob(File.join(full_path, "*.html.erb")).each do |erb_path|
-          basename = File.basename(erb_path, ".html.erb")
+        # Process both .html.erb and .html.ecr templates
+        Dir.glob(File.join(full_path, "*.html.{erb,ecr}")).each do |template_path|
+          ext = File.extname(template_path, 2)  # ".html.erb" or ".html.ecr"
+          basename = File.basename(template_path).chomp(ext)
           ecr_name = "#{basename}.ecr"
-          ecr_source = ERBConverter.convert_file(erb_path, basename, controller_dir)
+          ecr_source = ERBConverter.convert_file(template_path, basename, controller_dir)
           write_file(File.join(views_dst, ecr_name), ecr_source)
           puts "  views/#{controller_dir}/#{ecr_name}"
         end
