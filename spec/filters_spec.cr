@@ -405,3 +405,172 @@ describe "Full model pipeline" do
     output.should_not contain "broadcasts_to"
   end
 end
+
+# --- Isolated filter tests for boilerplate filters ---
+
+describe Ruby2CR::ControllerSignature do
+  it "adds response parameter to actions" do
+    ast = Ruby2CR::PrismTranslator.translate("def index\nend")
+    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, [] of Ruby2CR::BeforeAction))
+    output = result.to_s
+    output.should contain "response"
+    output.should contain "HTTP::Server::Response"
+  end
+
+  it "adds id parameter to show/edit/update/destroy" do
+    ast = Ruby2CR::PrismTranslator.translate("def show\nend")
+    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, [] of Ruby2CR::BeforeAction))
+    output = result.to_s
+    output.should contain "id : Int64"
+  end
+
+  it "adds params parameter to create/update" do
+    ast = Ruby2CR::PrismTranslator.translate("def create\nend")
+    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, [] of Ruby2CR::BeforeAction))
+    output = result.to_s
+    output.should contain "params : Hash(String, String)"
+  end
+
+  it "adds flash consumption for render actions" do
+    ast = Ruby2CR::PrismTranslator.translate("def index\nend")
+    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, [] of Ruby2CR::BeforeAction))
+    output = result.to_s
+    output.should contain "FLASH_STORE"
+    output.should contain "notice"
+  end
+
+  it "inlines before_action model loading" do
+    before = [Ruby2CR::BeforeAction.new("set_article", ["show", "edit", "update", "destroy"])]
+    ast = Ruby2CR::PrismTranslator.translate("def show\nend")
+    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, before))
+    output = result.to_s
+    output.should contain "Article.find(id)"
+  end
+
+  it "strips set_ and _params methods" do
+    ruby = "def set_article\nend\ndef article_params\nend\ndef index\nend"
+    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, [] of Ruby2CR::BeforeAction))
+    output = result.to_s
+    output.should_not contain "set_article"
+    output.should_not contain "article_params"
+    output.should contain "index"
+  end
+
+  it "adds view rendering for display actions" do
+    ast = Ruby2CR::PrismTranslator.translate("def index\nend")
+    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, [] of Ruby2CR::BeforeAction))
+    output = result.to_s
+    output.should contain "ECR.embed"
+    output.should contain "articles/index.ecr"
+  end
+
+  it "adds nested parent id parameter" do
+    ast = Ruby2CR::PrismTranslator.translate("def create\nend")
+    result = ast.transform(Ruby2CR::ControllerSignature.new("comments", "article", [] of Ruby2CR::BeforeAction))
+    output = result.to_s
+    output.should contain "article_id"
+  end
+end
+
+describe Ruby2CR::ControllerBoilerplate do
+  it "injects include statements" do
+    ruby = "class ArticlesController\ndef index\nend\nend"
+    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    result = ast.transform(Ruby2CR::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
+    output = result.to_s
+    output.should contain "include RouteHelpers"
+    output.should contain "include ViewHelpers"
+  end
+
+  it "injects extract_model_params helper" do
+    ruby = "class ArticlesController\ndef index\nend\nend"
+    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    result = ast.transform(Ruby2CR::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
+    output = result.to_s
+    output.should contain "extract_model_params"
+    output.should contain "Hash(String, DB::Any)"
+  end
+
+  it "injects layout helper" do
+    ruby = "class ArticlesController\ndef index\nend\nend"
+    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    result = ast.transform(Ruby2CR::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
+    output = result.to_s
+    output.should contain "def layout(title : String, &)"
+    output.should contain "yield"
+    output.should contain "ECR.embed"
+    output.should contain "application.ecr"
+  end
+
+  it "preserves existing class body" do
+    ruby = "class ArticlesController\ndef index\nend\nend"
+    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    result = ast.transform(Ruby2CR::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
+    output = result.to_s
+    output.should contain "def index"
+  end
+
+  it "skips non-controller classes" do
+    ruby = "class Article\nend"
+    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    result = ast.transform(Ruby2CR::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
+    output = result.to_s
+    output.should_not contain "RouteHelpers"
+  end
+end
+
+describe Ruby2CR::ModelBoilerplate do
+  schema = Ruby2CR::TableSchema.new("articles", [
+    Ruby2CR::Column.new("title", "string"),
+    Ruby2CR::Column.new("body", "text"),
+  ])
+  model = Ruby2CR::ModelInfo.new("Article", "ApplicationRecord",
+    [] of Ruby2CR::Association,
+    [Ruby2CR::Validation.new("title", "presence")])
+
+  it "wraps body in model block with columns" do
+    ruby = "class Article < ApplicationRecord\nvalidates :title, presence: true\nend"
+    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    result = ast.transform(Ruby2CR::ModelBoilerplate.new(schema, model))
+    output = result.to_s
+    output.should contain "model(\"articles\")"
+    output.should contain "column(title, String)"
+    output.should contain "column(body, String)"
+  end
+
+  it "generates run_validations for presence validations" do
+    ruby = "class Article < ApplicationRecord\nvalidates :title, presence: true\nend"
+    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    result = ast.transform(Ruby2CR::ModelBoilerplate.new(schema, model))
+    output = result.to_s
+    output.should contain "run_validations"
+    output.should contain "validate_presence_title"
+  end
+
+  it "generates destroy override for dependent associations" do
+    schema_with_fk = Ruby2CR::TableSchema.new("articles", [Ruby2CR::Column.new("title", "string")])
+    model_with_dep = Ruby2CR::ModelInfo.new("Article", "ApplicationRecord",
+      [Ruby2CR::Association.new(:has_many, "comments", {"dependent" => "destroy"})],
+      [] of Ruby2CR::Validation)
+
+    ruby = "class Article < ApplicationRecord\nhas_many :comments, dependent: :destroy\nend"
+    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    result = ast.transform(Ruby2CR::ModelBoilerplate.new(schema_with_fk, model_with_dep))
+    output = result.to_s
+    output.should contain "def destroy"
+    output.should contain "comments.destroy_all"
+    output.should contain "super"
+  end
+
+  it "skips run_validations when no validations" do
+    empty_model = Ruby2CR::ModelInfo.new("Article", "ApplicationRecord",
+      [] of Ruby2CR::Association, [] of Ruby2CR::Validation)
+
+    ruby = "class Article < ApplicationRecord\nend"
+    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    result = ast.transform(Ruby2CR::ModelBoilerplate.new(schema, empty_model))
+    output = result.to_s
+    output.should_not contain "run_validations"
+  end
+end
