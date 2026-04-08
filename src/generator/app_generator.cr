@@ -15,6 +15,8 @@ require "../filters/respond_to_html"
 require "../filters/strong_params"
 require "../filters/redirect_to_response"
 require "../filters/render_to_ecr"
+require "../filters/strip_callbacks"
+require "../filters/model_boilerplate"
 require "../filters/model_namespace"
 require "../filters/controller_signature"
 require "../filters/controller_boilerplate"
@@ -94,17 +96,35 @@ module Ruby2CR
       schema_map = {} of String => TableSchema
       schemas.each { |s| schema_map[s.name] = s }
 
-      models.each do |name, model|
-        table_name = CrystalEmitter.pluralize(
-          name.gsub(/([A-Z])/) { |m| "_#{m.downcase}" }.lstrip('_')
-        )
+      model_files = Dir.glob(File.join(rails_dir, "app/models/*.rb")).sort
+      model_files.each do |path|
+        basename = File.basename(path, ".rb")
+        next if basename == "application_record"
+
+        model = models[Inflector.classify(basename)]?
+        next unless model
+
+        table_name = Inflector.pluralize(basename)
         schema = schema_map[table_name]?
         next unless schema
 
-        source = CrystalEmitter.generate(schema, model)
-        filename = table_name.gsub(/s$/, "") + ".cr"
-        write_file(File.join(models_dir, filename), source)
-        puts "  models/#{filename}"
+        # Parse → filter → serialize
+        ast = SourceParser.parse(path)
+        ast = ast.transform(StripCallbacks.new)
+        ast = ast.transform(ModelBoilerplate.new(schema, model))
+
+        # Wrap in requires + module
+        requires = [
+          Crystal::Require.new("../runtime/application_record"),
+          Crystal::Require.new("../runtime/relation"),
+          Crystal::Require.new("../runtime/collection_proxy"),
+        ] of Crystal::ASTNode
+        mod = Crystal::ModuleDef.new(Crystal::Path.new("Ruby2CR"), body: ast)
+        nodes = requires + [mod] of Crystal::ASTNode
+        source = Crystal::Expressions.new(nodes).to_s + "\n"
+
+        write_file(File.join(models_dir, "#{basename}.cr"), source)
+        puts "  models/#{basename}.cr"
       end
     end
 
