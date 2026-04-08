@@ -1,9 +1,8 @@
 require "spec"
+require "./test_paths"
 require "../src/generator/schema_extractor"
 require "../src/generator/model_extractor"
 require "../src/generator/crystal_emitter"
-
-BLOG_DIR = File.expand_path("../../demo/blog", __DIR__)
 
 describe Ruby2CR::SchemaExtractor do
   it "extracts articles table from migration" do
