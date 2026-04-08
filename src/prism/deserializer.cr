@@ -297,6 +297,8 @@ module Prism
           @pos += 8
         when :uint8
           read_byte
+        when :raw_uint32
+          @pos += 4
         when :uint32
           read_varuint
         end
@@ -379,7 +381,8 @@ module Prism
 
     private def read_constant : String
       id = read_varuint
-      @constant_pool[id - 1]
+      return "" if id == 0
+      @constant_pool[id.to_i32 - 1]
     end
 
     private def read_optional_constant_id : UInt32?
@@ -490,7 +493,7 @@ module Prism
       42_u8 => [:constant],                                                                                          # ConstantReadNode
       43_u8 => [:constant],                                                                                          # ConstantTargetNode
       44_u8 => [:constant, :location, :node, :location],                                                             # ConstantWriteNode
-      45_u8 => [:constant, :location, :optional_node, :optional_node, :optional_node, :constant_array, :location, :optional_location, :optional_location, :optional_location, :optional_location, :optional_location], # DefNode
+      45_u8 => [:raw_uint32, :constant, :location, :optional_node, :optional_node, :optional_node, :constant_array, :location, :optional_location, :optional_location, :optional_location, :optional_location, :optional_location], # DefNode (has raw uint32 prefix before fields)
       46_u8 => [:optional_location, :node, :optional_location, :location],                                           # DefinedNode
       47_u8 => [:location, :optional_node, :optional_location],                                                      # ElseNode
       48_u8 => [:location, :optional_node, :location],                                                               # EmbeddedStatementsNode
