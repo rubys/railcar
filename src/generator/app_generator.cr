@@ -8,6 +8,15 @@ require "./app_model"
 require "./crystal_emitter"
 require "./erb_converter"
 require "./controller_generator"
+require "./prism_translator"
+require "../filters/instance_var_to_local"
+require "../filters/params_expect"
+require "../filters/respond_to_html"
+require "../filters/strong_params"
+require "../filters/redirect_to_response"
+require "../filters/render_to_ecr"
+require "../filters/model_namespace"
+require "../filters/controller_signature"
 require "./ddl_generator"
 require "./seed_extractor"
 require "./test_converter"
@@ -167,56 +176,75 @@ module Ruby2CR
 
     private def generate_controller_file(info : ControllerInfo, controller_name : String) : String
       singular = CrystalEmitter.singularize(controller_name)
-      model_class = CrystalEmitter.classify(singular)
-
-      # Determine nested resource parent from routes
       nested_parent = find_nested_parent(controller_name)
+      model_names = models.keys.to_a
 
+      # Read the original Ruby source and translate to Crystal AST
+      ruby_path = File.join(rails_dir, "app/controllers/#{controller_name}_controller.rb")
+      ruby_source = File.read(ruby_path)
+      ast = PrismTranslator.translate(ruby_source)
+
+      # Apply filter chain — order matters
+      ast = ast.transform(InstanceVarToLocal.new)
+      ast = ast.transform(ParamsExpect.new)
+      ast = ast.transform(RespondToHTML.new)
+      ast = ast.transform(StrongParams.new)
+      ast = ast.transform(RedirectToResponse.new)
+      ast = ast.transform(RenderToECR.new(controller_name))
+      ast = ast.transform(ControllerSignature.new(controller_name, nested_parent, info.before_actions, model_names))
+      ast = ast.transform(ModelNamespace.new(model_names))
+
+      # Serialize the filtered class body
+      filtered_source = ast.to_s
+
+      # Build the final file
       io = IO::Memory.new
-
-      # Requires — derive from associations and route structure
       io << "require \"../models/#{singular}\"\n"
       if nested_parent
         io << "require \"../models/#{nested_parent}\"\n"
       end
       io << "require \"../helpers/route_helpers\"\n"
       io << "require \"../helpers/view_helpers\"\n\n"
+
+      # Wrap the filtered output in Ruby2CR module with includes and helpers
       io << "module Ruby2CR\n"
-      io << "  class #{info.name}\n"
-      io << "    include RouteHelpers\n"
-      io << "    include ViewHelpers\n\n"
 
-      # Extract model params helper
-      io << "    private def extract_model_params(params : Hash(String, String), model : String) : Hash(String, DB::Any)\n"
-      io << "      hash = {} of String => DB::Any\n"
-      io << "      prefix = \"\#" << "{model}[\"\n"
-      io << "      params.each do |k, v|\n"
-      io << "        if k.starts_with?(prefix) && k.ends_with?(\"]\")\n"
-      io << "          field = k[prefix.size..-2]\n"
-      io << "          hash[field] = v.as(DB::Any)\n"
-      io << "        end\n"
-      io << "      end\n"
-      io << "      hash\n"
-      io << "    end\n\n"
-
-      # Layout helper
-      io << "    private def layout(title : String, &block) : String\n"
-      io << "      content = yield\n"
-      io << "      String.build do |__str__|\n"
-      io << "        ECR.embed(\"src/views/layouts/application.ecr\", __str__)\n"
-      io << "      end\n"
-      io << "    end\n\n"
-
-      # Partial helpers — scan for partials in this controller's views
-      io << generate_partial_helpers(controller_name)
-
-      # Public actions
-      info.actions.reject(&.is_private).each do |action|
-        io << generate_action_with_wiring(action, info, controller_name, singular, model_class, nested_parent)
-        io << "\n"
+      # Extract class body from the filtered output, inject our helpers
+      lines = filtered_source.lines
+      lines.each_with_index do |line, i|
+        stripped = line.strip
+        if stripped.starts_with?("class ") && stripped.includes?("Controller")
+          io << "  " << stripped << "\n"
+          io << "    include RouteHelpers\n"
+          io << "    include ViewHelpers\n\n"
+          # Extract model params helper
+          io << "    private def extract_model_params(params : Hash(String, String), model : String) : Hash(String, DB::Any)\n"
+          io << "      hash = {} of String => DB::Any\n"
+          io << "      prefix = \"\#" << "{model}[\"\n"
+          io << "      params.each do |k, v|\n"
+          io << "        if k.starts_with?(prefix) && k.ends_with?(\"]\")\n"
+          io << "          field = k[prefix.size..-2]\n"
+          io << "          hash[field] = v.as(DB::Any)\n"
+          io << "        end\n"
+          io << "      end\n"
+          io << "      hash\n"
+          io << "    end\n\n"
+          # Layout helper
+          io << "    private def layout(title : String, &block) : String\n"
+          io << "      content = yield\n"
+          io << "      String.build do |__str__|\n"
+          io << "        ECR.embed(\"src/views/layouts/application.ecr\", __str__)\n"
+          io << "      end\n"
+          io << "    end\n\n"
+          # Partial helpers
+          io << generate_partial_helpers(controller_name)
+        elsif stripped.empty? && i > 0 && i < lines.size - 1
+          io << "\n"
+        else
+          io << "  " << line << "\n"
+        end
       end
 
-      io << "  end\n"
       io << "end\n"
       io.to_s
     end
@@ -284,46 +312,6 @@ module Ruby2CR
         end
       end
 
-      io.to_s
-    end
-
-    # Generate a controller action with full wiring (before_action, view rendering)
-    private def generate_action_with_wiring(action : ControllerAction, info : ControllerInfo, controller_name : String, singular : String, model_class : String, nested_parent : String?) : String
-      io = IO::Memory.new
-      name = action.name
-      needs_id = {"show", "edit", "update", "destroy"}.includes?(name)
-      needs_params = {"create", "update"}.includes?(name)
-
-      needs_before = info.before_actions.any? do |ba|
-        ba.only.nil? || ba.only.not_nil!.includes?(name)
-      end
-
-      # Method signature
-      io << "    def #{name}(response : HTTP::Server::Response"
-      io << ", id : Int64" if needs_id
-      io << ", params : Hash(String, String)" if needs_params
-      if nested_parent
-        io << ", #{nested_parent}_id : Int64" if needs_params || needs_id
-      end
-      io << ")\n"
-
-      indent = "      "
-
-      # Before action: set parent and/or model
-      if needs_before
-        if nested_parent
-          parent_model = CrystalEmitter.classify(nested_parent)
-          io << indent << "#{nested_parent} = #{parent_model}.find(#{nested_parent}_id)\n"
-        end
-        if needs_id && !nested_parent
-          io << indent << "#{singular} = #{model_class}.find(id)\n"
-        end
-      end
-
-      # Use the AST-based generator for the action body
-      io << ControllerGenerator.generate_action(action, controller_name, render_view: true).lines[1..-2].join("\n") << "\n"
-
-      io << "    end\n"
       io.to_s
     end
 
