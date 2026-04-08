@@ -1,0 +1,14 @@
+<div id="<%= dom_id(article) %>" style="border: 1px solid #e5e7eb; border-radius: 0.25rem; padding: 1rem; margin: 1rem 0;">
+  <h2>
+    <a href="<%= article_path(article) %>" style="color: #2563eb;"><%= article.title %></a>
+    <span style="color: #6b7280; font-size: 0.875rem; font-weight: normal; margin-left: 0.5rem;">
+      (<%= pluralize(article.comments.size, "comment") %>)
+    </span>
+  </h2>
+  <p style="color: #374151; margin-top: 0.5rem;"><%= truncate(article.body, length: 100) %></p>
+  <div style="margin-top: 0.5rem;">
+    <a href="<%= article_path(article) %>" class="btn btn-default">Show</a>
+    <a href="<%= edit_article_path(article) %>" class="btn btn-default">Edit</a>
+    <%= button_to("Destroy", article_path(article), method: "delete", class: "btn btn-danger", data_turbo_confirm: "Are you sure?") %>
+  </div>
+</div>

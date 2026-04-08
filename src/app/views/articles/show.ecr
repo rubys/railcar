@@ -1,0 +1,31 @@
+<h1><%= article.title %></h1>
+
+<div style="margin: 1rem 0;">
+  <p><%= article.body %></p>
+</div>
+
+<a href="<%= edit_article_path(article) %>" class="btn btn-default">Edit this article</a>
+<a href="<%= articles_path %>" class="btn btn-default">Back to articles</a>
+<%= button_to("Destroy this article", article_path(article), method: "delete", class: "btn btn-danger", data_turbo_confirm: "Are you sure?") %>
+
+<hr style="margin: 2rem 0;">
+
+<h2>Comments</h2>
+
+<div id="comments">
+  <% article.comments.each do |comment| %>
+    <%= render_comment_partial(article, comment) %>
+  <% end %>
+</div>
+
+<h3 style="margin-top: 1.5rem;">Add a Comment</h3>
+
+<form action="<%= article_comments_path(article) %>" method="post" style="margin-top: 1rem;">
+  <%= label_tag("comment[commenter]", "Commenter") %>
+  <%= text_field_tag("comment[commenter]", class: "block") %>
+  <%= label_tag("comment[body]", "Body") %>
+  <%= text_area_tag("comment[body]", rows: 3, class: "block") %>
+  <div style="margin-top: 1rem;">
+    <%= submit_tag("Add Comment", class: "btn btn-primary") %>
+  </div>
+</form>

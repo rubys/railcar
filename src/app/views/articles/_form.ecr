@@ -1,0 +1,31 @@
+<% action = article.persisted? ? article_path(article) : articles_path %>
+<% method = article.persisted? ? "patch" : "post" %>
+
+<% unless article.errors.empty? %>
+  <div style="color: #dc2626; margin-bottom: 1rem;">
+    <h2><%= article.errors.size %> error(s) prohibited this article from being saved:</h2>
+    <ul>
+      <% article.errors.each do |field, messages| %>
+        <% messages.each do |msg| %>
+          <li><%= field %> <%= msg %></li>
+        <% end %>
+      <% end %>
+    </ul>
+  </div>
+<% end %>
+
+<form action="<%= action %>" method="post">
+  <% if method != "post" %>
+    <input type="hidden" name="_method" value="<%= method %>">
+  <% end %>
+
+  <%= label_tag("article[title]", "Title") %>
+  <%= text_field_tag("article[title]", article.title) %>
+
+  <%= label_tag("article[body]", "Body") %>
+  <%= text_area_tag("article[body]", article.body, rows: 4) %>
+
+  <div style="margin-top: 1rem;">
+    <%= submit_tag(article.persisted? ? "Update Article" : "Create Article", class: "btn btn-primary") %>
+  </div>
+</form>

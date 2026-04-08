@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title><%= title %></title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+    .notice { background: #f0fdf4; color: #16a34a; padding: 0.5rem 1rem; border-radius: 0.375rem; margin-bottom: 1rem; }
+    .alert { background: #fef2f2; color: #dc2626; padding: 0.5rem 1rem; border-radius: 0.375rem; margin-bottom: 1rem; }
+    .btn { display: inline-block; padding: 0.5rem 1rem; border-radius: 0.375rem; text-decoration: none; font-weight: 500; cursor: pointer; }
+    .btn-primary { background: #2563eb; color: white; }
+    .btn-default { background: #f3f4f6; }
+    .btn-danger { background: #dc2626; color: white; border: none; }
+    form.inline { display: inline-block; }
+    input[type=text], input[type=password], textarea { display: block; width: 100%; border: 1px solid #d1d5db; border-radius: 0.25rem; padding: 0.5rem; }
+    label { display: block; font-weight: 500; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <%= content %>
+  </div>
+</body>
+</html>

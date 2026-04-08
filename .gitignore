@@ -1,3 +1,6 @@
 /lib/
 /bin/
 /.shards/
+*.dwarf
+blog_server
+blog.db

@@ -1,0 +1,5 @@
+<div id="<%= dom_id(comment) %>" style="padding: 1rem; background: #f9fafb; border-radius: 0.25rem; margin-bottom: 0.5rem;">
+  <p style="font-weight: 600;"><%= comment.commenter %></p>
+  <p style="color: #374151;"><%= comment.body %></p>
+  <%= button_to("Delete", article_comment_path(article, comment), method: "delete", class: "btn btn-danger", form_class: "inline", data_turbo_confirm: "Are you sure?") %>
+</div>
