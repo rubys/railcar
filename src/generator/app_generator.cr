@@ -4,36 +4,30 @@
 #   generator = AppGenerator.new("/path/to/rails/app", "/path/to/output")
 #   generator.generate
 
-require "./schema_extractor"
-require "./model_extractor"
+require "./app_model"
 require "./crystal_emitter"
-require "./route_extractor"
 require "./erb_converter"
-require "./controller_extractor"
 require "./controller_generator"
-require "./fixture_loader"
 require "./test_converter"
 
 module Ruby2CR
   class AppGenerator
     getter rails_dir : String
     getter output_dir : String
-    getter schemas : Array(TableSchema) = [] of TableSchema
-    getter route_set : RouteSet = RouteSet.new
-    getter models : Hash(String, ModelInfo) = {} of String => ModelInfo
+    getter app : AppModel
 
     def initialize(@rails_dir, @output_dir)
+      @app = AppModel.extract(rails_dir)
     end
 
-    def generate
-      app_name = File.basename(rails_dir)
-      puts "Generating Crystal app from #{rails_dir}..."
+    # Convenience accessors
+    private def schemas; app.schemas; end
+    private def models; app.models; end
+    private def route_set; app.routes; end
 
-      # Extract metadata first (used by multiple generators)
-      @schemas = SchemaExtractor.extract_all(File.join(rails_dir, "db/migrate"))
-      routes_path = File.join(rails_dir, "config/routes.rb")
-      @route_set = RouteExtractor.extract_file(routes_path) if File.exists?(routes_path)
-      load_models
+    def generate
+      app_name = app.name
+      puts "Generating Crystal app from #{rails_dir}..."
 
       copy_runtime
       generate_shard_yml(app_name)
@@ -47,15 +41,6 @@ module Ruby2CR
 
       puts "Done! Output in #{output_dir}/"
       puts "  cd #{output_dir} && shards install && crystal build src/app.cr -o #{app_name}"
-    end
-
-    private def load_models
-      Dir.glob(File.join(rails_dir, "app/models/*.rb")).each do |path|
-        model = ModelExtractor.extract_file(path)
-        next unless model
-        next if model.name == "ApplicationRecord"
-        @models[model.name] = model
-      end
     end
 
     # Copy runtime files
@@ -637,10 +622,8 @@ module Ruby2CR
       mkdir(spec_dir)
 
       # Generate spec_helper with fixture loading
-      fixtures_dir = File.join(rails_dir, "test/fixtures")
-      if Dir.exists?(fixtures_dir)
-        tables = FixtureLoader.load_all(fixtures_dir)
-        fixture_code = FixtureLoader.generate_fixture_helper(tables, models)
+      unless app.fixtures.empty?
+        fixture_code = FixtureLoader.generate_fixture_helper(app.fixtures, models)
 
         spec_helper = String.build do |io|
           io << "require \"spec\"\n"

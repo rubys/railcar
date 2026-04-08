@@ -5,36 +5,21 @@
 
 require "./schema_extractor"
 require "./model_extractor"
+require "./inflector"
 
 module Ruby2CR
   class CrystalEmitter
-    # Inflection: simple singularize for common Rails table names
-    # (articles → Article, comments → Comment)
-    def self.classify(table_name : String) : String
-      singular = singularize(table_name)
-      singular.gsub(/(^|_)(.)/) { |m| m.sub("_", "").capitalize }
+    # Delegate to Inflector for backward compatibility
+    def self.classify(word : String) : String
+      Inflector.classify(word)
     end
 
     def self.singularize(word : String) : String
-      if word.ends_with?("ies")
-        word[..-4] + "y"
-      elsif word.ends_with?("ses") || word.ends_with?("xes") || word.ends_with?("zes")
-        word[..-3]
-      elsif word.ends_with?("s") && !word.ends_with?("ss")
-        word[..-2]
-      else
-        word
-      end
+      Inflector.singularize(word)
     end
 
     def self.pluralize(word : String) : String
-      if word.ends_with?("y") && !word.ends_with?("ey") && !word.ends_with?("oy")
-        word[..-2] + "ies"
-      elsif word.ends_with?("s") || word.ends_with?("x") || word.ends_with?("z")
-        word + "es"
-      else
-        word + "s"
-      end
+      Inflector.pluralize(word)
     end
 
     # Generate a complete Crystal model file

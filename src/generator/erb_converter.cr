@@ -536,22 +536,6 @@ module Ruby2CR
         else
           "count"
         end
-      when "size", "title", "body", "commenter", "id",
-           "persisted?", "empty?", "any?", "comments", "errors",
-           "each", "new"
-        # Method calls on objects — pass through
-        if receiver
-          recv_str = expr_to_crystal(receiver, controller)
-          if args.empty?
-            "#{recv_str}.#{method}"
-          else
-            arg_strs = args.map { |a| expr_to_crystal(a, controller) }
-            "#{recv_str}.#{method}(#{arg_strs.join(", ")})"
-          end
-        else
-          # Bare method call — likely a local variable access
-          method
-        end
       else
         # Generic method call
         if receiver
@@ -718,13 +702,8 @@ module Ruby2CR
       nil
     end
 
-    # Determine partial args based on singular name and context
     private def self.partial_args(singular : String, template_name : String) : String
-      if singular == "comment"
-        "article, comment"
-      else
-        singular
-      end
+      singular
     end
   end
 end

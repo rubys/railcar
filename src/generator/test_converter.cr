@@ -480,15 +480,6 @@ module Ruby2CR
           else
             "#{recv}.build(#{args.map { |a| expr_to_crystal(a) }.join(", ")})"
           end
-        when "articles", "comments"
-          if args.size == 1 && args[0].is_a?(Prism::SymbolNode)
-            label = args[0].as(Prism::SymbolNode).value
-            "#{method}(\"#{label}\")"
-          elsif receiver
-            "#{expr_to_crystal(receiver)}.#{method}"
-          else
-            method
-          end
         else
           if receiver
             recv = expr_to_crystal(receiver)
@@ -510,6 +501,10 @@ module Ruby2CR
               end
             elsif args.empty?
               method
+            elsif args.size == 1 && args[0].is_a?(Prism::SymbolNode)
+              # Fixture accessor: articles(:one) → articles("one")
+              label = args[0].as(Prism::SymbolNode).value
+              "#{method}(\"#{label}\")"
             else
               arg_strs = args.map { |a| expr_to_crystal(a) }
               "#{method}(#{arg_strs.join(", ")})"
