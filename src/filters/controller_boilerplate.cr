@@ -57,23 +57,58 @@ module Ruby2CR
     end
 
     private def build_extract_model_params : Crystal::Def
-      # private def extract_model_params(params, model) : Hash(String, DB::Any)
-      #   hash = {} of String => DB::Any
-      #   prefix = "#{model}["
-      #   params.each { |k, v| hash[k[prefix.size..-2]] = v if k.starts_with?(prefix) && k.ends_with?("]") }
-      #   hash
-      # end
-      body = Crystal::MacroLiteral.new(
-        "hash = {} of String => DB::Any\n" \
-        "    prefix = \"\#{model}[\"\n" \
-        "    params.each do |k, v|\n" \
-        "      if k.starts_with?(prefix) && k.ends_with?(\"]\")\n" \
-        "        field = k[prefix.size..-2]\n" \
-        "        hash[field] = v.as(DB::Any)\n" \
-        "      end\n" \
-        "    end\n" \
-        "    hash"
+      db_any = Crystal::Path.new(["DB", "Any"])
+      hash_type = Crystal::Generic.new(Crystal::Path.new("Hash"),
+        [Crystal::Path.new("String"), db_any.clone] of Crystal::ASTNode)
+
+      # hash = {} of String => DB::Any
+      hash_init = Crystal::Assign.new(
+        Crystal::Var.new("hash"),
+        Crystal::HashLiteral.new([] of Crystal::HashLiteral::Entry,
+          of: Crystal::HashLiteral::Entry.new(Crystal::Path.new("String"), db_any.clone))
       )
+
+      # prefix = "#{model}["
+      prefix_init = Crystal::Assign.new(
+        Crystal::Var.new("prefix"),
+        Crystal::StringInterpolation.new([
+          Crystal::Var.new("model"),
+          Crystal::StringLiteral.new("["),
+        ] of Crystal::ASTNode)
+      )
+
+      # field = k[prefix.size..-2]
+      field_assign = Crystal::Assign.new(
+        Crystal::Var.new("field"),
+        Crystal::Call.new(Crystal::Var.new("k"), "[]",
+          [Crystal::RangeLiteral.new(
+            Crystal::Call.new(Crystal::Var.new("prefix"), "size"),
+            Crystal::NumberLiteral.new("-2"),
+            false
+          )] of Crystal::ASTNode)
+      )
+
+      # hash[field] = v.as(DB::Any)
+      hash_set = Crystal::Call.new(Crystal::Var.new("hash"), "[]=", [
+        Crystal::Var.new("field"),
+        Crystal::Cast.new(Crystal::Var.new("v"), db_any.clone),
+      ] of Crystal::ASTNode)
+
+      # if k.starts_with?(prefix) && k.ends_with?("]")
+      condition = Crystal::And.new(
+        Crystal::Call.new(Crystal::Var.new("k"), "starts_with?", [Crystal::Var.new("prefix")] of Crystal::ASTNode),
+        Crystal::Call.new(Crystal::Var.new("k"), "ends_with?", [Crystal::StringLiteral.new("]")] of Crystal::ASTNode)
+      )
+      if_node = Crystal::If.new(condition, Crystal::Expressions.new([field_assign, hash_set] of Crystal::ASTNode))
+
+      # params.each do |k, v| ... end
+      each_block = Crystal::Block.new(
+        args: [Crystal::Var.new("k"), Crystal::Var.new("v")],
+        body: if_node
+      )
+      each_call = Crystal::Call.new(Crystal::Var.new("params"), "each", block: each_block)
+
+      body = Crystal::Expressions.new([hash_init, prefix_init, each_call, Crystal::Var.new("hash")] of Crystal::ASTNode)
 
       def_node = Crystal::Def.new("extract_model_params",
         [
@@ -84,22 +119,30 @@ module Ruby2CR
           Crystal::Arg.new("model", restriction: Crystal::Path.new("String")),
         ],
         body: body,
-        return_type: Crystal::Generic.new(
-          Crystal::Path.new("Hash"),
-          [Crystal::Path.new("String"), Crystal::Path.new(["DB", "Any"])] of Crystal::ASTNode
-        )
+        return_type: hash_type
       )
       def_node.visibility = Crystal::Visibility::Private
       def_node
     end
 
     private def build_layout_helper : Crystal::Def
-      body = Crystal::MacroLiteral.new(
-        "content = yield\n" \
-        "    String.build do |__str__|\n" \
-        "      ECR.embed(\"src/views/layouts/application.ecr\", __str__)\n" \
-        "    end"
-      )
+      # content = yield
+      content_assign = Crystal::Assign.new(Crystal::Var.new("content"), Crystal::Yield.new)
+
+      # ECR.embed("src/views/layouts/application.ecr", __str__)
+      ecr_call = Crystal::Call.new(Crystal::Path.new("ECR"), "embed", [
+        Crystal::StringLiteral.new("src/views/layouts/application.ecr"),
+        Crystal::Var.new("__str__"),
+      ] of Crystal::ASTNode)
+
+      # String.build do |__str__| ... end
+      string_build = Crystal::Call.new(Crystal::Path.new("String"), "build",
+        block: Crystal::Block.new(
+          args: [Crystal::Var.new("__str__")],
+          body: ecr_call
+        ))
+
+      body = Crystal::Expressions.new([content_assign, string_build] of Crystal::ASTNode)
 
       def_node = Crystal::Def.new("layout",
         [Crystal::Arg.new("title", restriction: Crystal::Path.new("String"))],
@@ -166,11 +209,16 @@ module Ruby2CR
     private def build_partial_def(partial_name : String, view_dir : String, params : Array(Tuple(String, String))) : Crystal::Def
       ecr_path = "src/views/#{view_dir}/_#{partial_name}.ecr"
 
-      body = Crystal::MacroLiteral.new(
-        "String.build do |__str__|\n" \
-        "      ECR.embed(\"#{ecr_path}\", __str__)\n" \
-        "    end"
-      )
+      ecr_call = Crystal::Call.new(Crystal::Path.new("ECR"), "embed", [
+        Crystal::StringLiteral.new(ecr_path),
+        Crystal::Var.new("__str__"),
+      ] of Crystal::ASTNode)
+
+      body = Crystal::Call.new(Crystal::Path.new("String"), "build",
+        block: Crystal::Block.new(
+          args: [Crystal::Var.new("__str__")],
+          body: ecr_call
+        ))
 
       args = params.map { |name, type|
         Crystal::Arg.new(name, restriction: Crystal::Path.new(type))

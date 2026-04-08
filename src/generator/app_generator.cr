@@ -108,7 +108,9 @@ module Ruby2CR
         schema = schema_map[table_name]?
         next unless schema
 
-        # Parse → filter → serialize
+        # Filter chain for models:
+        # 1. StripCallbacks    — remove broadcasts_to, after_*_commit, etc.
+        # 2. ModelBoilerplate  — wrap in model("table") {}, add columns, validations, destroy
         ast = SourceParser.parse(path)
         ast = ast.transform(StripCallbacks.new)
         ast = ast.transform(ModelBoilerplate.new(schema, model))
@@ -206,7 +208,17 @@ module Ruby2CR
       source_path = File.join(rails_dir, "app/controllers/#{controller_name}_controller.rb")
       ast = SourceParser.parse(source_path)
 
-      # Apply filter chain — Crystal AST in, Crystal AST out
+      # Filter chain — order matters, each filter depends on previous transformations:
+      #
+      # 1. InstanceVarToLocal   — @vars → locals (downstream filters see local vars)
+      # 2. ParamsExpect         — params.expect(:id) → id (simplifies param refs)
+      # 3. RespondToHTML        — unwrap respond_to { format.html { ... } } blocks
+      # 4. StrongParams         — article_params → extract_model_params(params, "article")
+      # 5. RedirectToResponse   — redirect_to → status + headers + flash
+      # 6. RenderToECR          — render :template → response.print(layout { ECR.embed })
+      # 7. ControllerSignature  — add typed params, inline before_actions, view rendering
+      # 8. ControllerBoilerplate — inject includes, helpers, partial renderers
+      # 9. ModelNamespace       — Article → Ruby2CR::Article (must be last)
       ast = ast.transform(InstanceVarToLocal.new)
       ast = ast.transform(ParamsExpect.new)
       ast = ast.transform(RespondToHTML.new)
@@ -406,6 +418,12 @@ module Ruby2CR
           content = lines.map { |l| l.blank? ? l : l[min_indent..] }.join("\n")
         end
       end
+
+      # Format Crystal source files for idiomatic output
+      if path.ends_with?(".cr")
+        content = Crystal.format(content) rescue content
+      end
+
       File.write(path, content)
     end
 
