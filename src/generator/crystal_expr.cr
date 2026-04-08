@@ -8,8 +8,31 @@
 # map_call (AST-level) for domain-specific transformations.
 
 require "compiler/crystal/syntax"
+require "compiler/crystal/formatter"
 require "../prism/bindings"
 require "../prism/deserializer"
+
+# Enable to_s on programmatically constructed Crystal AST trees.
+# Crystal's ToSVisitor uses method overloading which requires concrete types.
+# This overload adds runtime dispatch for the abstract ASTNode type,
+# allowing trees with abstract-typed children to serialize correctly.
+class Crystal::ToSVisitor
+  def visit(node : Crystal::ASTNode)
+    node.accept(self)
+    false
+  end
+end
+
+# Extend Crystal::ASTNode with a to_s that works for programmatically
+# constructed trees (avoids visitor dispatch requiring concrete types)
+class Crystal::ASTNode
+  def to_crystal_s : String
+    io = IO::Memory.new
+    visitor = Crystal::ToSVisitor.new(io)
+    self.accept(visitor)
+    io.to_s
+  end
+end
 
 module Ruby2CR
   module CrystalExpr
@@ -120,50 +143,12 @@ module Ruby2CR
 
     # Convert a Prism AST node to a Crystal expression string.
     # Routes calls through convert_call so consumer overrides work.
-    # Non-call nodes use expr_literal for direct string conversion.
     def expr(node : Prism::Node) : String
       case node
       when Prism::CallNode
         convert_call(node)
-      when Prism::InstanceVariableReadNode
-        node.name.lchop("@")
-      when Prism::InstanceVariableWriteNode
-        "#{node.name.lchop("@")} = #{expr(node.value)}"
-      when Prism::LocalVariableReadNode
-        node.name
-      when Prism::LocalVariableWriteNode
-        "#{node.name} = #{expr(node.value)}"
-      when Prism::StringNode
-        node.value.inspect
-      when Prism::SymbolNode
-        ":#{node.value}"
-      when Prism::IntegerNode
-        node.value.to_s
-      when Prism::TrueNode
-        "true"
-      when Prism::FalseNode
-        "false"
-      when Prism::NilNode
-        "nil"
-      when Prism::SelfNode
-        "self"
-      when Prism::ConstantReadNode
-        "Ruby2CR::#{node.name}"
-      when Prism::ConstantPathNode
-        node.full_path
-      when Prism::ArrayNode
-        "[#{node.elements.map { |e| expr(e) }.join(", ")}]"
-      when Prism::HashNode
-        hash_pairs(node.elements)
-      when Prism::KeywordHashNode
-        hash_pairs(node.elements)
-      when Prism::ParenthesesNode
-        body = node.body
-        body ? expr(body) : ""
-      when Prism::StatementsNode
-        node.body.map { |s| expr(s) }.last? || ""
       else
-        "nil"
+        map_node(node).to_s
       end
     end
 

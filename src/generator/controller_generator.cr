@@ -1,13 +1,8 @@
 # Generates Crystal controller methods from extracted Rails controller AST.
 #
-# Transforms Rails controller patterns to Crystal:
-#   - @article = Article.find(params.expect(:id)) → article = Article.find(id)
-#   - @article.save / @article.update(params) → article.save / article.update(hash)
-#   - redirect_to @article → redirect(response, article_path(article))
-#   - render :new → render template
-#   - respond_to → HTML-only behavior
-#   - params.expect(article: [:title, :body]) → extract from params hash
+# Builds Crystal AST trees from Prism AST, serialized via to_s + Crystal.format.
 
+require "compiler/crystal/syntax"
 require "./crystal_expr"
 require "./crystal_emitter"
 require "./controller_extractor"
@@ -16,7 +11,6 @@ module Ruby2CR
   class ControllerGenerator
     include CrystalExpr
 
-    # Actions that render a view template (vs redirect)
     RENDER_ACTIONS = {"index", "show", "new", "edit"}
 
     getter controller : String
@@ -25,56 +19,47 @@ module Ruby2CR
     def initialize(@controller, @singular = CrystalEmitter.singularize(controller))
     end
 
-    # Public class API delegates to instance
     def self.generate_action(action : ControllerAction, controller_name : String, render_view : Bool = false) : String
       new(controller_name).generate_action(action, render_view)
     end
 
     def generate_action(action : ControllerAction, render_view : Bool = false) : String
-      io = IO::Memory.new
+      args = [Crystal::Arg.new("response")] of Crystal::Arg
+      if needs_id?(action.name)
+        args << Crystal::Arg.new("id", restriction: Crystal::Path.new("Int64"))
+      end
+      if needs_params?(action.name)
+        args << Crystal::Arg.new("params", restriction: Crystal::Generic.new(
+          Crystal::Path.new("Hash"),
+          [Crystal::Path.new("String"), Crystal::Path.new("String")] of Crystal::ASTNode
+        ))
+      end
 
-      io << "  def #{action.name}(response"
-      io << ", id : Int64" if needs_id?(action.name)
-      io << ", params : Hash(String, String)" if needs_params?(action.name)
-      io << ")\n"
+      body_nodes = [] of Crystal::ASTNode
 
-      # For view-rendering actions, consume flash
       if render_view && RENDER_ACTIONS.includes?(action.name)
-        io << "    flash = FLASH_STORE.delete(\"default\") || {notice: nil, alert: nil}\n"
-        io << "    notice = flash[:notice]\n"
+        body_nodes << build_flash_consumption
       end
 
       if body = action.body
-        emit_body(body, io, action.name, "    ")
+        body_nodes.concat(build_body(body, action.name))
       end
 
-      # For view-rendering actions, add the template render
       if render_view && RENDER_ACTIONS.includes?(action.name)
-        title = case action.name
-                when "index" then CrystalEmitter.classify(controller)
-                when "show"  then "#{singular}.title"
-                when "new"   then "New #{CrystalEmitter.classify(singular)}"
-                when "edit"  then "Edit #{CrystalEmitter.classify(singular)}"
-                else action.name.capitalize
-                end
-        title_expr = action.name == "show" ? title : title.inspect
-        io << "    response.print layout(#{title_expr}) {\n"
-        io << "      String.build do |__str__|\n"
-        io << "        ECR.embed(\"src/views/#{controller}/#{action.name}.ecr\", __str__)\n"
-        io << "      end\n"
-        io << "    }\n"
+        body_nodes << build_view_render(action.name)
       end
 
-      io << "  end\n"
-      io.to_s
+      def_node = Crystal::Def.new(action.name, args,
+        body: Crystal::Expressions.new(body_nodes))
+      def_node.to_s + "\n"
     end
 
-    # String-level override delegates to AST-level map_call
+    # --- CrystalExpr overrides ---
+
     def convert_call(call : Prism::CallNode) : String
       map_call(call).to_s
     end
 
-    # Override CrystalExpr#map_call for controller-specific AST transformations
     def map_call(call : Prism::CallNode) : Crystal::ASTNode
       receiver = call.receiver
       method = call.name
@@ -85,7 +70,6 @@ module Ruby2CR
         recv = receiver ? map_node(receiver) : Crystal::Var.new(singular)
         arg = if args.size == 1
                 mapped = map_node(args[0])
-                # params.expect(:id) → id
                 mapped.to_s.includes?("params") ? Crystal::Var.new("id") : mapped
               else
                 Crystal::Var.new("id")
@@ -96,12 +80,7 @@ module Ruby2CR
         if args.empty?
           Crystal::Call.new(recv, "new")
         elsif args[0].is_a?(Prism::CallNode) && args[0].as(Prism::CallNode).name.ends_with?("_params")
-          Crystal::Call.new(recv, "new", [
-            Crystal::Call.new(nil, "extract_model_params", [
-              Crystal::Var.new("params"),
-              Crystal::StringLiteral.new(singular),
-            ] of Crystal::ASTNode),
-          ] of Crystal::ASTNode)
+          Crystal::Call.new(recv, "new", [extract_model_params_call] of Crystal::ASTNode)
         else
           Crystal::Call.new(recv, "new", [map_node(args[0])] of Crystal::ASTNode)
         end
@@ -111,12 +90,7 @@ module Ruby2CR
       when "update"
         recv = receiver ? map_node(receiver) : Crystal::Var.new(singular)
         if args.size == 1 && args[0].is_a?(Prism::CallNode) && args[0].as(Prism::CallNode).name.ends_with?("_params")
-          Crystal::Call.new(recv, "update", [
-            Crystal::Call.new(nil, "extract_model_params", [
-              Crystal::Var.new("params"),
-              Crystal::StringLiteral.new(singular),
-            ] of Crystal::ASTNode),
-          ] of Crystal::ASTNode)
+          Crystal::Call.new(recv, "update", [extract_model_params_call] of Crystal::ASTNode)
         else
           Crystal::Call.new(recv, "update", args.map { |a| map_node(a) })
         end
@@ -129,8 +103,7 @@ module Ruby2CR
           child_singular = CrystalEmitter.singularize(args[0].as(Prism::CallNode).name.rchop("_params"))
           Crystal::Call.new(recv, "build", [
             Crystal::Call.new(nil, "extract_model_params", [
-              Crystal::Var.new("params"),
-              Crystal::StringLiteral.new(child_singular),
+              Crystal::Var.new("params"), Crystal::StringLiteral.new(child_singular),
             ] of Crystal::ASTNode),
           ] of Crystal::ASTNode)
         else
@@ -150,88 +123,123 @@ module Ruby2CR
       end
     end
 
-    # --- Private helpers ---
+    # --- AST body builders ---
 
-    private def needs_id?(action_name : String) : Bool
-      {"show", "edit", "update", "destroy"}.includes?(action_name)
-    end
-
-    private def needs_params?(action_name : String) : Bool
-      {"create", "update"}.includes?(action_name)
-    end
-
-    private def emit_body(node : Prism::Node, io : IO, action_name : String, indent : String)
+    private def build_body(node : Prism::Node, action_name : String) : Array(Crystal::ASTNode)
       case node
       when Prism::StatementsNode
-        node.body.each { |child| emit_statement(child, io, action_name, indent) }
+        node.body.flat_map { |child| build_statement(child, action_name) }
       else
-        emit_statement(node, io, action_name, indent)
+        build_statement(node, action_name)
       end
     end
 
-    private def emit_statement(node : Prism::Node, io : IO, action_name : String, indent : String)
+    private def build_statement(node : Prism::Node, action_name : String) : Array(Crystal::ASTNode)
       case node
       when Prism::InstanceVariableWriteNode
-        io << indent << node.name.lchop("@") << " = " << expr(node.value) << "\n"
+        [Crystal::Assign.new(
+          Crystal::Var.new(node.name.lchop("@")),
+          map_node(node.value)
+        ).as(Crystal::ASTNode)]
+      when Prism::LocalVariableWriteNode
+        [Crystal::Assign.new(
+          Crystal::Var.new(node.name),
+          map_node(node.value)
+        ).as(Crystal::ASTNode)]
       when Prism::CallNode
         case node.name
-        when "redirect_to" then emit_redirect(node, io, indent)
-        when "respond_to"  then emit_respond_to(node, io, action_name, indent)
-        when "render"      then emit_render(node, io, action_name, indent)
-        else io << indent << expr(node) << "\n"
+        when "redirect_to" then build_redirect(node)
+        when "respond_to"  then build_respond_to(node, action_name)
+        when "render"      then build_render(node, action_name)
+        else [map_call(node).as(Crystal::ASTNode)]
         end
       when Prism::IfNode
-        io << indent << "if " << expr(node.condition) << "\n"
-        emit_body(node.then_body.not_nil!, io, action_name, indent + "  ") if node.then_body
-        if else_clause = node.else_clause
-          io << indent << "else\n"
-          case else_clause
-          when Prism::ElseNode
-            emit_body(else_clause.body.not_nil!, io, action_name, indent + "  ") if else_clause.body
-          else
-            emit_body(else_clause, io, action_name, indent + "  ")
-          end
-        end
-        io << indent << "end\n"
-      when Prism::LocalVariableWriteNode
-        io << indent << node.name << " = " << expr(node.value) << "\n"
+        [build_if(node, action_name).as(Crystal::ASTNode)]
+      else
+        [] of Crystal::ASTNode
       end
     end
 
-    private def emit_redirect(node : Prism::CallNode, io : IO, indent : String)
-      args = node.arg_nodes
-      return if args.empty?
+    private def build_if(node : Prism::IfNode, action_name : String) : Crystal::If
+      cond = map_node(node.condition)
+      then_body = node.then_body ? Crystal::Expressions.new(build_body(node.then_body.not_nil!, action_name)) : Crystal::Nop.new
+      else_body = if ec = node.else_clause
+                    case ec
+                    when Prism::ElseNode
+                      ec.body ? Crystal::Expressions.new(build_body(ec.body.not_nil!, action_name)) : nil
+                    else
+                      Crystal::Expressions.new(build_body(ec, action_name))
+                    end
+                  else
+                    nil
+                  end
+      Crystal::If.new(cond, then_body, else_body)
+    end
 
+    # --- Redirect ---
+
+    private def build_redirect(node : Prism::CallNode) : Array(Crystal::ASTNode)
+      args = node.arg_nodes
+      return [] of Crystal::ASTNode if args.empty?
+
+      stmts = [] of Crystal::ASTNode
       target = args[0]
-      path = case target
-             when Prism::InstanceVariableReadNode
-               name = target.name.lchop("@")
-               "#{name}_path(#{name})"
-             when Prism::CallNode
-               if target.receiver.nil? && target.arg_nodes.empty?
-                 name = target.name
-                 name.ends_with?("_path") ? name : "#{name}_path"
-               else
-                 expr(target)
-               end
-             else
-               expr(target)
-             end
+      path_expr = case target
+                  when Prism::InstanceVariableReadNode
+                    name = target.name.lchop("@")
+                    Crystal::Call.new(nil, "#{name}_path", [Crystal::Var.new(name)] of Crystal::ASTNode)
+                  when Prism::CallNode
+                    if target.receiver.nil? && target.arg_nodes.empty?
+                      name = target.name
+                      Crystal::Call.new(nil, name.ends_with?("_path") ? name : "#{name}_path")
+                    else
+                      map_node(target)
+                    end
+                  else
+                    map_node(target)
+                  end
 
       notice = extract_keyword_string(args, "notice")
       alert = extract_keyword_string(args, "alert")
 
       if notice
-        io << indent << "FLASH_STORE[\"default\"] = {notice: \"" << notice << "\", alert: nil}\n"
+        stmts << build_flash_assign(notice: notice)
       elsif alert
-        io << indent << "FLASH_STORE[\"default\"] = {notice: nil, alert: \"" << alert << "\"}\n"
+        stmts << build_flash_assign(alert: alert)
       end
-      io << indent << "response.status_code = 302\n"
-      io << indent << "response.headers[\"Location\"] = " << path << "\n"
+
+      stmts << Crystal::Assign.new(
+        Crystal::Call.new(Crystal::Var.new("response"), "status_code"),
+        Crystal::NumberLiteral.new("302")
+      )
+      stmts << Crystal::Call.new(
+        Crystal::Call.new(Crystal::Var.new("response"), "headers"),
+        "[]=",
+        [Crystal::StringLiteral.new("Location"), path_expr] of Crystal::ASTNode
+      )
+      stmts
     end
 
-    private def emit_render(node : Prism::CallNode, io : IO, action_name : String, indent : String)
+    private def build_flash_assign(notice : String? = nil, alert : String? = nil) : Crystal::ASTNode
+      Crystal::Call.new(
+        Crystal::Call.new(nil, "FLASH_STORE"),
+        "[]=",
+        [
+          Crystal::StringLiteral.new("default"),
+          Crystal::NamedTupleLiteral.new([
+            Crystal::NamedTupleLiteral::Entry.new("notice", notice ? Crystal::StringLiteral.new(notice) : Crystal::NilLiteral.new),
+            Crystal::NamedTupleLiteral::Entry.new("alert", alert ? Crystal::StringLiteral.new(alert) : Crystal::NilLiteral.new),
+          ]),
+        ] of Crystal::ASTNode
+      )
+    end
+
+    # --- Render ---
+
+    private def build_render(node : Prism::CallNode, action_name : String) : Array(Crystal::ASTNode)
       args = node.arg_nodes
+      stmts = [] of Crystal::ASTNode
+
       template = case args[0]?
                  when Prism::SymbolNode then args[0].as(Prism::SymbolNode).value
                  when Prism::StringNode then args[0].as(Prism::StringNode).value
@@ -239,50 +247,122 @@ module Ruby2CR
                  end
 
       status = extract_keyword_string(args, "status")
-      io << indent << "response.status_code = 422\n" if status == "unprocessable_entity"
+      if status == "unprocessable_entity"
+        stmts << Crystal::Assign.new(
+          Crystal::Call.new(Crystal::Var.new("response"), "status_code"),
+          Crystal::NumberLiteral.new("422")
+        )
+      end
 
       title = template.capitalize + " " + CrystalEmitter.classify(CrystalEmitter.singularize(controller))
-      io << indent << "response.print layout(\"#{title}\") {\n"
-      io << indent << "  String.build do |__str__|\n"
-      io << indent << "    ECR.embed(\"src/views/#{controller}/#{template}.ecr\", __str__)\n"
-      io << indent << "  end\n"
-      io << indent << "}\n"
+      stmts << build_layout_call(title, template)
+      stmts
     end
 
-    private def emit_respond_to(node : Prism::CallNode, io : IO, action_name : String, indent : String)
+    # --- Respond to ---
+
+    private def build_respond_to(node : Prism::CallNode, action_name : String) : Array(Crystal::ASTNode)
       block = node.block
-      return unless block.is_a?(Prism::BlockNode)
+      return [] of Crystal::ASTNode unless block.is_a?(Prism::BlockNode)
       body = block.body
-      return unless body
-      emit_respond_to_body(body, io, action_name, indent)
+      return [] of Crystal::ASTNode unless body
+      build_respond_to_body(body, action_name)
     end
 
-    private def emit_respond_to_body(node : Prism::Node, io : IO, action_name : String, indent : String)
+    private def build_respond_to_body(node : Prism::Node, action_name : String) : Array(Crystal::ASTNode)
       case node
       when Prism::StatementsNode
-        node.body.each { |child| emit_respond_to_body(child, io, action_name, indent) }
+        node.body.flat_map { |child| build_respond_to_body(child, action_name) }
       when Prism::CallNode
-        if node.name == "html"
-          if html_block = node.block
-            if html_body = html_block.as?(Prism::BlockNode).try(&.body)
-              emit_body(html_body, io, action_name, indent)
-            end
+        if node.name == "html" && (html_block = node.block)
+          if html_body = html_block.as?(Prism::BlockNode).try(&.body)
+            return build_body(html_body, action_name)
           end
         end
+        [] of Crystal::ASTNode
       when Prism::IfNode
-        io << indent << "if " << expr(node.condition) << "\n"
-        emit_respond_to_body(node.then_body.not_nil!, io, action_name, indent + "  ") if node.then_body
-        if else_clause = node.else_clause
-          io << indent << "else\n"
-          case else_clause
-          when Prism::ElseNode
-            emit_respond_to_body(else_clause.body.not_nil!, io, action_name, indent + "  ") if else_clause.body
-          else
-            emit_respond_to_body(else_clause, io, action_name, indent + "  ")
-          end
-        end
-        io << indent << "end\n"
+        cond = map_node(node.condition)
+        then_body = node.then_body ? Crystal::Expressions.new(build_respond_to_body(node.then_body.not_nil!, action_name)) : Crystal::Nop.new
+        else_body = if ec = node.else_clause
+                      case ec
+                      when Prism::ElseNode
+                        ec.body ? Crystal::Expressions.new(build_respond_to_body(ec.body.not_nil!, action_name)) : nil
+                      else
+                        Crystal::Expressions.new(build_respond_to_body(ec, action_name))
+                      end
+                    else
+                      nil
+                    end
+        [Crystal::If.new(cond, then_body, else_body).as(Crystal::ASTNode)]
+      else
+        [] of Crystal::ASTNode
       end
+    end
+
+    # --- Shared helpers ---
+
+    private def needs_id?(name : String) : Bool
+      {"show", "edit", "update", "destroy"}.includes?(name)
+    end
+
+    private def needs_params?(name : String) : Bool
+      {"create", "update"}.includes?(name)
+    end
+
+    private def extract_model_params_call : Crystal::Call
+      Crystal::Call.new(nil, "extract_model_params", [
+        Crystal::Var.new("params"), Crystal::StringLiteral.new(singular),
+      ] of Crystal::ASTNode)
+    end
+
+    private def build_flash_consumption : Crystal::ASTNode
+      delete_call = Crystal::Call.new(
+        Crystal::Call.new(nil, "FLASH_STORE"), "delete",
+        [Crystal::StringLiteral.new("default")] of Crystal::ASTNode
+      )
+      default_tuple = Crystal::NamedTupleLiteral.new([
+        Crystal::NamedTupleLiteral::Entry.new("notice", Crystal::NilLiteral.new),
+        Crystal::NamedTupleLiteral::Entry.new("alert", Crystal::NilLiteral.new),
+      ])
+      flash_assign = Crystal::Assign.new(
+        Crystal::Var.new("flash"),
+        Crystal::Or.new(delete_call, default_tuple)
+      )
+      notice_assign = Crystal::Assign.new(
+        Crystal::Var.new("notice"),
+        Crystal::Call.new(Crystal::Var.new("flash"), "[]", [Crystal::SymbolLiteral.new("notice")] of Crystal::ASTNode)
+      )
+      Crystal::Expressions.new([flash_assign, notice_assign] of Crystal::ASTNode)
+    end
+
+    private def build_view_render(action_name : String) : Crystal::ASTNode
+      title = case action_name
+              when "index" then CrystalEmitter.classify(controller)
+              when "show"  then "#{singular}.title"
+              when "new"   then "New #{CrystalEmitter.classify(singular)}"
+              when "edit"  then "Edit #{CrystalEmitter.classify(singular)}"
+              else action_name.capitalize
+              end
+      build_layout_call(title, action_name)
+    end
+
+    private def build_layout_call(title : String, template : String) : Crystal::ASTNode
+      ecr_call = Crystal::Call.new(Crystal::Path.new("ECR"), "embed", [
+        Crystal::StringLiteral.new("src/views/#{controller}/#{template}.ecr"),
+        Crystal::Var.new("__str__"),
+      ] of Crystal::ASTNode)
+
+      string_build = Crystal::Call.new(Crystal::Path.new("String"), "build",
+        block: Crystal::Block.new(
+          args: [Crystal::Var.new("__str__")],
+          body: ecr_call
+        ))
+
+      layout_call = Crystal::Call.new(nil, "layout",
+        [Crystal::StringLiteral.new(title)] of Crystal::ASTNode,
+        block: Crystal::Block.new(body: string_build))
+
+      Crystal::Call.new(Crystal::Var.new("response"), "print", [layout_call] of Crystal::ASTNode)
     end
   end
 end
