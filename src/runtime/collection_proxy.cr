@@ -75,6 +75,11 @@ module Ruby2CR
       T.new(hash)
     end
 
+    def build(attrs : Hash(String, DB::Any)) : T
+      attrs[@foreign_key] = @owner.id.as(DB::Any)
+      T.new(attrs)
+    end
+
     def create(**attrs) : T
       record = build(**attrs)
       record.save

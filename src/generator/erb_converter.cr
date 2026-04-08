@@ -105,6 +105,11 @@ module Ruby2CR
           io << "<% " << expr_to_crystal(node, controller) << " %>\n"
         end
       when Prism::CallNode
+        # Strip content_for and turbo_stream_from as standalone code blocks
+        if node.name == "content_for" || node.name == "turbo_stream_from"
+          return
+        end
+
         receiver = node.receiver
         if receiver.is_a?(Prism::LocalVariableReadNode) && receiver.name == "_buf"
           case node.name
@@ -390,7 +395,7 @@ module Ruby2CR
         return unless field
         css = extract_keyword_string(args, "class")
         cls_attr = css ? %(, class: "#{css}") : ""
-        io << "<%= text_field_tag(\"" << model_prefix << "[" << field << "]\", " << model_prefix << "." << field << cls_attr << ") %>"
+        io << "<%= text_field_tag(\"" << model_prefix << "[" << field << "]\"" << cls_attr << ") %>"
       when "text_area", "textarea"
         field = extract_symbol(args[0]?)
         return unless field
@@ -398,7 +403,7 @@ module Ruby2CR
         rows = extract_keyword_string(args, "rows")
         cls_attr = css ? %(, class: "#{css}") : ""
         rows_attr = rows ? %(, rows: #{rows}) : ""
-        io << "<%= text_area_tag(\"" << model_prefix << "[" << field << "]\", " << model_prefix << "." << field << rows_attr << cls_attr << ") %>"
+        io << "<%= text_area_tag(\"" << model_prefix << "[" << field << "]\"" << rows_attr << cls_attr << ") %>"
       when "submit"
         text = case args[0]?
                when Prism::StringNode then args[0].as(Prism::StringNode).value
@@ -504,9 +509,34 @@ module Ruby2CR
       when "truncate"
         convert_truncate(args, controller)
       when "dom_id"
-        arg_strs = args.map { |a| expr_to_crystal(a, controller) }
+        # Convert symbol args to strings for Crystal
+        arg_strs = args.map { |a|
+          if a.is_a?(Prism::SymbolNode)
+            a.value.inspect
+          else
+            expr_to_crystal(a, controller)
+          end
+        }
         "dom_id(#{arg_strs.join(", ")})"
-      when "size", "count", "title", "body", "commenter", "id",
+      when "present?"
+        # Rails present? → Crystal: truthy check (not nil, not empty)
+        if receiver
+          recv_str = expr_to_crystal(receiver, controller)
+          recv_str
+        else
+          method
+        end
+      when "count"
+        # .count with no args → .size in Crystal
+        if receiver && args.empty?
+          "#{expr_to_crystal(receiver, controller)}.size"
+        elsif receiver
+          arg_strs = args.map { |a| expr_to_crystal(a, controller) }
+          "#{expr_to_crystal(receiver, controller)}.count(#{arg_strs.join(", ")})"
+        else
+          "count"
+        end
+      when "size", "title", "body", "commenter", "id",
            "persisted?", "empty?", "any?", "comments", "errors",
            "each", "new"
         # Method calls on objects — pass through
@@ -567,7 +597,17 @@ module Ruby2CR
       text_expr = expr_to_crystal(args[0], controller)
       target = args[1]
 
-      path_expr = model_to_path(target, controller)
+      # Handle array targets: [comment.article, comment] → article_comment_path(article, comment)
+      path_expr = if target.is_a?(Prism::ArrayNode) && target.elements.size == 2
+                    parent_expr = expr_to_crystal(target.elements[0], controller)
+                    child_expr = expr_to_crystal(target.elements[1], controller)
+                    # Infer names: comment.article → article, comment → comment
+                    parent_name = parent_expr.split(".").last
+                    child_name = child_expr.split(".").first
+                    "#{parent_name}_#{child_name}_path(#{parent_expr}, #{child_expr})"
+                  else
+                    model_to_path(target, controller)
+                  end
 
       parts = [text_expr, path_expr]
 

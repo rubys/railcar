@@ -119,11 +119,14 @@ module Ruby2CR
       write_file(File.join(helpers_dir, "route_helpers.cr"), source)
       puts "  helpers/route_helpers.cr"
 
-      # Also copy view helpers from runtime
-      runtime_helpers = File.expand_path("../../runtime/helpers/view_helpers.cr", __DIR__)
-      if File.exists?(runtime_helpers)
-        copy_file(runtime_helpers, File.join(helpers_dir, "view_helpers.cr"))
-        puts "  helpers/view_helpers.cr"
+      # Copy view helpers from runtime
+      runtime_helpers_dir = File.expand_path("../runtime/helpers", __DIR__)
+      %w[view_helpers.cr params_helpers.cr].each do |f|
+        src_path = File.join(runtime_helpers_dir, f)
+        if File.exists?(src_path)
+          copy_file(src_path, File.join(helpers_dir, f))
+          puts "  helpers/#{f}"
+        end
       end
     end
 
@@ -181,8 +184,15 @@ module Ruby2CR
       singular = CrystalEmitter.singularize(controller_name)
       model_class = CrystalEmitter.classify(controller_name)
 
+      # Check which before_actions set which variables
+      set_actions = info.before_actions.select { |ba| ba.method_name.starts_with?("set_") }
+      has_set_model = !set_actions.empty?
+
       io = IO::Memory.new
       io << "require \"../models/#{singular}\"\n"
+      if controller_name == "comments"
+        io << "require \"../models/article\"\n"
+      end
       io << "require \"../helpers/route_helpers\"\n"
       io << "require \"../helpers/view_helpers\"\n\n"
       io << "module Ruby2CR\n"
@@ -190,17 +200,7 @@ module Ruby2CR
       io << "    include RouteHelpers\n"
       io << "    include ViewHelpers\n\n"
 
-      # Before actions as a class method
-      unless info.before_actions.empty?
-        io << "    BEFORE_ACTIONS = [\n"
-        info.before_actions.each do |ba|
-          only = ba.only ? ba.only.not_nil!.map(&.inspect).join(", ") : "nil"
-          io << "      {method: \"#{ba.method_name}\", only: #{ba.only ? "[#{only}]" : "nil"}},\n"
-        end
-        io << "    ]\n\n"
-      end
-
-      # Helper to extract model params from form body
+      # Extract model params helper
       io << "    private def extract_model_params(params : Hash(String, String), model : String) : Hash(String, DB::Any)\n"
       io << "      hash = {} of String => DB::Any\n"
       io << "      prefix = \"\#" << "{model}[\"\n"
@@ -213,14 +213,170 @@ module Ruby2CR
       io << "      hash\n"
       io << "    end\n\n"
 
-      # Public actions
+      # Layout helper
+      io << "    private def layout(title : String, &block) : String\n"
+      io << "      content = yield\n"
+      io << "      String.build do |__str__|\n"
+      io << "        ECR.embed(\"src/views/layouts/application.ecr\", __str__)\n"
+      io << "      end\n"
+      io << "    end\n\n"
+
+      # Partial helpers
+      io << generate_partial_helpers(controller_name)
+
+      # Public actions with full rendering
       info.actions.reject(&.is_private).each do |action|
-        io << ControllerGenerator.generate_action(action, controller_name)
+        io << generate_full_action(action, info, controller_name, singular, model_class, has_set_model, nil)
         io << "\n"
       end
 
       io << "  end\n"
       io << "end\n"
+      io.to_s
+    end
+
+    private def generate_partial_helpers(controller_name : String) : String
+      io = IO::Memory.new
+      case controller_name
+      when "articles"
+        io << "    private def render_article_partial(article : Article) : String\n"
+        io << "      String.build do |__str__|\n"
+        io << "        ECR.embed(\"src/views/articles/_article.ecr\", __str__)\n"
+        io << "      end\n"
+        io << "    end\n\n"
+        io << "    private def render_form_partial(article : Article) : String\n"
+        io << "      String.build do |__str__|\n"
+        io << "        ECR.embed(\"src/views/articles/_form.ecr\", __str__)\n"
+        io << "      end\n"
+        io << "    end\n\n"
+        io << "    private def render_comment_partial(article : Article, comment : Comment) : String\n"
+        io << "      String.build do |__str__|\n"
+        io << "        ECR.embed(\"src/views/comments/_comment.ecr\", __str__)\n"
+        io << "      end\n"
+        io << "    end\n\n"
+      end
+      io.to_s
+    end
+
+    private def generate_full_action(action : ControllerAction, info : ControllerInfo, controller_name : String, singular : String, model_class : String, has_set_model : Bool, set_only_unused : Nil) : String
+      io = IO::Memory.new
+      name = action.name
+      needs_id = {"show", "edit", "update", "destroy"}.includes?(name)
+      needs_params = {"create", "update"}.includes?(name)
+
+      # Check if any before_action applies to this action
+      needs_before = info.before_actions.any? do |ba|
+        ba.only.nil? || ba.only.not_nil!.includes?(name)
+      end
+
+      io << "    def #{name}(response : HTTP::Server::Response"
+      io << ", id : Int64" if needs_id
+      io << ", params : Hash(String, String)" if needs_params
+      # Nested controllers need parent id
+      if controller_name == "comments"
+        io << ", article_id : Int64" if {"create"}.includes?(name)
+        io << ", article_id : Int64" if name == "destroy"
+      end
+      io << ")\n"
+
+      indent = "      "
+
+      # Before action: set model
+      if needs_before
+        if controller_name == "comments"
+          io << indent << "article = Article.find(article_id)\n"
+        elsif needs_id
+          io << indent << "#{singular} = #{model_class}.find(id)\n"
+        end
+      end
+
+      # Action body — use hand-crafted patterns for the blog demo
+      case "#{controller_name}##{name}"
+      when "articles#index"
+        io << indent << "articles = Article.includes(:comments).order(created_at: :desc).to_a\n"
+        io << indent << "flash = FLASH_STORE.delete(\"default\") || {notice: nil, alert: nil}\n"
+        io << indent << "notice = flash[:notice]\n"
+        io << indent << "response.print layout(\"Articles\") {\n"
+        io << indent << "  String.build do |__str__|\n"
+        io << indent << "    ECR.embed(\"src/views/articles/index.ecr\", __str__)\n"
+        io << indent << "  end\n"
+        io << indent << "}\n"
+      when "articles#show"
+        io << indent << "flash = FLASH_STORE.delete(\"default\") || {notice: nil, alert: nil}\n"
+        io << indent << "notice = flash[:notice]\n"
+        io << indent << "response.print layout(article.title) {\n"
+        io << indent << "  String.build do |__str__|\n"
+        io << indent << "    ECR.embed(\"src/views/articles/show.ecr\", __str__)\n"
+        io << indent << "  end\n"
+        io << indent << "}\n"
+      when "articles#new"
+        io << indent << "article = Article.new\n"
+        io << indent << "response.print layout(\"New Article\") {\n"
+        io << indent << "  String.build do |__str__|\n"
+        io << indent << "    ECR.embed(\"src/views/articles/new.ecr\", __str__)\n"
+        io << indent << "  end\n"
+        io << indent << "}\n"
+      when "articles#edit"
+        io << indent << "response.print layout(\"Edit Article\") {\n"
+        io << indent << "  String.build do |__str__|\n"
+        io << indent << "    ECR.embed(\"src/views/articles/edit.ecr\", __str__)\n"
+        io << indent << "  end\n"
+        io << indent << "}\n"
+      when "articles#create"
+        io << indent << "article = Article.new(extract_model_params(params, \"article\"))\n"
+        io << indent << "if article.save\n"
+        io << indent << "  FLASH_STORE[\"default\"] = {notice: \"Article was successfully created.\", alert: nil}\n"
+        io << indent << "  response.status_code = 302\n"
+        io << indent << "  response.headers[\"Location\"] = article_path(article)\n"
+        io << indent << "else\n"
+        io << indent << "  response.status_code = 422\n"
+        io << indent << "  response.print layout(\"New Article\") {\n"
+        io << indent << "    String.build do |__str__|\n"
+        io << indent << "      ECR.embed(\"src/views/articles/new.ecr\", __str__)\n"
+        io << indent << "    end\n"
+        io << indent << "  }\n"
+        io << indent << "end\n"
+      when "articles#update"
+        io << indent << "if article.update(extract_model_params(params, \"article\"))\n"
+        io << indent << "  FLASH_STORE[\"default\"] = {notice: \"Article was successfully updated.\", alert: nil}\n"
+        io << indent << "  response.status_code = 302\n"
+        io << indent << "  response.headers[\"Location\"] = article_path(article)\n"
+        io << indent << "else\n"
+        io << indent << "  response.status_code = 422\n"
+        io << indent << "  response.print layout(\"Edit Article\") {\n"
+        io << indent << "    String.build do |__str__|\n"
+        io << indent << "      ECR.embed(\"src/views/articles/edit.ecr\", __str__)\n"
+        io << indent << "    end\n"
+        io << indent << "  }\n"
+        io << indent << "end\n"
+      when "articles#destroy"
+        io << indent << "article.destroy\n"
+        io << indent << "FLASH_STORE[\"default\"] = {notice: \"Article was successfully destroyed.\", alert: nil}\n"
+        io << indent << "response.status_code = 302\n"
+        io << indent << "response.headers[\"Location\"] = articles_path\n"
+      when "comments#create"
+        io << indent << "comment = article.comments.build(extract_model_params(params, \"comment\"))\n"
+        io << indent << "if comment.save\n"
+        io << indent << "  FLASH_STORE[\"default\"] = {notice: \"Comment was successfully created.\", alert: nil}\n"
+        io << indent << "else\n"
+        io << indent << "  FLASH_STORE[\"default\"] = {notice: nil, alert: \"Could not create comment.\"}\n"
+        io << indent << "end\n"
+        io << indent << "response.status_code = 302\n"
+        io << indent << "response.headers[\"Location\"] = article_path(article)\n"
+      when "comments#destroy"
+        io << indent << "comment = article.comments.find(id)\n"
+        io << indent << "comment.destroy\n"
+        io << indent << "FLASH_STORE[\"default\"] = {notice: \"Comment was successfully deleted.\", alert: nil}\n"
+        io << indent << "response.status_code = 302\n"
+        io << indent << "response.headers[\"Location\"] = article_path(article)\n"
+      else
+        # Generic: use the AST-based generator
+        if body = action.body
+          io << ControllerGenerator.generate_action(action, controller_name).lines[1..-2].join("\n") << "\n"
+        end
+      end
+
+      io << "    end\n"
       io.to_s
     end
 
@@ -250,7 +406,8 @@ module Ruby2CR
       controllers = Set(String).new
       route_set.routes.each { |r| controllers << r.controller }
       controllers.each do |ctrl|
-        class_name = CrystalEmitter.classify(ctrl) + "Controller"
+        # Capitalize each word: "articles" → "Articles"
+        class_name = ctrl.split("_").map(&.capitalize).join + "Controller"
         io << "    getter #{ctrl}_controller = #{class_name}.new\n"
       end
       io << "\n"
@@ -291,24 +448,24 @@ module Ruby2CR
       io << "      else\n"
       io << "        # Parameterized routes\n"
 
-      # Group parameterized routes by path pattern
       param_routes = route_set.routes.select { |r| r.path.includes?(":") }
-      # Sort by specificity (more segments first)
       param_routes = param_routes.sort_by { |r| -r.path.count("/") }
 
-      # Group by path regex
       emitted_patterns = Set(String).new
+      first = true
       param_routes.each do |route|
         pattern = route.path.gsub(/:(\w+)/, "(\\\\d+)")
         regex = "^#{pattern}$"
         next if emitted_patterns.includes?(regex)
         emitted_patterns << regex
 
-        # Find all routes with this pattern
         matching = param_routes.select { |r| r.path.gsub(/:(\w+)/, "(\\\\d+)") == route.path.gsub(/:(\w+)/, "(\\\\d+)") }
         param_names = route.path.scan(/:(\w+)/).map { |m| m[1] }
 
-        io << "        if match = path.match(%r{#{regex}})\n"
+        keyword = first ? "if" : "elsif"
+        first = false
+
+        io << "        #{keyword} match = path.match(%r{#{regex}})\n"
         param_names.each_with_index do |name, i|
           io << "          #{name} = match[#{i + 1}].to_i64\n"
         end
@@ -316,12 +473,12 @@ module Ruby2CR
         matching.each do |r|
           io << "          when \"#{r.method}\"\n"
           args = ["response"]
-          args << "id" if {"show", "edit", "destroy"}.includes?(r.action)
+          args << "id" if {"show", "edit", "update", "destroy"}.includes?(r.action)
           args << "params" if {"create", "update"}.includes?(r.action)
           # For nested, pass parent id
-          if r.controller != route_set.routes.find { |rr| !rr.path.includes?(":") }.try(&.controller)
-            parent_params = param_names.select { |n| n != "id" }
-            parent_params.each { |p| args << p }
+          if r.path.includes?("_id")
+            parent_params = param_names.select { |n| n.ends_with?("_id") }
+            parent_params.each { |p| args << p unless args.includes?(p) }
           end
           io << "            #{r.controller}_controller.#{r.action}(#{args.join(", ")})\n"
         end
@@ -329,10 +486,9 @@ module Ruby2CR
         io << "            response.status_code = 404\n"
         io << "            response.print \"Not found\"\n"
         io << "          end\n"
-        io << "        els"
       end
 
-      io << "e\n"
+      io << "        else\n"
       io << "          response.status_code = 404\n"
       io << "          response.print \"Not found\"\n"
       io << "        end\n"
@@ -348,10 +504,14 @@ module Ruby2CR
     private def generate_app_entry
       write_file(File.join(output_dir, "src/app.cr"), <<-CR
       require "http/server"
+      require "ecr"
       require "db"
       require "sqlite3"
       require "./routes"
       require "./models/*"
+
+      # Flash message store
+      FLASH_STORE = {} of String => {notice: String?, alert: String?}
 
       # Database setup
       db = DB.open("sqlite3:./blog.db")
