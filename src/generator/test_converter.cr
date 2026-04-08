@@ -43,52 +43,67 @@ module Ruby2CR
     end
 
     # Override CrystalExpr#convert_call for test-specific patterns
+    # String-level override delegates to AST-level map_call
     def convert_call(call : Prism::CallNode) : String
+      map_call(call).to_s
+    end
+
+    # Override CrystalExpr#map_call for test-specific AST transformations
+    def map_call(call : Prism::CallNode) : Crystal::ASTNode
       receiver = call.receiver
       method = call.name
       args = call.arg_nodes
 
       case method
       when "new"
-        recv = receiver ? expr(receiver) : "self"
+        recv = receiver ? map_node(receiver) : Crystal::Var.new("self")
         if args.size == 1 && args[0].is_a?(Prism::KeywordHashNode)
+          # Model.new(title: "...", body: "...") → Model.new({"title" => "...", "body" => "..."} of String => DB::Any)
           kwargs = args[0].as(Prism::KeywordHashNode)
-          pairs = kwargs.elements.compact_map do |el|
+          entries = kwargs.elements.compact_map do |el|
             next nil unless el.is_a?(Prism::AssocNode) && el.key.is_a?(Prism::SymbolNode)
-            "\"#{el.key.as(Prism::SymbolNode).value}\" => #{expr(el.value_node)}.as(DB::Any)"
+            Crystal::HashLiteral::Entry.new(
+              Crystal::StringLiteral.new(el.key.as(Prism::SymbolNode).value),
+              Crystal::Cast.new(map_node(el.value_node), Crystal::Path.new(["DB", "Any"]))
+            )
           end
-          "#{recv}.new({#{pairs.join(", ")}} of String => DB::Any)"
+          hash_literal = Crystal::HashLiteral.new(entries,
+            of: Crystal::HashLiteral::Entry.new(
+              Crystal::Path.new("String"),
+              Crystal::Path.new(["DB", "Any"])
+            ))
+          Crystal::Call.new(recv, "new", [hash_literal] of Crystal::ASTNode)
         elsif args.empty?
-          "#{recv}.new"
+          Crystal::Call.new(recv, "new")
         else
-          "#{recv}.new(#{args.map { |a| expr(a) }.join(", ")})"
+          Crystal::Call.new(recv, "new", args.map { |a| map_node(a) })
         end
       when "create", "build"
-        recv = receiver ? expr(receiver) : "self"
+        recv = receiver ? map_node(receiver) : Crystal::Var.new("self")
         if args.size == 1 && args[0].is_a?(Prism::KeywordHashNode)
           kwargs = args[0].as(Prism::KeywordHashNode)
-          pairs = kwargs.elements.compact_map do |el|
+          named_args = kwargs.elements.compact_map do |el|
             next nil unless el.is_a?(Prism::AssocNode) && el.key.is_a?(Prism::SymbolNode)
-            "#{el.key.as(Prism::SymbolNode).value}: #{expr(el.value_node)}"
+            Crystal::NamedArgument.new(el.key.as(Prism::SymbolNode).value, map_node(el.value_node))
           end
-          "#{recv}.#{method}(#{pairs.join(", ")})"
+          Crystal::Call.new(recv, method, named_args: named_args)
         else
-          "#{recv}.#{method}(#{args.map { |a| expr(a) }.join(", ")})"
+          Crystal::Call.new(recv, method, args.map { |a| map_node(a) })
         end
       else
-        # Handle bare calls with special cases
         if receiver
-          generic_call(call)
+          generic_call_node(call)
         else
           if method.ends_with?("_url")
+            # Convert _url helpers to _path
             path_method = method.chomp("_url") + "_path"
-            args.empty? ? path_method : "#{path_method}(#{args.map { |a| expr(a) }.join(", ")})"
+            Crystal::Call.new(nil, path_method, args.map { |a| map_node(a) })
           elsif args.size == 1 && args[0].is_a?(Prism::SymbolNode)
             # Fixture accessor: articles(:one) → articles("one")
             label = args[0].as(Prism::SymbolNode).value
-            "#{method}(\"#{label}\")"
+            Crystal::Call.new(nil, method, [Crystal::StringLiteral.new(label)] of Crystal::ASTNode)
           else
-            generic_call(call)
+            generic_call_node(call)
           end
         end
       end

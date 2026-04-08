@@ -52,36 +52,43 @@ module Ruby2CR
       end
     end
 
-    # Override CrystalExpr#convert_call for view helper transformations
+    # String-level override delegates to AST-level map_call
     def convert_call(call : Prism::CallNode) : String
+      map_call(call).to_s
+    end
+
+    # Override CrystalExpr#map_call for view helper transformations
+    def map_call(call : Prism::CallNode) : Crystal::ASTNode
       receiver = call.receiver
       method = call.name
       args = call.arg_nodes
 
       case method
       when "link_to"
-        convert_link_to(args)
+        Crystal::MacroLiteral.new(convert_link_to(args))
       when "button_to"
-        convert_button_to(args)
+        Crystal::MacroLiteral.new(convert_button_to(args))
       when "pluralize"
-        "pluralize(#{args.map { |a| expr(a) }.join(", ")})"
+        Crystal::Call.new(nil, "pluralize", args.map { |a| map_node(a) })
       when "truncate"
-        convert_truncate(args)
+        Crystal::MacroLiteral.new(convert_truncate(args))
       when "dom_id"
-        arg_strs = args.map { |a| a.is_a?(Prism::SymbolNode) ? a.value.inspect : expr(a) }
-        "dom_id(#{arg_strs.join(", ")})"
+        crystal_args = args.map do |a|
+          a.is_a?(Prism::SymbolNode) ? Crystal::StringLiteral.new(a.value).as(Crystal::ASTNode) : map_node(a)
+        end
+        Crystal::Call.new(nil, "dom_id", crystal_args)
       when "present?"
-        receiver ? expr(receiver) : method
+        receiver ? map_node(receiver) : Crystal::Call.new(nil, method)
       when "count"
         if receiver && args.empty?
-          "#{expr(receiver)}.size"
+          Crystal::Call.new(map_node(receiver), "size")
         elsif receiver
-          "#{expr(receiver)}.count(#{args.map { |a| expr(a) }.join(", ")})"
+          Crystal::Call.new(map_node(receiver), "count", args.map { |a| map_node(a) })
         else
-          "count"
+          Crystal::Call.new(nil, "count")
         end
       else
-        generic_call(call)
+        generic_call_node(call)
       end
     end
 

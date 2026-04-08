@@ -69,62 +69,84 @@ module Ruby2CR
       io.to_s
     end
 
-    # Override CrystalExpr#convert_call for controller-specific patterns
+    # String-level override delegates to AST-level map_call
     def convert_call(call : Prism::CallNode) : String
+      map_call(call).to_s
+    end
+
+    # Override CrystalExpr#map_call for controller-specific AST transformations
+    def map_call(call : Prism::CallNode) : Crystal::ASTNode
       receiver = call.receiver
       method = call.name
       args = call.arg_nodes
 
       case method
       when "find"
-        recv = receiver ? expr(receiver) : singular
-        arg = args.size == 1 ? expr(args[0]) : "id"
-        arg = "id" if arg.includes?("params")
-        "#{recv}.find(#{arg})"
+        recv = receiver ? map_node(receiver) : Crystal::Var.new(singular)
+        arg = if args.size == 1
+                mapped = map_node(args[0])
+                # params.expect(:id) → id
+                mapped.to_s.includes?("params") ? Crystal::Var.new("id") : mapped
+              else
+                Crystal::Var.new("id")
+              end
+        Crystal::Call.new(recv, "find", [arg] of Crystal::ASTNode)
       when "new"
-        recv = receiver ? expr(receiver) : singular
+        recv = receiver ? map_node(receiver) : Crystal::Var.new(singular)
         if args.empty?
-          "#{recv}.new"
+          Crystal::Call.new(recv, "new")
         elsif args[0].is_a?(Prism::CallNode) && args[0].as(Prism::CallNode).name.ends_with?("_params")
-          "#{recv}.new(extract_model_params(params, \"#{singular}\"))"
+          Crystal::Call.new(recv, "new", [
+            Crystal::Call.new(nil, "extract_model_params", [
+              Crystal::Var.new("params"),
+              Crystal::StringLiteral.new(singular),
+            ] of Crystal::ASTNode),
+          ] of Crystal::ASTNode)
         else
-          "#{recv}.new(#{expr(args[0])})"
+          Crystal::Call.new(recv, "new", [map_node(args[0])] of Crystal::ASTNode)
         end
       when "save", "save!"
-        recv = receiver ? expr(receiver) : singular
-        "#{recv}.save"
+        recv = receiver ? map_node(receiver) : Crystal::Var.new(singular)
+        Crystal::Call.new(recv, "save")
       when "update"
-        recv = receiver ? expr(receiver) : singular
+        recv = receiver ? map_node(receiver) : Crystal::Var.new(singular)
         if args.size == 1 && args[0].is_a?(Prism::CallNode) && args[0].as(Prism::CallNode).name.ends_with?("_params")
-          "#{recv}.update(extract_model_params(params, \"#{singular}\"))"
+          Crystal::Call.new(recv, "update", [
+            Crystal::Call.new(nil, "extract_model_params", [
+              Crystal::Var.new("params"),
+              Crystal::StringLiteral.new(singular),
+            ] of Crystal::ASTNode),
+          ] of Crystal::ASTNode)
         else
-          "#{recv}.update(#{args.map { |a| expr(a) }.join(", ")})"
+          Crystal::Call.new(recv, "update", args.map { |a| map_node(a) })
         end
       when "destroy", "destroy!"
-        recv = receiver ? expr(receiver) : singular
-        "#{recv}.destroy"
+        recv = receiver ? map_node(receiver) : Crystal::Var.new(singular)
+        Crystal::Call.new(recv, "destroy")
       when "build"
-        recv = receiver ? expr(receiver) : "self"
+        recv = receiver ? map_node(receiver) : Crystal::Var.new("self")
         if args.size == 1 && args[0].is_a?(Prism::CallNode) && args[0].as(Prism::CallNode).name.ends_with?("_params")
           child_singular = CrystalEmitter.singularize(args[0].as(Prism::CallNode).name.rchop("_params"))
-          "#{recv}.build(extract_model_params(params, \"#{child_singular}\"))"
+          Crystal::Call.new(recv, "build", [
+            Crystal::Call.new(nil, "extract_model_params", [
+              Crystal::Var.new("params"),
+              Crystal::StringLiteral.new(child_singular),
+            ] of Crystal::ASTNode),
+          ] of Crystal::ASTNode)
         else
-          "#{recv}.build(#{args.map { |a| expr(a) }.join(", ")})"
+          Crystal::Call.new(recv, "build", args.map { |a| map_node(a) })
         end
       when "expect"
-        if args.size == 1
-          case args[0]
-          when Prism::SymbolNode then args[0].as(Prism::SymbolNode).value
-          else "params"
-          end
+        if args.size == 1 && args[0].is_a?(Prism::SymbolNode)
+          Crystal::Var.new(args[0].as(Prism::SymbolNode).value)
         else
-          "params"
+          Crystal::Var.new("params")
         end
       when "includes", "order"
-        recv = receiver ? expr(receiver) : singular
-        "#{recv}.#{method}(#{args.map { |a| expr(a) }.join(", ")})"
+        recv = receiver ? map_node(receiver) : Crystal::Var.new(singular)
+        Crystal::Call.new(recv, method, args.map { |a| map_node(a) })
       else
-        generic_call(call)
+        generic_call_node(call)
       end
     end
 

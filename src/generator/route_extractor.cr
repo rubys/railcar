@@ -5,6 +5,7 @@
 #   resources :name, only: [...]
 #   nested resources (one level)
 
+require "compiler/crystal/syntax"
 require "../prism/bindings"
 require "../prism/deserializer"
 require "../generator/crystal_emitter"  # for inflection
