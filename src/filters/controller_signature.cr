@@ -1,18 +1,28 @@
-# Filter: Add HTTP response parameter and before_action inlining to controller methods.
+# Filter: Rewrite controller action signatures and inject Rails-equivalent behavior.
 #
-# Rails controller actions receive request context implicitly.
-# In Crystal, we pass `response` explicitly and inline before_action lookups.
+# This filter handles four related concerns that all operate on the same
+# Def node and share the same context (controller name, nested parent,
+# before_actions):
+#
+# 1. STRIP: Remove set_* and *_params private helper methods (inlined)
+# 2. SIGNATURE: Add typed parameters (response, id, params, parent_id)
+# 3. PREAMBLE: Flash consumption (for render actions) and before_action
+#    inlining (model loading from id)
+# 4. VIEW RENDER: Append layout + ECR.embed for display actions
+#
+# Also strips before_action, private, and broadcasts_to call nodes.
 #
 # Input:  def show
 #           ...
 #         end
 #
 # Output: def show(response : HTTP::Server::Response, id : Int64)
+#           flash = FLASH_STORE.delete("default") || {notice: nil, alert: nil}
+#           notice = flash[:notice]
 #           article = Article.find(id)
 #           ...
+#           response.print(layout(article.title) { ... ECR.embed ... })
 #         end
-#
-# Also strips private methods (set_*, *_params) and before_action calls.
 
 require "compiler/crystal/syntax"
 require "../generator/inflector"
@@ -35,7 +45,7 @@ module Ruby2CR
     def transform(node : Crystal::Def) : Crystal::ASTNode
       name = node.name
 
-      # Skip private helper methods
+      # --- 1. STRIP: Remove inlined private helpers ---
       if name.starts_with?("set_") || name.ends_with?("_params")
         return Crystal::Nop.new
       end
@@ -43,7 +53,7 @@ module Ruby2CR
       singular = Inflector.singularize(controller_name)
       model_class = Inflector.classify(singular)
 
-      # Build new parameter list
+      # --- 2. SIGNATURE: Build typed parameter list ---
       args = [Crystal::Arg.new("response", restriction: Crystal::Path.new(["HTTP", "Server", "Response"]))]
       if ID_ACTIONS.includes?(name)
         args << Crystal::Arg.new("id", restriction: Crystal::Path.new("Int64"))
@@ -61,10 +71,8 @@ module Ruby2CR
         end
       end
 
-      # Build before_action inlines
+      # --- 3. PREAMBLE: Flash consumption + before_action inlining ---
       preamble = [] of Crystal::ASTNode
-
-      # Flash consumption for rendering actions
       if RENDER_ACTIONS.includes?(name)
         preamble << Crystal::Assign.new(
           Crystal::Var.new("flash"),
@@ -103,7 +111,7 @@ module Ruby2CR
         end
       end
 
-      # View rendering for display actions
+      # --- 4. VIEW RENDER: Append layout + ECR.embed for display actions ---
       view_render = if RENDER_ACTIONS.includes?(name)
                       build_view_render(name, singular)
                     else
