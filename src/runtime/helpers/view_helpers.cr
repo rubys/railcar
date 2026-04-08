@@ -2,6 +2,8 @@
 # ActionView helpers needed by the blog demo.
 
 require "html"
+require "base64"
+require "json"
 
 module Ruby2CR::ViewHelpers
   def link_to(text : String, path : String, **opts) : String
@@ -110,5 +112,12 @@ module Ruby2CR::ViewHelpers
     html += %( class="#{HTML.escape(cls)}") if cls
     html += ">"
     html
+  end
+
+  # Generate a turbo-cable-stream-source element for WebSocket subscription.
+  # Turbo's JavaScript automatically connects when it sees this element.
+  def turbo_cable_stream_tag(channel : String) : String
+    signed = Base64.strict_encode(channel.to_json)
+    %(<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="#{HTML.escape(signed)}"></turbo-cable-stream-source>)
   end
 end

@@ -172,6 +172,7 @@ module Ruby2CR
         attrs.each { |k, v| hash[k.to_s] = v.as(DB::Any) }
         create!(hash)
       end
+
     end
 
     # ----- Column macro -----
@@ -254,6 +255,17 @@ module Ruby2CR
       def {{name.id}} : CollectionProxy({{model}})
         CollectionProxy({{model}}).new(self, {{fk.id.stringify}})
       end
+    end
+
+    # ----- Callback macros (no-op for now) -----
+    # The BroadcastsTo filter generates these but they're converted to
+    # save/destroy overrides by ModelBoilerplate. These macros exist
+    # so the generated code compiles.
+
+    macro after_save(&block)
+    end
+
+    macro after_destroy(&block)
     end
 
     macro belongs_to(name, model, foreign_key = nil)
@@ -342,6 +354,7 @@ module Ruby2CR
     # Subclasses override via macro-generated code
     private def run_validations
     end
+
 
     private def do_insert
       cols = attributes.keys.reject { |k| k == "id" }

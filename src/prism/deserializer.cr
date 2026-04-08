@@ -179,6 +179,12 @@ module Prism
         skip_location # opening_loc
         skip_location # closing_loc
         node
+      when 48 # EmbeddedStatementsNode: location, node?, location
+        node = EmbeddedStatementsNode.new
+        skip_location          # opening_loc
+        node.statements = read_optional_node
+        skip_location          # closing_loc
+        node
       when 19 # CallNode: node?, location?, constant, location?, location?, node?, location?, location?, node?
         node = CallNode.new
         node.receiver = read_optional_node
@@ -283,6 +289,21 @@ module Prism
         skip_location          # name_loc
         node.value = read_node # value
         skip_location          # operator_loc
+        node
+      when 85 # InterpolatedStringNode: location?, node[], location?
+        node = InterpolatedStringNode.new
+        skip_optional_location # opening_loc
+        node.parts = read_node_array
+        skip_optional_location # closing_loc
+        node
+      when 92 # LambdaNode: constant[], location, location, location, node?, node?
+        node = LambdaNode.new
+        node.locals = read_constant_array
+        skip_location          # operator_loc
+        skip_location          # opening_loc
+        skip_location          # closing_loc
+        node.parameters = read_optional_node
+        node.body = read_optional_node
         node
       when 94 # LocalVariableOperatorWriteNode: location, location, node, constant, constant, uint32
         node = LocalVariableOperatorWriteNode.new

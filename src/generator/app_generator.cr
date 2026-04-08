@@ -16,11 +16,13 @@ require "../filters/strong_params"
 require "../filters/redirect_to_response"
 require "../filters/render_to_ecr"
 require "../filters/strip_callbacks"
+require "../filters/broadcasts_to"
 require "../filters/model_boilerplate"
 require "../filters/model_namespace"
 require "../filters/controller_signature"
 require "../filters/controller_boilerplate"
 require "../filters/strip_turbo_stream"
+require "../filters/turbo_stream_connect"
 require "../filters/link_to_path_helper"
 require "../filters/button_to_path_helper"
 require "../filters/render_to_partial"
@@ -69,7 +71,7 @@ module Ruby2CR
       mkdir(runtime_dst)
       mkdir(File.join(runtime_dst, "helpers"))
 
-      %w[application_record.cr relation.cr collection_proxy.cr].each do |f|
+      %w[application_record.cr relation.cr collection_proxy.cr turbo_broadcast.cr broadcasts.cr].each do |f|
         src_path = File.join(runtime_src, f)
         copy_file(src_path, File.join(runtime_dst, f)) if File.exists?(src_path)
       end
@@ -113,10 +115,10 @@ module Ruby2CR
         next unless schema
 
         # Filter chain for models:
-        # 1. StripCallbacks    — remove broadcasts_to, after_*_commit, etc.
+        # 1. BroadcastsTo     — convert broadcasts_to/after_*_commit to broadcast calls
         # 2. ModelBoilerplate  — wrap in model("table") {}, add columns, validations, destroy
         ast = SourceParser.parse(path)
-        ast = ast.transform(StripCallbacks.new)
+        ast = ast.transform(BroadcastsTo.new)
         ast = ast.transform(ModelBoilerplate.new(schema, model))
 
         # Wrap in requires + module
@@ -124,6 +126,7 @@ module Ruby2CR
           Crystal::Require.new("../runtime/application_record"),
           Crystal::Require.new("../runtime/relation"),
           Crystal::Require.new("../runtime/collection_proxy"),
+          Crystal::Require.new("../runtime/broadcasts"),
         ] of Crystal::ASTNode
         mod = Crystal::ModuleDef.new(Crystal::Path.new("Ruby2CR"), body: ast)
         nodes = requires + [mod] of Crystal::ASTNode
@@ -169,8 +172,9 @@ module Ruby2CR
 
         # Process both .html.erb and .html.ecr templates
         Dir.glob(File.join(full_path, "*.html.{erb,ecr}")).each do |template_path|
-          ext = File.extname(template_path, 2)  # ".html.erb" or ".html.ecr"
-          basename = File.basename(template_path).chomp(ext)
+          # Strip double extension: .html.erb or .html.ecr
+          filename = File.basename(template_path)
+          basename = filename.sub(/\.html\.(erb|ecr)$/, "")
           ecr_name = "#{basename}.ecr"
           ecr_source = ERBConverter.convert_file(template_path, basename, controller_dir,
             view_filters: build_view_filters)
@@ -278,11 +282,13 @@ module Ruby2CR
     private def generate_app_entry(app_name : String)
       io = IO::Memory.new
       io << "require \"http/server\"\n"
+      io << "require \"http/web_socket\"\n"
       io << "require \"ecr\"\n"
       io << "require \"db\"\n"
       io << "require \"sqlite3\"\n"
       io << "require \"./routes\"\n"
-      io << "require \"./models/*\"\n\n"
+      io << "require \"./models/*\"\n"
+      io << "require \"./runtime/turbo_broadcast\"\n\n"
       io << "# Flash message store\n"
       io << "FLASH_STORE = {} of String => {notice: String?, alert: String?}\n\n"
       io << "# Database setup\n"
@@ -308,11 +314,18 @@ module Ruby2CR
         io << "\n"
       end
 
-      # Start server
+      # Start server with WebSocket support
       io << "# Start server\n"
       io << "router = Ruby2CR::Router.new\n"
+      io << "ws_handler = HTTP::WebSocketHandler.new do |ws, context|\n"
+      io << "  Ruby2CR::TurboBroadcast.handle_connection(ws)\n"
+      io << "end\n\n"
       io << "server = HTTP::Server.new do |context|\n"
-      io << "  router.dispatch(context)\n"
+      io << "  if context.request.path == \"/cable\"\n"
+      io << "    ws_handler.call(context)\n"
+      io << "  else\n"
+      io << "    router.dispatch(context)\n"
+      io << "  end\n"
       io << "end\n\n"
       io << "address = server.bind_tcp(\"0.0.0.0\", 3000)\n"
       io << "puts \"#{app_name} running at http://\#" << "{address}\"\n"
@@ -402,6 +415,7 @@ module Ruby2CR
           input[type=text], textarea { display: block; width: 100%; border: 1px solid #d1d5db; border-radius: 0.25rem; padding: 0.5rem; }
           label { display: block; font-weight: 500; margin-top: 1rem; }
         </style>
+        <script src="https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/dist/turbo.es2017-esm.js" type="module"></script>
       </head>
       <body>
         <div class="container">
@@ -416,7 +430,7 @@ module Ruby2CR
     private def build_view_filters : Array(Crystal::Transformer)
       [
         InstanceVarToLocal.new,      # @article → article
-        StripTurboStream.new,        # remove turbo_stream_from (placeholder)
+        TurboStreamConnect.new,      # turbo_stream_from → turbo-cable-stream-source element
         LinkToPathHelper.new,        # link_to(@article) → link_to(article_path(article))
         ButtonToPathHelper.new,      # button_to(@article) → button_to(article_path(article))
         RenderToPartial.new,         # render @articles → articles.each { render_article_partial }

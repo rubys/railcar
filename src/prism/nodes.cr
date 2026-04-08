@@ -15,15 +15,18 @@ module Prism
     ConstantPathNode =  37
     ConstantReadNode =  42
     FalseNode        =  51
-    DefNode                 =  45
-    ElseNode                =  47
-    HashNode                =  65
+    DefNode                    =  45
+    ElseNode                   =  47
+    EmbeddedStatementsNode     =  48
+    HashNode                   =  65
+    InterpolatedStringNode     =  85
     IfNode                  =  67
     InstanceVariableReadNode =  79
     InstanceVariableWriteNode = 81
     IntegerNode             =  82
     KeywordHashNode         =  90
-    LocalVariableOperatorWriteNode = 94
+    LambdaNode                     =  92
+    LocalVariableOperatorWriteNode =  94
     LocalVariableReadNode          =  96
     LocalVariableWriteNode         =  98
     NilNode                 = 108
@@ -256,6 +259,35 @@ module Prism
 
     def children : Array(Node)
       body ? [body.not_nil!] : [] of Node
+    end
+  end
+
+  class EmbeddedStatementsNode < Node
+    property statements : Node? = nil
+
+    def children : Array(Node)
+      statements ? [statements.not_nil!] : [] of Node
+    end
+  end
+
+  class InterpolatedStringNode < Node
+    property parts : Array(Node) = [] of Node
+
+    def children : Array(Node)
+      parts
+    end
+  end
+
+  class LambdaNode < Node
+    property locals : Array(String) = [] of String
+    property parameters : Node? = nil
+    property body : Node? = nil
+
+    def children : Array(Node)
+      nodes = [] of Node
+      nodes << parameters.not_nil! if parameters
+      nodes << body.not_nil! if body
+      nodes
     end
   end
 

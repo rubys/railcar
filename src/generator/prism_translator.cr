@@ -66,9 +66,43 @@ module Ruby2CR
         body = node.body ? translate(node.body.not_nil!) : Crystal::Nop.new
         Crystal::Block.new(args: params, body: body)
 
+      # --- Lambdas ---
+      when Prism::LambdaNode
+        params = node.locals.map { |name| Crystal::Var.new(name) }
+        body = node.body ? translate(node.body.not_nil!) : Crystal::Nop.new
+        # Crystal doesn't have -> syntax for procs in the same way
+        # Translate as a block-like construct (ProcLiteral)
+        Crystal::ProcLiteral.new(Crystal::Def.new("->", node.locals.map { |n| Crystal::Arg.new(n) }, body: body))
+
       # --- Literals ---
       when Prism::StringNode
         Crystal::StringLiteral.new(node.value)
+
+      when Prism::InterpolatedStringNode
+        parts = node.parts.map do |part|
+          case part
+          when Prism::StringNode
+            Crystal::StringLiteral.new(part.value).as(Crystal::ASTNode)
+          when Prism::EmbeddedStatementsNode
+            if stmts = part.statements
+              case stmts
+              when Prism::StatementsNode
+                if stmts.body.size == 1
+                  translate(stmts.body[0])
+                else
+                  Crystal::Expressions.new(stmts.body.map { |s| translate(s) })
+                end
+              else
+                translate(stmts)
+              end
+            else
+              Crystal::Nop.new.as(Crystal::ASTNode)
+            end
+          else
+            translate(part)
+          end
+        end
+        Crystal::StringInterpolation.new(parts)
 
       when Prism::SymbolNode
         Crystal::SymbolLiteral.new(node.value)

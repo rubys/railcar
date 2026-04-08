@@ -53,6 +53,8 @@ module Ruby2CR
       end
 
       node.body = Crystal::Expressions.new(body_nodes)
+      # Strip ApplicationController superclass (not needed in Crystal)
+      node.superclass = nil
       node
     end
 

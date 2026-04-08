@@ -53,17 +53,29 @@ module Ruby2CR
         ] of Crystal::ASTNode)
       end
 
-      # Copy existing class body (has_many, belongs_to, validates, etc.)
+      # Add associations from metadata (not from translated AST, which has wrong format)
+      model_info.associations.each do |assoc|
+        block_stmts << build_association(assoc)
+      end
+
+      # Copy non-association, non-validation body expressions (callbacks, etc.)
       case body = node.body
       when Crystal::Expressions
         body.expressions.each do |expr|
           next if expr.is_a?(Crystal::Nop)
+          next if is_association_call?(expr)
+          next if is_validates_call?(expr)
           block_stmts << expr
         end
       when Crystal::Nop
         # empty
       else
-        block_stmts << body if body
+        block_stmts << body if body && !is_association_call?(body) && !is_validates_call?(body)
+      end
+
+      # Add validations from metadata
+      model_info.validations.each do |v|
+        block_stmts << build_validation(v)
       end
 
       block = Crystal::Block.new(body: Crystal::Expressions.new(block_stmts))
@@ -128,6 +140,66 @@ module Ruby2CR
         return_type: Crystal::Path.new("Bool")
       )
       def_node
+    end
+
+    private def is_association_call?(node : Crystal::ASTNode) : Bool
+      node.is_a?(Crystal::Call) && {"has_many", "has_one", "belongs_to"}.includes?(node.as(Crystal::Call).name)
+    end
+
+    private def is_validates_call?(node : Crystal::ASTNode) : Bool
+      node.is_a?(Crystal::Call) && node.as(Crystal::Call).name == "validates"
+    end
+
+    private def build_association(assoc : Association) : Crystal::Call
+      singular_table = Inflector.singularize(schema.name)
+      case assoc.kind
+      when :belongs_to
+        target_class = Inflector.classify(assoc.name)
+        fk = assoc.options["foreign_key"]? || "#{assoc.name}_id"
+        Crystal::Call.new(nil, "belongs_to", [
+          Crystal::Call.new(nil, assoc.name),
+          Crystal::Path.new(target_class),
+        ] of Crystal::ASTNode, named_args: [
+          Crystal::NamedArgument.new("foreign_key", Crystal::StringLiteral.new(fk)),
+        ])
+      when :has_many
+        target_class = Inflector.classify(Inflector.singularize(assoc.name))
+        fk = assoc.options["foreign_key"]? || "#{singular_table}_id"
+        named = [Crystal::NamedArgument.new("foreign_key", Crystal::StringLiteral.new(fk))]
+        if dep = assoc.options["dependent"]?
+          named << Crystal::NamedArgument.new("dependent", Crystal::SymbolLiteral.new(dep))
+        end
+        Crystal::Call.new(nil, "has_many", [
+          Crystal::Call.new(nil, assoc.name),
+          Crystal::Path.new(target_class),
+        ] of Crystal::ASTNode, named_args: named)
+      when :has_one
+        target_class = Inflector.classify(assoc.name)
+        fk = assoc.options["foreign_key"]? || "#{singular_table}_id"
+        Crystal::Call.new(nil, "has_one", [
+          Crystal::Call.new(nil, assoc.name),
+          Crystal::Path.new(target_class),
+        ] of Crystal::ASTNode, named_args: [
+          Crystal::NamedArgument.new("foreign_key", Crystal::StringLiteral.new(fk)),
+        ])
+      else
+        Crystal::Call.new(nil, "# unknown association #{assoc.kind}")
+      end
+    end
+
+    private def build_validation(v : Validation) : Crystal::Call
+      named_args = case v.kind
+                   when "presence"
+                     [Crystal::NamedArgument.new("presence", Crystal::BoolLiteral.new(true))]
+                   when "length"
+                     entries = v.options.map do |k, val|
+                       Crystal::NamedTupleLiteral::Entry.new(k, Crystal::NumberLiteral.new(val))
+                     end
+                     [Crystal::NamedArgument.new("length", Crystal::NamedTupleLiteral.new(entries))]
+                   else
+                     [Crystal::NamedArgument.new(v.kind, Crystal::BoolLiteral.new(true))]
+                   end
+      Crystal::Call.new(nil, "validates", [Crystal::Call.new(nil, v.field)] of Crystal::ASTNode, named_args: named_args)
     end
   end
 end

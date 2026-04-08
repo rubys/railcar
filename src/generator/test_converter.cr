@@ -222,7 +222,7 @@ module Ruby2CR
           when "patch"  then build_http_call(stmt, "PATCH")
           when "delete" then build_http_call(stmt, "DELETE")
           when "assert_response"      then build_response_assertion(stmt)
-          when "assert_redirected_to" then [build_should(Crystal::Var.new("response.status_code"), "eq", Crystal::NumberLiteral.new("302"))]
+          when "assert_redirected_to" then wrap(build_should(Crystal::Var.new("response.status_code"), "eq", Crystal::NumberLiteral.new("302")))
           when "assert_select"        then build_assert_select(stmt)
           when "assert_difference"    then build_assert_difference(stmt, controller_test: true)
           when "assert_no_difference" then build_assert_no_difference(stmt, controller_test: true)
@@ -240,13 +240,13 @@ module Ruby2CR
       args = call.arg_nodes
       case call.name
       when "assert_equal"
-        [build_should(map_node(args[1]), "eq", map_node(args[0]))]
+        wrap(build_should(map_node(args[1]), "eq", map_node(args[0])))
       when "assert_not_nil"
-        [build_should_not(map_node(args[0]), "be_nil")]
+        wrap(build_should_not(map_node(args[0]), "be_nil"))
       when "assert_not"
-        [build_should(map_node(args[0]), "be_false")]
+        wrap(build_should(map_node(args[0]), "be_false"))
       when "assert"
-        [build_should(map_node(args[0]), "be_true")]
+        wrap(build_should(map_node(args[0]), "be_true"))
       when "assert_difference"
         build_assert_difference(call)
       when "assert_no_difference"
@@ -263,6 +263,11 @@ module Ruby2CR
 
     private def build_should_not(actual : Crystal::ASTNode, matcher : String) : Crystal::ASTNode
       Crystal::Call.new(actual, "should_not", [Crystal::Call.new(nil, matcher)] of Crystal::ASTNode)
+    end
+
+    # Wrap a single ASTNode in a properly typed array
+    private def wrap(node : Crystal::ASTNode) : Array(Crystal::ASTNode)
+      [node] of Crystal::ASTNode
     end
 
     private def build_assert_difference(call : Prism::CallNode, controller_test : Bool = false) : Array(Crystal::ASTNode)
@@ -349,11 +354,11 @@ module Ruby2CR
                  end
                else 200
                end
-      [build_should(
+      wrap(build_should(
         Crystal::Call.new(Crystal::Var.new("response"), "status_code"),
         "eq",
         Crystal::NumberLiteral.new(status.to_s)
-      )]
+      ))
     end
 
     private def build_assert_select(call : Prism::CallNode) : Array(Crystal::ASTNode)
@@ -362,7 +367,7 @@ module Ruby2CR
 
       if args.size > 1 && args[1].is_a?(Prism::StringNode)
         expected = args[1].as(Prism::StringNode).value
-        [build_should(Crystal::Call.new(Crystal::Var.new("response"), "body"), "contain", Crystal::StringLiteral.new(expected))]
+        wrap(build_should(Crystal::Call.new(Crystal::Var.new("response"), "body"), "contain", Crystal::StringLiteral.new(expected)))
       else
         check = if selector.starts_with?("#")
                   "id=\"#{selector.lchop("#").split(" ").first.split(".").first}\""
@@ -373,7 +378,7 @@ module Ruby2CR
                 else
                   "<#{selector}"
                 end
-        [build_should(Crystal::Call.new(Crystal::Var.new("response"), "body"), "contain", Crystal::StringLiteral.new(check))]
+        wrap(build_should(Crystal::Call.new(Crystal::Var.new("response"), "body"), "contain", Crystal::StringLiteral.new(check)))
       end
     end
 
