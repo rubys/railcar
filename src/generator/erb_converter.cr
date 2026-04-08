@@ -56,26 +56,18 @@ module Ruby2CR
 
     # Find the body of the render method
     private def self.find_def_body(node : Prism::Node) : Prism::Node?
-      # DefNode is type 45, handled as GenericNode
-      # Its children include the body (3rd optional_node)
       case node
       when Prism::StatementsNode
         node.body.each do |child|
           result = find_def_body(child)
           return result if result
         end
+      when Prism::DefNode
+        return node.body
       when Prism::GenericNode
-        if node.type_id == 45 # DefNode
-          # DefNode children captured by skip_unknown_node_fields:
-          # receiver(opt), parameters(opt), body(opt) — body is what we want
-          # The children array has all nodes found during field traversal
-          node.child_nodes.each do |child|
-            if child.is_a?(Prism::StatementsNode)
-              return child
-            end
-            result = find_def_body(child)
-            return result if result
-          end
+        node.child_nodes.each do |child|
+          result = find_def_body(child)
+          return result if result
         end
       end
       nil
@@ -128,14 +120,11 @@ module Ruby2CR
           # Other calls — emit as code block
           io << "<% " << expr_to_crystal(node, controller) << " %>\n"
         end
+      when Prism::IfNode
+        emit_if(node, io, template_name, controller)
       when Prism::GenericNode
-        case node.type_id
-        when 67 # IfNode
-          emit_if(node, io, template_name, controller)
-        else
-          node.child_nodes.each do |child|
-            emit_statement(child, io, template_name, controller)
-          end
+        node.child_nodes.each do |child|
+          emit_statement(child, io, template_name, controller)
         end
       when Prism::StatementsNode
         emit_statements(node, io, template_name, controller)
@@ -370,13 +359,11 @@ module Ruby2CR
           else
             io << "<% " << expr_to_crystal(stmt, controller) << " %>\n"
           end
+        when Prism::IfNode
+          emit_if(stmt, io, "", controller)
         when Prism::GenericNode
-          if stmt.type_id == 67 # IfNode
-            emit_if(stmt, io, "", controller)
-          else
-            stmt.child_nodes.each do |child|
-              emit_form_body(child, io, model_prefix, controller)
-            end
+          stmt.child_nodes.each do |child|
+            emit_form_body(child, io, model_prefix, controller)
           end
         else
           emit_statement(stmt, io, "", controller)
@@ -427,30 +414,34 @@ module Ruby2CR
       end
     end
 
-    # Emit an if/else block
-    private def self.emit_if(node : Prism::GenericNode, io : IO, template_name : String, controller : String)
-      children = node.child_nodes
-      # IfNode children: condition, then_body, else_node (optional)
-      return if children.empty?
-
-      condition = children[0]?
-      then_body = children.size > 1 ? children[1]? : nil
-      else_node = children.size > 2 ? children[2]? : nil
-
-      io << "<% if " << expr_to_crystal(condition.not_nil!, controller) << " %>\n" if condition
-      emit_statements(then_body.not_nil!, io, template_name, controller) if then_body
-
-      if else_node
-        # ElseNode (type 47) has children: the body
-        if else_node.is_a?(Prism::GenericNode) && else_node.type_id == 47
+    # Emit an if/else block — handles both IfNode and GenericNode(67)
+    private def self.emit_if(node : Prism::Node, io : IO, template_name : String, controller : String)
+      case node
+      when Prism::IfNode
+        io << "<% if " << expr_to_crystal(node.condition, controller) << " %>\n"
+        emit_statements(node.then_body.not_nil!, io, template_name, controller) if node.then_body
+        if else_clause = node.else_clause
           io << "<% else %>\n"
-          else_node.child_nodes.each do |child|
-            emit_statements(child, io, template_name, controller)
+          case else_clause
+          when Prism::ElseNode
+            emit_statements(else_clause.body.not_nil!, io, template_name, controller) if else_clause.body
+          else
+            emit_statements(else_clause, io, template_name, controller)
           end
         end
+        io << "<% end %>\n"
+      when Prism::GenericNode
+        # Fallback for untyped IfNode
+        children = node.child_nodes
+        return if children.empty?
+        io << "<% if " << expr_to_crystal(children[0], controller) << " %>\n"
+        emit_statements(children[1], io, template_name, controller) if children.size > 1
+        if children.size > 2
+          io << "<% else %>\n"
+          children[2].children.each { |c| emit_statements(c, io, template_name, controller) }
+        end
+        io << "<% end %>\n"
       end
-
-      io << "<% end %>\n"
     end
 
     # Convert a Prism AST node to a Crystal expression string

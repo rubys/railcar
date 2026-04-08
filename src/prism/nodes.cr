@@ -15,8 +15,12 @@ module Prism
     ConstantPathNode =  37
     ConstantReadNode =  42
     FalseNode        =  51
+    DefNode                 =  45
+    ElseNode                =  47
     HashNode                =  65
+    IfNode                  =  67
     InstanceVariableReadNode =  79
+    InstanceVariableWriteNode = 81
     IntegerNode             =  82
     KeywordHashNode         =  90
     LocalVariableOperatorWriteNode = 94
@@ -231,8 +235,54 @@ module Prism
   class NilNode < Node
   end
 
+  class DefNode < Node
+    property name : String = ""
+    property receiver : Node? = nil
+    property parameters : Node? = nil
+    property body : Node? = nil
+    property locals : Array(String) = [] of String
+
+    def children : Array(Node)
+      nodes = [] of Node
+      nodes << receiver.not_nil! if receiver
+      nodes << parameters.not_nil! if parameters
+      nodes << body.not_nil! if body
+      nodes
+    end
+  end
+
+  class ElseNode < Node
+    property body : Node? = nil
+
+    def children : Array(Node)
+      body ? [body.not_nil!] : [] of Node
+    end
+  end
+
+  class IfNode < Node
+    property condition : Node = GenericNode.new(0)
+    property then_body : Node? = nil
+    property else_clause : Node? = nil
+
+    def children : Array(Node)
+      nodes = [condition] of Node
+      nodes << then_body.not_nil! if then_body
+      nodes << else_clause.not_nil! if else_clause
+      nodes
+    end
+  end
+
   class InstanceVariableReadNode < Node
     property name : String = ""
+  end
+
+  class InstanceVariableWriteNode < Node
+    property name : String = ""
+    property value : Node = GenericNode.new(0)
+
+    def children : Array(Node)
+      [value]
+    end
   end
 
   class LocalVariableOperatorWriteNode < Node

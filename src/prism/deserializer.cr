@@ -134,6 +134,12 @@ module Prism
       node_id = read_varuint
       loc_start = read_varuint
       loc_length = read_varuint
+
+      # DefNode has a raw uint32 between location and flags
+      if type_id == 45
+        @pos += 4 # raw uint32 prefix
+      end
+
       flags = read_varuint
 
       node = read_node_fields(type_id)
@@ -237,9 +243,46 @@ module Prism
         node = StatementsNode.new
         node.body = read_node_array
         node
+      when 45 # DefNode: constant, location, node?, node?, node?, constant[], location, location?, location?, location?, location?, location?
+        node = DefNode.new
+        node.name = read_constant
+        skip_location                    # name_loc
+        node.receiver = read_optional_node
+        node.parameters = read_optional_node
+        node.body = read_optional_node
+        node.locals = read_constant_array
+        skip_location                    # def_keyword_loc
+        skip_optional_location           # operator_loc
+        skip_optional_location           # lparen_loc
+        skip_optional_location           # rparen_loc
+        skip_optional_location           # equal_loc
+        skip_optional_location           # end_keyword_loc
+        node
+      when 47 # ElseNode: location, node?, location?
+        node = ElseNode.new
+        skip_location          # else_keyword_loc
+        node.body = read_optional_node
+        skip_optional_location # end_keyword_loc
+        node
+      when 67 # IfNode: location?, node, location?, node?, node?, location?
+        node = IfNode.new
+        skip_optional_location # if_keyword_loc
+        node.condition = read_node
+        skip_optional_location # then_keyword_loc
+        node.then_body = read_optional_node
+        node.else_clause = read_optional_node
+        skip_optional_location # end_keyword_loc
+        node
       when 79 # InstanceVariableReadNode: constant
         node = InstanceVariableReadNode.new
         node.name = read_constant
+        node
+      when 81 # InstanceVariableWriteNode: constant, location, node, location
+        node = InstanceVariableWriteNode.new
+        node.name = read_constant
+        skip_location          # name_loc
+        node.value = read_node # value
+        skip_location          # operator_loc
         node
       when 94 # LocalVariableOperatorWriteNode: location, location, node, constant, constant, uint32
         node = LocalVariableOperatorWriteNode.new
@@ -525,7 +568,7 @@ module Prism
       42_u8 => [:constant],                                                                                          # ConstantReadNode
       43_u8 => [:constant],                                                                                          # ConstantTargetNode
       44_u8 => [:constant, :location, :node, :location],                                                             # ConstantWriteNode
-      45_u8 => [:raw_uint32, :constant, :location, :optional_node, :optional_node, :optional_node, :constant_array, :location, :optional_location, :optional_location, :optional_location, :optional_location, :optional_location], # DefNode (has raw uint32 prefix before fields)
+      45_u8 => [:constant, :location, :optional_node, :optional_node, :optional_node, :constant_array, :location, :optional_location, :optional_location, :optional_location, :optional_location, :optional_location], # DefNode (raw uint32 prefix handled in read_node)
       46_u8 => [:optional_location, :node, :optional_location, :location],                                           # DefinedNode
       47_u8 => [:location, :optional_node, :optional_location],                                                      # ElseNode
       48_u8 => [:location, :optional_node, :location],                                                               # EmbeddedStatementsNode
