@@ -20,6 +20,10 @@ require "../filters/model_boilerplate"
 require "../filters/model_namespace"
 require "../filters/controller_signature"
 require "../filters/controller_boilerplate"
+require "../filters/strip_turbo_stream"
+require "../filters/link_to_path_helper"
+require "../filters/button_to_path_helper"
+require "../filters/render_to_partial"
 require "./source_parser"
 require "./ddl_generator"
 require "./seed_extractor"
@@ -168,7 +172,8 @@ module Ruby2CR
           ext = File.extname(template_path, 2)  # ".html.erb" or ".html.ecr"
           basename = File.basename(template_path).chomp(ext)
           ecr_name = "#{basename}.ecr"
-          ecr_source = ERBConverter.convert_file(template_path, basename, controller_dir)
+          ecr_source = ERBConverter.convert_file(template_path, basename, controller_dir,
+            view_filters: build_view_filters)
           write_file(File.join(views_dst, ecr_name), ecr_source)
           puts "  views/#{controller_dir}/#{ecr_name}"
         end
@@ -405,6 +410,17 @@ module Ruby2CR
       </body>
       </html>
       ECR
+    end
+
+    # View filter chain — applied to template AST before ECR emission
+    private def build_view_filters : Array(Crystal::Transformer)
+      [
+        InstanceVarToLocal.new,      # @article → article
+        StripTurboStream.new,        # remove turbo_stream_from (placeholder)
+        LinkToPathHelper.new,        # link_to(@article) → link_to(article_path(article))
+        ButtonToPathHelper.new,      # button_to(@article) → button_to(article_path(article))
+        RenderToPartial.new,         # render @articles → articles.each { render_article_partial }
+      ] of Crystal::Transformer
     end
 
     # File utilities

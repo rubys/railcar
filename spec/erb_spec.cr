@@ -1,6 +1,19 @@
 require "spec"
 require "./test_paths"
 require "../src/generator/erb_converter"
+require "../src/filters/instance_var_to_local"
+require "../src/filters/strip_turbo_stream"
+require "../src/filters/link_to_path_helper"
+require "../src/filters/button_to_path_helper"
+require "../src/filters/render_to_partial"
+
+VIEW_FILTERS = [
+  Ruby2CR::InstanceVarToLocal.new,
+  Ruby2CR::StripTurboStream.new,
+  Ruby2CR::LinkToPathHelper.new,
+  Ruby2CR::ButtonToPathHelper.new,
+  Ruby2CR::RenderToPartial.new,
+] of Crystal::Transformer
 
 describe Ruby2CR::ErbCompiler do
   it "converts simple ERB to Ruby source" do
@@ -32,7 +45,7 @@ end
 describe Ruby2CR::ERBConverter do
   it "converts simple output expressions" do
     erb = "<h1><%= @article.title %></h1>"
-    ecr = Ruby2CR::ERBConverter.convert(erb, "show", "articles")
+    ecr = Ruby2CR::ERBConverter.convert(erb, "show", "articles", view_filters: VIEW_FILTERS)
     ecr.should contain "article.title"
     ecr.should contain "<h1>"
     ecr.should_not contain "@article"
@@ -40,41 +53,41 @@ describe Ruby2CR::ERBConverter do
 
   it "converts link_to with model to path helper" do
     erb = %(<%= link_to "Show", @article, class: "btn" %>)
-    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles")
+    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
     ecr.should contain "article_path(article)"
     ecr.should contain "link_to"
   end
 
   it "converts link_to with path helper" do
     erb = %(<%= link_to "Back", articles_path, class: "btn" %>)
-    ecr = Ruby2CR::ERBConverter.convert(erb, "show", "articles")
+    ecr = Ruby2CR::ERBConverter.convert(erb, "show", "articles", view_filters: VIEW_FILTERS)
     ecr.should contain "articles_path"
     ecr.should_not contain "articles_path_path"
   end
 
   it "converts render @collection to loop" do
     erb = %(<%= render @articles %>)
-    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles")
+    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
     ecr.should contain "articles.each"
     ecr.should contain "render_article_partial"
   end
 
   it "converts render partial with locals" do
     erb = %(<%= render "form", article: @article %>)
-    ecr = Ruby2CR::ERBConverter.convert(erb, "new", "articles")
+    ecr = Ruby2CR::ERBConverter.convert(erb, "new", "articles", view_filters: VIEW_FILTERS)
     ecr.should contain "render_form_partial(article)"
   end
 
   it "strips turbo_stream_from" do
     erb = %(<%= turbo_stream_from "articles" %>\n<h1>Articles</h1>)
-    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles")
+    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
     ecr.should_not contain "turbo_stream"
     ecr.should contain "Articles"
   end
 
   it "converts if/else blocks" do
     erb = "<% if notice.present? %>\n  <p><%= notice %></p>\n<% end %>\n"
-    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles")
+    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
     ecr.should contain "<% if"
     ecr.should contain "notice"
     ecr.should contain "<% end %>"
@@ -82,31 +95,21 @@ describe Ruby2CR::ERBConverter do
 
   it "converts the blog index template" do
     erb = File.read(File.join(BLOG_DIR, "app/views/articles/index.html.erb"))
-    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles")
+    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
 
-    # Should have articles loop
     ecr.should contain "articles.each"
     ecr.should contain "render_article_partial"
-
-    # Should not have turbo_stream
     ecr.should_not contain "turbo_stream_from"
-
-    # Should have New article link
     ecr.should contain "new_article_path"
   end
 
   it "converts the blog show template" do
     erb = File.read(File.join(BLOG_DIR, "app/views/articles/show.html.erb"))
-    ecr = Ruby2CR::ERBConverter.convert(erb, "show", "articles")
+    ecr = Ruby2CR::ERBConverter.convert(erb, "show", "articles", view_filters: VIEW_FILTERS)
 
-    # Should have article content
     ecr.should contain "article.title"
     ecr.should contain "article.body"
-
-    # Should have comments loop
     ecr.should contain "render_comment_partial"
-
-    # Should have comment form
     ecr.should contain "<form"
     ecr.should contain "comment"
   end
@@ -119,7 +122,7 @@ describe Ruby2CR::ERBConverter do
       <%= form.submit "Add Comment", class: "bg-blue-600 text-white px-4 py-2 rounded" %>
     <% end %>
     ERB
-    ecr = Ruby2CR::ERBConverter.convert(erb, "show", "articles")
+    ecr = Ruby2CR::ERBConverter.convert(erb, "show", "articles", view_filters: VIEW_FILTERS)
 
     ecr.should contain "<form"
     ecr.should contain "article_comments_path"
