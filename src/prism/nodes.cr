@@ -15,12 +15,17 @@ module Prism
     ConstantPathNode =  37
     ConstantReadNode =  42
     FalseNode        =  51
-    HashNode         =  65
-    IntegerNode      =  82
-    KeywordHashNode  =  90
-    NilNode          = 108
-    ProgramNode      = 121
-    SelfNode         = 133
+    HashNode                =  65
+    InstanceVariableReadNode =  79
+    IntegerNode             =  82
+    KeywordHashNode         =  90
+    LocalVariableOperatorWriteNode = 94
+    LocalVariableReadNode          =  96
+    LocalVariableWriteNode         =  98
+    NilNode                 = 108
+    ParenthesesNode         = 116
+    ProgramNode             = 121
+    SelfNode                = 133
     StatementsNode   = 140
     StringNode       = 141
     SymbolNode       = 143
@@ -224,6 +229,40 @@ module Prism
   end
 
   class NilNode < Node
+  end
+
+  class InstanceVariableReadNode < Node
+    property name : String = ""
+  end
+
+  class LocalVariableOperatorWriteNode < Node
+    property name : String = ""
+    property operator : String = ""
+    property value : Node = GenericNode.new(0)
+    property depth : UInt32 = 0
+
+    def children : Array(Node)
+      [value]
+    end
+  end
+
+  class LocalVariableReadNode < Node
+    property name : String = ""
+    property depth : UInt32 = 0
+  end
+
+  class LocalVariableWriteNode < Node
+    property name : String = ""
+    property depth : UInt32 = 0
+    property value : Node = GenericNode.new(0)
+  end
+
+  class ParenthesesNode < Node
+    property body : Node? = nil
+
+    def children : Array(Node)
+      body ? [body.not_nil!] : [] of Node
+    end
   end
 
   class SelfNode < Node

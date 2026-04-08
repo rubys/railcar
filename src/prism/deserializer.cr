@@ -237,6 +237,38 @@ module Prism
         node = StatementsNode.new
         node.body = read_node_array
         node
+      when 79 # InstanceVariableReadNode: constant
+        node = InstanceVariableReadNode.new
+        node.name = read_constant
+        node
+      when 94 # LocalVariableOperatorWriteNode: location, location, node, constant, constant, uint32
+        node = LocalVariableOperatorWriteNode.new
+        skip_location          # name_loc
+        skip_location          # binary_operator_loc
+        node.value = read_node # value
+        node.name = read_constant  # name
+        node.operator = read_constant  # binary_operator
+        node.depth = read_varuint  # depth
+        node
+      when 96 # LocalVariableReadNode: constant, uint32
+        node = LocalVariableReadNode.new
+        node.name = read_constant
+        node.depth = read_varuint
+        node
+      when 98 # LocalVariableWriteNode: constant, uint32, location, node, location
+        node = LocalVariableWriteNode.new
+        node.name = read_constant
+        node.depth = read_varuint
+        skip_location          # name_loc
+        node.value = read_node # value
+        skip_location          # operator_loc
+        node
+      when 116 # ParenthesesNode: node?, location, location
+        node = ParenthesesNode.new
+        node.body = read_optional_node
+        skip_location # opening_loc
+        skip_location # closing_loc
+        node
       when 141 # StringNode: location?, location, location?, string
         node = StringNode.new
         skip_optional_location # opening_loc
