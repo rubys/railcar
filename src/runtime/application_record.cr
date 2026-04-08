@@ -260,6 +260,16 @@ module Ruby2CR
       {% fk = foreign_key || (name.id.stringify + "_id") %}
       {% BELONGS_TO[name.id.stringify] = {model: model.stringify, foreign_key: fk} %}
 
+      # Implicit belongs_to presence validation (Rails 5+ behavior)
+      {% VALIDATIONS << "proc_belongs_to_#{name.id}".id %}
+      def self.validate_belongs_to_{{name.id}}(record : self)
+        fk_val = record.attributes[{{fk}}]?
+        if fk_val.nil?
+          record.errors[{{name.id.stringify}}] ||= [] of String
+          record.errors[{{name.id.stringify}}] << "must exist"
+        end
+      end
+
       def {{name.id}} : {{model}}
         fk_val = attributes[{{fk}}]?
         raise RecordNotFound.new("No #{{{name.id.stringify}}} foreign key set") unless fk_val
@@ -295,7 +305,8 @@ module Ruby2CR
       else
         do_insert
       end
-      true
+      # do_insert may have added errors (e.g., FK constraint failure)
+      errors.empty?
     end
 
     def save! : Bool
@@ -352,10 +363,20 @@ module Ruby2CR
         placeholders += ", ?"
       end
 
-      self.class.db!.exec(
-        "INSERT INTO #{self.class.table_name} (#{col_names}) VALUES (#{placeholders})",
-        args: vals
-      )
+      begin
+        self.class.db!.exec(
+          "INSERT INTO #{self.class.table_name} (#{col_names}) VALUES (#{placeholders})",
+          args: vals
+        )
+      rescue ex : SQLite3::Exception
+        if ex.message.try(&.includes?("FOREIGN KEY constraint failed"))
+          @errors["base"] ||= [] of String
+          @errors["base"] << "Foreign key constraint failed"
+          @persisted = false
+          return
+        end
+        raise ex
+      end
 
       # Get the last inserted ID
       result = self.class.db!.scalar("SELECT last_insert_rowid()").as(Int64)

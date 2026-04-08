@@ -18,6 +18,7 @@ module Ruby2CR
     end
 
     private def run_validations
+      self.class.validate_belongs_to_article(self)
       self.class.validate_presence_commenter(self)
       self.class.validate_presence_body(self)
     end

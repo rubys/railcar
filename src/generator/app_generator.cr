@@ -469,6 +469,7 @@ module Ruby2CR
       io << "FLASH_STORE = {} of String => {notice: String?, alert: String?}\n\n"
       io << "# Database setup\n"
       io << "db = DB.open(\"sqlite3:./#{app_name}.db\")\n"
+      io << "db.exec(\"PRAGMA foreign_keys = ON\")\n"
 
       # Set db on all models
       models.each_key do |name|
@@ -650,6 +651,7 @@ module Ruby2CR
           # DB setup function
           io << "def setup_test_database : DB::Database\n"
           io << "  db = DB.open(\"sqlite3::memory:\")\n"
+          io << "  db.exec(\"PRAGMA foreign_keys = ON\")\n"
           schemas.each do |schema|
             io << "  db.exec <<-SQL\n"
             io << "    CREATE TABLE #{schema.name} (\n"

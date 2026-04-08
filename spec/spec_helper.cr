@@ -5,6 +5,7 @@ require "../src/models/comment"
 # Set up an in-memory SQLite database with the blog schema
 def setup_database : DB::Database
   db = DB.open("sqlite3::memory:")
+  db.exec("PRAGMA foreign_keys = ON")
 
   db.exec <<-SQL
     CREATE TABLE articles (

@@ -105,10 +105,14 @@ module Ruby2CR
       # Generate run_validations override
       presence_validations = model.validations.select { |v| v.kind == "presence" }
       length_validations = model.validations.select { |v| v.kind == "length" }
-      all_validations = presence_validations + length_validations
+      belongs_to_assocs = model.associations.select { |a| a.kind == :belongs_to }
+      has_any_validations = !presence_validations.empty? || !length_validations.empty? || !belongs_to_assocs.empty?
 
-      unless all_validations.empty?
+      if has_any_validations
         io << "    private def run_validations\n"
+        belongs_to_assocs.each do |a|
+          io << "      self.class.validate_belongs_to_#{a.name}(self)\n"
+        end
         presence_validations.each do |v|
           io << "      self.class.validate_presence_#{v.field}(self)\n"
         end
