@@ -62,7 +62,7 @@ Each filter is a `Crystal::Transformer` subclass that pattern-matches on AST nod
 
 | Filter | What it does |
 |--------|-------------|
-| `StripCallbacks` | Removes `broadcasts_to`, `after_*_commit`, etc. |
+| `BroadcastsTo` | Converts `broadcasts_to`/`after_*_commit` to broadcast calls |
 | `ModelBoilerplate` | Wraps body in `model("table") { columns + declarations }`, adds validations |
 
 **View filters** (applied to template AST before ERBConverter):
@@ -70,7 +70,8 @@ Each filter is a `Crystal::Transformer` subclass that pattern-matches on AST nod
 | Filter | What it does |
 |--------|-------------|
 | `InstanceVarToLocal` | `@article` → `article` |
-| `StripTurboStream` | Removes `turbo_stream_from` (placeholder for future implementation) |
+| `TurboStreamConnect` | Converts `turbo_stream_from` to `turbo-cable-stream-source` element |
+| `RailsHelpers` | `present?` → truthy, `count` → `size`, `dom_id` symbols → strings |
 | `LinkToPathHelper` | `link_to("Show", @article)` → `link_to("Show", article_path(article))` |
 | `ButtonToPathHelper` | Same for `button_to`, including nested resource arrays |
 | `RenderToPartial` | `render @articles` → `articles.each { render_article_partial(article) }` |

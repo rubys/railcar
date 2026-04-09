@@ -211,6 +211,7 @@ module Ruby2CR
         end
 
       else
+        STDERR.puts "ruby2cr: unhandled Prism node type: #{node.class.name}"
         Crystal::Nop.new
       end
     end

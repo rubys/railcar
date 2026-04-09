@@ -193,6 +193,13 @@ module Ruby2CR
       end
 
 
+      private def allowed_columns : Set(String)
+        allowed = COLUMNS.keys.to_set
+        allowed.add("created_at")
+        allowed.add("updated_at")
+        allowed
+      end
+
       macro finished
         def run_after_save_callbacks
           \{% for method in @type.methods %}
@@ -298,13 +305,15 @@ module Ruby2CR
     # ----- Callback macros -----
 
     macro after_save(&block)
-      def _after_save_{{block.body.stringify.size}}
+      {% CALLBACK_COUNTER = (CALLBACK_COUNTER || 0) + 1 %}
+      def _after_save_{{CALLBACK_COUNTER}}
         {{block.body}}
       end
     end
 
     macro after_destroy(&block)
-      def _after_destroy_{{block.body.stringify.size}}
+      {% CALLBACK_COUNTER = (CALLBACK_COUNTER || 0) + 1 %}
+      def _after_destroy_{{CALLBACK_COUNTER}}
         {{block.body}}
       end
     end
@@ -418,7 +427,8 @@ module Ruby2CR
 
 
     private def do_insert
-      cols = attributes.keys.reject { |k| k == "id" }
+      allowed = allowed_columns
+      cols = attributes.keys.reject { |k| k == "id" || !allowed.includes?(k) }
       vals = cols.map { |c| attributes[c] }
       placeholders = cols.map { "?" }.join(", ")
       col_names = cols.map { |c| "\"#{c}\"" }.join(", ")
@@ -460,7 +470,8 @@ module Ruby2CR
     end
 
     private def do_update
-      cols = attributes.keys.reject { |k| k == "id" || k == "created_at" }
+      allowed = allowed_columns
+      cols = attributes.keys.reject { |k| k == "id" || k == "created_at" || !allowed.includes?(k) }
 
       now = Time.utc.to_s("%F %T.%6N")
       attributes["updated_at"] = now.as(DB::Any)
