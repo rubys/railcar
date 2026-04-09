@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+
+      - name: Install SQLite3 dev headers
+        run: sudo apt-get install -y libsqlite3-dev
+
+      - name: Install prism gem
+        run: gem install prism
+
+      - name: Install Crystal dependencies
+        run: shards install
+
+      - name: Build libprism
+        run: make build/lib/libprism.a
+
+      - name: Download demo blog
+        run: make build/demo/blog/Gemfile
+
+      - name: Run tests
+        run: crystal spec
+
+      - name: Build binary
+        run: crystal build src/cli.cr -o build/railcar
