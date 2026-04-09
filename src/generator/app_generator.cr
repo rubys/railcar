@@ -477,7 +477,8 @@ module Ruby2CR
       <head>
         <title><%= title %></title>
         <link rel="stylesheet" href="/app.css">
-        <script src="https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/dist/turbo.es2017-esm.js" type="module"></script>
+        <script type="importmap">{"imports":{"@hotwired/turbo":"https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/dist/turbo.es2017-esm.js","@rails/actioncable/src":"https://cdn.jsdelivr.net/npm/@rails/actioncable@8/src/index.js","@rails/actioncable":"https://cdn.jsdelivr.net/npm/@rails/actioncable@8/src/index.js"}}</script>
+        <script type="module">import "@hotwired/turbo";import "https://cdn.jsdelivr.net/npm/@hotwired/turbo-rails@8/app/javascript/turbo/index.js";</script>
       </head>
       <body>
         <main class="container mx-auto mt-28 px-5 flex flex-col">
