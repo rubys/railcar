@@ -2,6 +2,8 @@ require "db"
 require "sqlite3"
 require "log"
 require "./errors"
+require "./turbo_broadcast"
+require "./broadcasts"
 
 module Ruby2CR
   Log = ::Log.for("sql")
@@ -32,6 +34,8 @@ module Ruby2CR
   # and query building. Mirrors the subset of ActiveRecord used by the
   # blog demo.
   abstract class ApplicationRecord
+    include Broadcasts
+
     # Class-level database connection
     class_property db : DB::Database?
 
@@ -190,6 +194,24 @@ module Ruby2CR
 
     end
 
+    macro finished
+      def run_after_save_callbacks
+        {% for method in @type.methods %}
+          {% if method.name.starts_with?("_after_save_") %}
+            {{method.name}}
+          {% end %}
+        {% end %}
+      end
+
+      def run_after_destroy_callbacks
+        {% for method in @type.methods %}
+          {% if method.name.starts_with?("_after_destroy_") %}
+            {{method.name}}
+          {% end %}
+        {% end %}
+      end
+    end
+
     # ----- Column macro -----
 
     macro column(name, type, **options)
@@ -272,15 +294,18 @@ module Ruby2CR
       end
     end
 
-    # ----- Callback macros (no-op for now) -----
-    # The BroadcastsTo filter generates these but they're converted to
-    # save/destroy overrides by ModelBoilerplate. These macros exist
-    # so the generated code compiles.
+    # ----- Callback macros -----
 
     macro after_save(&block)
+      def _after_save_{{block.body.stringify.size}}
+        {{block.body}}
+      end
     end
 
     macro after_destroy(&block)
+      def _after_destroy_{{block.body.stringify.size}}
+        {{block.body}}
+      end
     end
 
     macro belongs_to(name, model, foreign_key = nil)
@@ -333,8 +358,16 @@ module Ruby2CR
         do_insert
       end
       # do_insert may have added errors (e.g., FK constraint failure)
-      errors.empty?
+      if errors.empty?
+        run_after_save_callbacks
+        true
+      else
+        false
+      end
     end
+
+    # Callback runners are generated at end of model() macro
+    # using the AFTER_SAVE_METHODS/AFTER_DESTROY_METHODS arrays
 
     def save! : Bool
       raise ValidationError.new(errors) unless save
@@ -356,6 +389,7 @@ module Ruby2CR
       self.class.db!.exec("DELETE FROM #{self.class.table_name} WHERE id = ?", id)
       @destroyed = true
       @persisted = false
+      run_after_destroy_callbacks
       true
     end
 
@@ -373,6 +407,12 @@ module Ruby2CR
 
     # Subclasses override via macro-generated code
     private def run_validations
+    end
+
+    def run_after_save_callbacks
+    end
+
+    def run_after_destroy_callbacks
     end
 
 

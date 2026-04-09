@@ -13,9 +13,11 @@
 require "http/web_socket"
 require "json"
 require "base64"
+require "log"
 
 module Ruby2CR
   class TurboBroadcast
+    Log = ::Log.for("cable")
     # Channel name → set of subscribed WebSockets
     @@channels = {} of String => Array(HTTP::WebSocket)
 
@@ -28,6 +30,7 @@ module Ruby2CR
     # Broadcast turbo-stream HTML to all subscribers of a channel
     def self.broadcast(channel : String, html : String)
       sockets = @@channels[channel]?
+      Log.info { "Broadcast to '#{channel}' (#{sockets.try(&.size) || 0} subscribers)" }
       return unless sockets
 
       sockets.each do |ws|
@@ -84,6 +87,7 @@ module Ruby2CR
 
     # Handle incoming Action Cable protocol message
     def self.handle_message(ws : HTTP::WebSocket, raw : String)
+      Log.debug { "Message: #{raw}" }
       data = JSON.parse(raw)
 
       command = data["command"]?.try(&.as_s)
@@ -127,6 +131,7 @@ module Ruby2CR
     end
 
     private def self.subscribe(ws : HTTP::WebSocket, channel : String, identifier : String)
+      Log.info { "Subscribe to '#{channel}'" }
       @@channels[channel] ||= [] of HTTP::WebSocket
       @@channels[channel] << ws unless @@channels[channel].includes?(ws)
 
