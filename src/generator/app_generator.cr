@@ -59,6 +59,7 @@ module Ruby2CR
       generate_controllers
       generate_routes
       generate_app_entry(app_name)
+      generate_tailwind
       generate_tests
 
       puts "Done! Output in #{output_dir}/"
@@ -284,6 +285,7 @@ module Ruby2CR
       io = IO::Memory.new
       io << "require \"http/server\"\n"
       io << "require \"http/web_socket\"\n"
+      io << "require \"mime\"\n"
       io << "require \"ecr\"\n"
       io << "require \"db\"\n"
       io << "require \"sqlite3\"\n"
@@ -322,8 +324,13 @@ module Ruby2CR
       io << "  Ruby2CR::TurboBroadcast.handle_connection(ws)\n"
       io << "end\n\n"
       io << "server = HTTP::Server.new do |context|\n"
-      io << "  if context.request.path == \"/cable\"\n"
+      io << "  path = context.request.path\n"
+      io << "  if path == \"/cable\"\n"
       io << "    ws_handler.call(context)\n"
+      io << "  elsif path.starts_with?(\"/\") && File.exists?(\"public\" + path)\n"
+      io << "    # Serve static files\n"
+      io << "    context.response.content_type = MIME.from_filename(path, \"application/octet-stream\")\n"
+      io << "    context.response.print(File.read(\"public\" + path))\n"
       io << "  else\n"
       io << "    router.dispatch(context)\n"
       io << "  end\n"
@@ -398,28 +405,72 @@ module Ruby2CR
       end
     end
 
+    # Generate Tailwind CSS
+    private def generate_tailwind
+      public_dir = File.join(output_dir, "public")
+      mkdir(public_dir)
+
+      # Write input CSS for Tailwind
+      write_file(File.join(output_dir, "input.css"), "@import \"tailwindcss\";\n")
+
+      # Find tailwindcss binary
+      tailwind = find_tailwind
+      unless tailwind
+        puts "  tailwind: not found (skipping CSS generation)"
+        puts "  Install: gem install tailwindcss-rails"
+        return
+      end
+
+      # Run tailwindcss to generate CSS from the templates
+      result = Process.run(tailwind,
+        ["--input", File.join(output_dir, "input.css"),
+         "--output", File.join(public_dir, "app.css"),
+         "--minify"],
+        chdir: output_dir,
+        output: Process::Redirect::Close,
+        error: Process::Redirect::Close
+      )
+
+      if result.success?
+        size = File.size(File.join(public_dir, "app.css"))
+        puts "  public/app.css (#{size} bytes)"
+      else
+        puts "  tailwind: build failed"
+      end
+    end
+
+    private def find_tailwind : String?
+      # Check PATH
+      path = Process.find_executable("tailwindcss")
+      return path if path
+
+      # Check Ruby gem
+      begin
+        output = IO::Memory.new
+        result = Process.run("ruby",
+          ["-e", "puts Gem::Specification.find_by_name('tailwindcss-rails').bin_dir + '/tailwindcss'"],
+          output: output, error: Process::Redirect::Close)
+        if result.success?
+          bin = output.to_s.strip
+          return bin if File.exists?(bin)
+        end
+      rescue
+      end
+
+      nil
+    end
+
     private def generate_layout : String
       <<-ECR
       <!DOCTYPE html>
       <html>
       <head>
         <title><%= title %></title>
-        <style>
-          body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
-          .notice { background: #f0fdf4; color: #16a34a; padding: 0.5rem 1rem; border-radius: 0.375rem; margin-bottom: 1rem; }
-          .alert { background: #fef2f2; color: #dc2626; padding: 0.5rem 1rem; border-radius: 0.375rem; margin-bottom: 1rem; }
-          .btn { display: inline-block; padding: 0.5rem 1rem; border-radius: 0.375rem; text-decoration: none; font-weight: 500; }
-          .btn-primary { background: #2563eb; color: white; }
-          .btn-default { background: #f3f4f6; }
-          .btn-danger { background: #dc2626; color: white; border: none; cursor: pointer; }
-          form.inline { display: inline-block; }
-          input[type=text], textarea { display: block; width: 100%; border: 1px solid #d1d5db; border-radius: 0.25rem; padding: 0.5rem; }
-          label { display: block; font-weight: 500; margin-top: 1rem; }
-        </style>
+        <link rel="stylesheet" href="/app.css">
         <script src="https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/dist/turbo.es2017-esm.js" type="module"></script>
       </head>
       <body>
-        <div class="container">
+        <div class="container mx-auto mt-28 px-5 flex flex-col">
           <%= content %>
         </div>
       </body>
