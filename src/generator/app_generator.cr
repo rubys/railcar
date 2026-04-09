@@ -475,9 +475,9 @@ module Ruby2CR
         <script src="https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/dist/turbo.es2017-esm.js" type="module"></script>
       </head>
       <body>
-        <div class="container mx-auto mt-28 px-5 flex flex-col">
+        <main class="container mx-auto mt-28 px-5 flex flex-col">
           <%= content %>
-        </div>
+        </main>
       </body>
       </html>
       ECR

@@ -9,7 +9,7 @@ module Ruby2CR::ViewHelpers
   def link_to(text : String, path : String, **opts) : String
     cls = opts[:class]?
     if cls
-      %(<a href="#{HTML.escape(path)}" class="#{HTML.escape(cls)}">#{HTML.escape(text)}</a>)
+      %(<a class="#{HTML.escape(cls)}" href="#{HTML.escape(path)}">#{HTML.escape(text)}</a>)
     else
       %(<a href="#{HTML.escape(path)}">#{HTML.escape(text)}</a>)
     end
@@ -21,18 +21,18 @@ module Ruby2CR::ViewHelpers
     form_class = opts[:form_class]?
 
     html = String.build do |io|
-      io << %(<form action="#{HTML.escape(path)}" method="post")
+      io << %(<form class="button_to" method="post" action="#{HTML.escape(path)}")
       io << %( class="#{HTML.escape(form_class)}") if form_class
       io << ">"
       if method != "post"
         io << %(<input type="hidden" name="_method" value="#{HTML.escape(method)}">)
       end
-      io << %(<button type="submit")
+      io << %(<button)
       io << %( class="#{HTML.escape(cls)}") if cls
       if confirm
-        io << %( onclick="return confirm('#{HTML.escape(confirm)}')")
+        io << %( data-turbo-confirm="#{HTML.escape(confirm)}")
       end
-      io << ">#{HTML.escape(text)}</button>"
+      io << %( type="submit">#{HTML.escape(text)}</button>)
       io << "</form>"
     end
     html
@@ -93,17 +93,18 @@ module Ruby2CR::ViewHelpers
     html = %(<textarea name="#{HTML.escape(name)}")
     html += %( class="#{HTML.escape(cls)}") if cls
     html += %( rows="#{rows}") if rows
-    html += ">#{HTML.escape(value)}</textarea>"
+    html += ">\n#{HTML.escape(value)}</textarea>"
     html
   end
 
   def label_tag(name : String, text : String? = nil, **opts) : String
     cls = opts[:class]?
     label_text = text || name.capitalize
-    html = %(<label for="#{HTML.escape(name)}")
-    html += %( class="#{HTML.escape(cls)}") if cls
-    html += ">#{HTML.escape(label_text)}</label>"
-    html
+    if cls
+      %(<label class="#{HTML.escape(cls)}" for="#{HTML.escape(name)}">#{HTML.escape(label_text)}</label>)
+    else
+      %(<label for="#{HTML.escape(name)}">#{HTML.escape(label_text)}</label>)
+    end
   end
 
   def submit_tag(text : String = "Submit", **opts) : String

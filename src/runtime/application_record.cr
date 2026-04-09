@@ -211,14 +211,14 @@ module Ruby2CR
           val = attributes[{{name.id.stringify}}]?
           case val
           when Time then val
-          when String then Time.parse_utc(val, "%F %T")
+          when String then Time.parse_utc(val, val.includes?('.') ? "%F %T.%6N" : "%F %T")
           else Time.utc
           end
         {% elsif type.stringify == "Time?" %}
           val = attributes[{{name.id.stringify}}]?
           case val
           when Time then val
-          when String then Time.parse_utc(val, "%F %T")
+          when String then Time.parse_utc(val, val.includes?('.') ? "%F %T.%6N" : "%F %T")
           else nil
           end
         {% else %}
@@ -382,7 +382,7 @@ module Ruby2CR
       placeholders = cols.map { "?" }.join(", ")
       col_names = cols.map { |c| "\"#{c}\"" }.join(", ")
 
-      now = Time.utc.to_s("%F %T")
+      now = Time.utc.to_s("%F %T.%6N")
       if !attributes.has_key?("created_at")
         cols << "created_at"
         vals << now.as(DB::Any)
@@ -421,7 +421,7 @@ module Ruby2CR
     private def do_update
       cols = attributes.keys.reject { |k| k == "id" || k == "created_at" }
 
-      now = Time.utc.to_s("%F %T")
+      now = Time.utc.to_s("%F %T.%6N")
       attributes["updated_at"] = now.as(DB::Any)
       cols << "updated_at" unless cols.includes?("updated_at")
 
