@@ -67,8 +67,16 @@ module Ruby2CR
 
     private def build_collection_loop(collection : Crystal::ASTNode, name : String) : Crystal::ASTNode
       singular = Inflector.singularize(name)
-      partial_call = Crystal::Call.new(nil, "render_#{singular}_partial",
-        [Crystal::Var.new(singular)] of Crystal::ASTNode)
+
+      # If the collection is an association (e.g., article.comments),
+      # pass the parent as an extra arg to the partial
+      partial_args = [Crystal::Var.new(singular)] of Crystal::ASTNode
+      if collection.is_a?(Crystal::Call) && collection.obj
+        parent = collection.obj.not_nil!
+        partial_args.unshift(parent.clone)
+      end
+
+      partial_call = Crystal::Call.new(nil, "render_#{singular}_partial", partial_args)
 
       Crystal::Call.new(collection, "each",
         block: Crystal::Block.new(

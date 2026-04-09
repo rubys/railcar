@@ -72,7 +72,7 @@ module Ruby2CR
       mkdir(runtime_dst)
       mkdir(File.join(runtime_dst, "helpers"))
 
-      %w[application_record.cr relation.cr collection_proxy.cr turbo_broadcast.cr broadcasts.cr].each do |f|
+      %w[application_record.cr relation.cr collection_proxy.cr errors.cr turbo_broadcast.cr broadcasts.cr].each do |f|
         src_path = File.join(runtime_src, f)
         copy_file(src_path, File.join(runtime_dst, f)) if File.exists?(src_path)
       end

@@ -1,13 +1,16 @@
 require "db"
 require "sqlite3"
+require "./errors"
 
 module Ruby2CR
   # Validation error with per-field messages
   class ValidationError < Exception
-    getter errors : Hash(String, Array(String))
+    getter errors : Errors
 
     def initialize(@errors)
-      super("Validation failed: #{errors.map { |k, v| "#{k} #{v.join(", ")}" }.join(", ")}")
+      messages = [] of String
+      errors.data.each { |k, v| messages << "#{k} #{v.join(", ")}" }
+      super("Validation failed: #{messages.join(", ")}")
     end
   end
 
@@ -26,7 +29,7 @@ module Ruby2CR
     getter attributes : Hash(String, DB::Any)
     getter? persisted : Bool = false
     getter? destroyed : Bool = false
-    property errors : Hash(String, Array(String)) = {} of String => Array(String)
+    property errors : Errors = Errors.new
 
     def initialize(@attributes = {} of String => DB::Any, @persisted = false)
     end
@@ -224,8 +227,8 @@ module Ruby2CR
         def self.validate_presence_{{field.id}}(record : self)
           val = record.attributes[{{field.id.stringify}}]?
           if val.nil? || (val.is_a?(String) && val.empty?)
-            record.errors[{{field.id.stringify}}] ||= [] of String
-            record.errors[{{field.id.stringify}}] << "can't be blank"
+            
+            record.errors.add({{field.id.stringify}}, "can't be blank")
           end
         end
       {% end %}
@@ -237,8 +240,8 @@ module Ruby2CR
           if val.is_a?(String)
             {% if options[:length][:minimum] %}
               if val.size < {{options[:length][:minimum]}}
-                record.errors[{{field.id.stringify}}] ||= [] of String
-                record.errors[{{field.id.stringify}}] << "is too short (minimum is {{options[:length][:minimum]}} characters)"
+                
+                record.errors.add({{field.id.stringify}}, "is too short (minimum is {{options[:length][:minimum]}} characters)")
               end
             {% end %}
           end
@@ -277,8 +280,8 @@ module Ruby2CR
       def self.validate_belongs_to_{{name.id}}(record : self)
         fk_val = record.attributes[{{fk}}]?
         if fk_val.nil?
-          record.errors[{{name.id.stringify}}] ||= [] of String
-          record.errors[{{name.id.stringify}}] << "must exist"
+          
+          record.errors.add({{name.id.stringify}}, "must exist")
         end
       end
 
@@ -304,7 +307,7 @@ module Ruby2CR
     # ----- Instance methods -----
 
     def valid? : Bool
-      @errors = {} of String => Array(String)
+      @errors = Errors.new
       run_validations
       errors.empty?
     end
@@ -341,6 +344,11 @@ module Ruby2CR
       self.class.db!.exec("DELETE FROM #{self.class.table_name} WHERE id = ?", id)
       @destroyed = true
       @persisted = false
+      true
+    end
+
+    def destroy! : Bool
+      raise "Failed to destroy" unless destroy
       true
     end
 
@@ -383,8 +391,7 @@ module Ruby2CR
         )
       rescue ex : SQLite3::Exception
         if ex.message.try(&.includes?("FOREIGN KEY constraint failed"))
-          @errors["base"] ||= [] of String
-          @errors["base"] << "Foreign key constraint failed"
+          @errors.add("base", "Foreign key constraint failed")
           @persisted = false
           return
         end

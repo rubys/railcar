@@ -186,16 +186,8 @@ module Ruby2CR
             other_singular = Inflector.singularize(other_dir)
             other_model = Inflector.classify(other_singular)
 
-            # Include if this is a nested resource relationship
-            if nested_parent && Inflector.pluralize(nested_parent.not_nil!) == other_dir
-              # Skip — parent already has its own partials
-            elsif controller_name == Inflector.pluralize(nested_parent || "")
-              # This controller is the parent — include child partials
-            else
-              # Check by name: articles controller might render comment partials
-              next unless other_dir_is_related?(other_dir)
-            end
-
+            # Include partials from other controllers' views
+            # (e.g., articles controller renders comment partials)
             helpers << build_partial_def(
               partial_name,
               other_dir,
