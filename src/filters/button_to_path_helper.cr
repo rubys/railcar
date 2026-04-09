@@ -9,7 +9,7 @@
 
 require "compiler/crystal/syntax"
 
-module Ruby2CR
+module Railcar
   class ButtonToPathHelper < Crystal::Transformer
     def transform(node : Crystal::Call) : Crystal::ASTNode
       if node.name == "button_to" && node.args.size >= 2

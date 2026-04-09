@@ -15,25 +15,25 @@ require "../runtime/helpers/route_helpers"
 require "../runtime/helpers/view_helpers"
 require "../runtime/helpers/params_helpers"
 
-include Ruby2CR::RouteHelpers
-include Ruby2CR::ViewHelpers
-include Ruby2CR::ParamsHelpers
+include Railcar::RouteHelpers
+include Railcar::ViewHelpers
+include Railcar::ParamsHelpers
 
 # ----- Render helpers (partials) -----
 
-def render_article_partial(article : Ruby2CR::Article) : String
+def render_article_partial(article : Railcar::Article) : String
   String.build do |__str__|
     ECR.embed("src/app/views/articles/_article.ecr", __str__)
   end
 end
 
-def render_comment_partial(article : Ruby2CR::Article, comment : Ruby2CR::Comment) : String
+def render_comment_partial(article : Railcar::Article, comment : Railcar::Comment) : String
   String.build do |__str__|
     ECR.embed("src/app/views/comments/_comment.ecr", __str__)
   end
 end
 
-def render_form_partial(article : Ruby2CR::Article) : String
+def render_form_partial(article : Railcar::Article) : String
   String.build do |__str__|
     ECR.embed("src/app/views/articles/_form.ecr", __str__)
   end
@@ -62,9 +62,9 @@ end
 # ----- Request routing -----
 
 class BlogApp
-  include Ruby2CR::RouteHelpers
-  include Ruby2CR::ViewHelpers
-  include Ruby2CR::ParamsHelpers
+  include Railcar::RouteHelpers
+  include Railcar::ViewHelpers
+  include Railcar::ParamsHelpers
 
   def call(context : HTTP::Server::Context)
     request = context.request
@@ -149,7 +149,7 @@ class BlogApp
   # ----- Articles controller -----
 
   def articles_index(response)
-    articles = Ruby2CR::Article.includes(:comments).order(created_at: :desc).to_a
+    articles = Railcar::Article.includes(:comments).order(created_at: :desc).to_a
     flash = consume_flash
     notice = flash[:notice]
     response.print layout("Articles") {
@@ -160,7 +160,7 @@ class BlogApp
   end
 
   def articles_show(response, id : Int64)
-    article = Ruby2CR::Article.find(id)
+    article = Railcar::Article.find(id)
     flash = consume_flash
     notice = flash[:notice]
     response.print layout(article.title) {
@@ -171,7 +171,7 @@ class BlogApp
   end
 
   def articles_new(response)
-    article = Ruby2CR::Article.new
+    article = Railcar::Article.new
     response.print layout("New Article") {
       String.build do |__str__|
         ECR.embed("src/app/views/articles/new.ecr", __str__)
@@ -180,7 +180,7 @@ class BlogApp
   end
 
   def articles_edit(response, id : Int64)
-    article = Ruby2CR::Article.find(id)
+    article = Railcar::Article.find(id)
     response.print layout("Edit Article") {
       String.build do |__str__|
         ECR.embed("src/app/views/articles/edit.ecr", __str__)
@@ -197,7 +197,7 @@ class BlogApp
       end
     end
 
-    article = Ruby2CR::Article.new(hash)
+    article = Railcar::Article.new(hash)
     if article.save
       set_flash(notice: "Article was successfully created.")
       response.status_code = 302
@@ -213,7 +213,7 @@ class BlogApp
   end
 
   def articles_update(response, id : Int64, params : Hash(String, String))
-    article = Ruby2CR::Article.find(id)
+    article = Railcar::Article.find(id)
     hash = {} of String => DB::Any
     params.each do |k, v|
       next if k == "_method"
@@ -238,7 +238,7 @@ class BlogApp
   end
 
   def articles_destroy(response, id : Int64)
-    article = Ruby2CR::Article.find(id)
+    article = Railcar::Article.find(id)
     article.destroy
     set_flash(notice: "Article was successfully destroyed.")
     response.status_code = 302
@@ -248,7 +248,7 @@ class BlogApp
   # ----- Comments controller -----
 
   def comments_create(response, article_id : Int64, params : Hash(String, String))
-    article = Ruby2CR::Article.find(article_id)
+    article = Railcar::Article.find(article_id)
     commenter = ""
     body = ""
     params.each do |k, v|
@@ -270,7 +270,7 @@ class BlogApp
   end
 
   def comments_destroy(response, article_id : Int64, comment_id : Int64)
-    article = Ruby2CR::Article.find(article_id)
+    article = Railcar::Article.find(article_id)
     comment = article.comments.find(comment_id)
     comment.destroy
     set_flash(notice: "Comment was successfully deleted.")
@@ -288,8 +288,8 @@ end
 
 def setup_blog_db
   db = DB.open("sqlite3:./blog.db")
-  Ruby2CR::Article.db = db
-  Ruby2CR::Comment.db = db
+  Railcar::Article.db = db
+  Railcar::Comment.db = db
 
   db.exec <<-SQL
     CREATE TABLE IF NOT EXISTS articles (
@@ -312,21 +312,21 @@ def setup_blog_db
     )
   SQL
 
-  if Ruby2CR::Article.count == 0
-    a1 = Ruby2CR::Article.create!(
+  if Railcar::Article.count == 0
+    a1 = Railcar::Article.create!(
       title: "Getting Started with Rails",
       body: "Rails is a web application framework running on the Ruby programming language. It makes building web apps faster and easier with conventions over configuration."
     )
     a1.comments.create!(commenter: "Alice", body: "Great introduction! Rails really does make development faster.")
     a1.comments.create!(commenter: "Bob", body: "I love how Rails handles database migrations automatically.")
 
-    a2 = Ruby2CR::Article.create!(
+    a2 = Railcar::Article.create!(
       title: "Understanding MVC Architecture",
       body: "MVC stands for Model-View-Controller. Models handle data and business logic, Views display information to users, and Controllers coordinate between them."
     )
     a2.comments.create!(commenter: "Carol", body: "This pattern really helps keep code organized!")
 
-    Ruby2CR::Article.create!(
+    Railcar::Article.create!(
       title: "Ruby2JS: Rails Everywhere",
       body: "Ruby2JS transpiles Ruby to JavaScript, enabling Rails applications to run in browsers, on Node.js, and at the edge. Same code, different runtimes."
     )

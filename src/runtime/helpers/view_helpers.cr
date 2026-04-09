@@ -5,7 +5,7 @@ require "html"
 require "base64"
 require "json"
 
-module Ruby2CR::ViewHelpers
+module Railcar::ViewHelpers
   def link_to(text : String, path : String, **opts) : String
     cls = opts[:class]?
     if cls

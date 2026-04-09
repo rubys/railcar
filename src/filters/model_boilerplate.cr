@@ -1,18 +1,18 @@
-# Filter: Transform a Rails model class into the Ruby2CR macro DSL.
+# Filter: Transform a Rails model class into the Railcar macro DSL.
 #
 # Takes the translated Crystal AST of a model and:
 #   - Wraps declarations in a `model "table_name" do ... end` block
 #   - Adds column declarations from the schema
 #   - Generates run_validations override (including belongs_to validators)
 #   - Generates dependent: :destroy override
-#   - Adds require statements and Ruby2CR module wrapper
+#   - Adds require statements and Railcar module wrapper
 
 require "compiler/crystal/syntax"
 require "../generator/inflector"
 require "../generator/schema_extractor"
 require "../generator/model_extractor"
 
-module Ruby2CR
+module Railcar
   class ModelBoilerplate < Crystal::Transformer
     getter schema : TableSchema
     getter model_info : ModelInfo

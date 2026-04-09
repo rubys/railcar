@@ -2,9 +2,9 @@ require "spec"
 require "./test_paths"
 require "../src/generator/route_extractor"
 
-describe Ruby2CR::RouteExtractor do
+describe Railcar::RouteExtractor do
   it "extracts root route" do
-    route_set = Ruby2CR::RouteExtractor.extract_file(
+    route_set = Railcar::RouteExtractor.extract_file(
       File.join(BLOG_DIR, "config/routes.rb")
     )
     route_set.root_controller.should eq "articles"
@@ -12,7 +12,7 @@ describe Ruby2CR::RouteExtractor do
   end
 
   it "extracts article resource routes" do
-    route_set = Ruby2CR::RouteExtractor.extract_file(
+    route_set = Railcar::RouteExtractor.extract_file(
       File.join(BLOG_DIR, "config/routes.rb")
     )
 
@@ -31,7 +31,7 @@ describe Ruby2CR::RouteExtractor do
   end
 
   it "extracts nested comment routes with only constraint" do
-    route_set = Ruby2CR::RouteExtractor.extract_file(
+    route_set = Railcar::RouteExtractor.extract_file(
       File.join(BLOG_DIR, "config/routes.rb")
     )
 
@@ -44,7 +44,7 @@ describe Ruby2CR::RouteExtractor do
   end
 
   it "generates correct paths for articles" do
-    route_set = Ruby2CR::RouteExtractor.extract_file(
+    route_set = Railcar::RouteExtractor.extract_file(
       File.join(BLOG_DIR, "config/routes.rb")
     )
 
@@ -62,7 +62,7 @@ describe Ruby2CR::RouteExtractor do
   end
 
   it "generates correct paths for nested comments" do
-    route_set = Ruby2CR::RouteExtractor.extract_file(
+    route_set = Railcar::RouteExtractor.extract_file(
       File.join(BLOG_DIR, "config/routes.rb")
     )
 
@@ -74,7 +74,7 @@ describe Ruby2CR::RouteExtractor do
   end
 
   it "generates correct helper names" do
-    route_set = Ruby2CR::RouteExtractor.extract_file(
+    route_set = Railcar::RouteExtractor.extract_file(
       File.join(BLOG_DIR, "config/routes.rb")
     )
 
@@ -100,12 +100,12 @@ describe Ruby2CR::RouteExtractor do
   end
 end
 
-describe Ruby2CR::RouteGenerator do
+describe Railcar::RouteGenerator do
   it "generates route helpers matching hand-written ones" do
-    route_set = Ruby2CR::RouteExtractor.extract_file(
+    route_set = Railcar::RouteExtractor.extract_file(
       File.join(BLOG_DIR, "config/routes.rb")
     )
-    source = Ruby2CR::RouteGenerator.generate_helpers(route_set)
+    source = Railcar::RouteGenerator.generate_helpers(route_set)
 
     # Should contain all the helper methods from our hand-written version
     source.should contain "def articles_path"

@@ -2,7 +2,7 @@ require "../runtime/application_record"
 require "../runtime/relation"
 require "../runtime/collection_proxy"
 
-module Ruby2CR
+module Railcar
   class Article < ApplicationRecord
     model "articles" do
       column title, String

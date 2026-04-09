@@ -2,7 +2,7 @@
 # For the blog demo these are hand-written; the generator
 # would produce these from config/routes.rb.
 
-module Ruby2CR::RouteHelpers
+module Railcar::RouteHelpers
   def articles_path : String
     "/articles"
   end

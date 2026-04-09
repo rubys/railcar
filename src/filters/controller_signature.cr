@@ -27,7 +27,7 @@
 require "compiler/crystal/syntax"
 require "../generator/inflector"
 
-module Ruby2CR
+module Railcar
   class ControllerSignature < Crystal::Transformer
     # Which actions need which params
     ID_ACTIONS     = {"show", "edit", "update", "destroy"}

@@ -9,7 +9,7 @@
 
 require "compiler/crystal/syntax"
 
-module Ruby2CR
+module Railcar
   class RailsHelpers < Crystal::Transformer
     def transform(node : Crystal::Call) : Crystal::ASTNode
       case node.name

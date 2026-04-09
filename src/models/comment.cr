@@ -2,7 +2,7 @@ require "../runtime/application_record"
 require "../runtime/relation"
 require "../runtime/collection_proxy"
 
-module Ruby2CR
+module Railcar
   class Comment < ApplicationRecord
     model "comments" do
       column article_id, Int64

@@ -9,13 +9,13 @@
 #   article.errors.size   # total error count
 #   article.errors[:title] # => ["can't be blank"]
 
-record Ruby2CR::ErrorEntry, field : String, message : String do
+record Railcar::ErrorEntry, field : String, message : String do
   def full_message : String
     "#{field.capitalize} #{message}"
   end
 end
 
-class Ruby2CR::Errors
+class Railcar::Errors
   getter data : Hash(String, Array(String))
 
   def initialize

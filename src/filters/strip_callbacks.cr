@@ -7,7 +7,7 @@
 
 require "compiler/crystal/syntax"
 
-module Ruby2CR
+module Railcar
   class StripCallbacks < Crystal::Transformer
     STRIP_METHODS = {
       "broadcasts_to",

@@ -17,7 +17,7 @@
 
 require "compiler/crystal/syntax"
 
-module Ruby2CR
+module Railcar
   class RespondToHTML < Crystal::Transformer
     def transform(node : Crystal::Call) : Crystal::ASTNode
       if node.name == "respond_to" && node.obj.nil? && node.block

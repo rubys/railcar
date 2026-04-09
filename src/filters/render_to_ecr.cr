@@ -13,7 +13,7 @@
 require "compiler/crystal/syntax"
 require "../generator/inflector"
 
-module Ruby2CR
+module Railcar
   class RenderToECR < Crystal::Transformer
     getter controller : String
 

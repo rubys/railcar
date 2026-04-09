@@ -1,6 +1,6 @@
 # Architecture
 
-This document explains how ruby2cr works, for contributors who want to understand the codebase or add new Rails pattern support.
+This document explains how railcar works, for contributors who want to understand the codebase or add new Rails pattern support.
 
 ## Pipeline overview
 
@@ -56,7 +56,7 @@ Each filter is a `Crystal::Transformer` subclass that pattern-matches on AST nod
 | `RenderToECR` | `render :new` → `response.print(layout { ECR.embed(...) })` |
 | `ControllerSignature` | Adds typed parameters, inlines `before_action`, appends view rendering |
 | `ControllerBoilerplate` | Injects `include` statements, helper methods, partial renderers |
-| `ModelNamespace` | `Article` → `Ruby2CR::Article` |
+| `ModelNamespace` | `Article` → `Railcar::Article` |
 
 **Model filters:**
 
@@ -130,7 +130,7 @@ Here's a minimal example:
 ```crystal
 require "compiler/crystal/syntax"
 
-module Ruby2CR
+module Railcar
   class MyFilter < Crystal::Transformer
     def transform(node : Crystal::Call) : Crystal::ASTNode
       if node.name == "old_pattern"

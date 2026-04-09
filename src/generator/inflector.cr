@@ -1,7 +1,7 @@
 # Rails-compatible inflector for singularize/pluralize
 # Ported from lib/ruby2js/inflector.rb (shared with juntos)
 
-module Ruby2CR
+module Railcar
   module Inflector
     IRREGULARS_SINGULAR = {
       "people" => "person", "men" => "man", "women" => "woman",

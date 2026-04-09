@@ -5,13 +5,13 @@
 #   - extract_model_params helper method
 #   - layout helper method
 #   - partial render helpers (from view file scan)
-#   - Module wrapping (Ruby2CR)
+#   - Module wrapping (Railcar)
 #   - Require statements
 
 require "compiler/crystal/syntax"
 require "../generator/inflector"
 
-module Ruby2CR
+module Railcar
   class ControllerBoilerplate < Crystal::Transformer
     getter controller_name : String
     getter views_dir : String

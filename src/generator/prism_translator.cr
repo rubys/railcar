@@ -12,7 +12,7 @@ require "compiler/crystal/syntax"
 require "../prism/bindings"
 require "../prism/deserializer"
 
-module Ruby2CR
+module Railcar
   class PrismTranslator
     # Translate a Ruby source string to a Crystal AST
     def self.translate(source : String) : Crystal::ASTNode
@@ -211,7 +211,7 @@ module Ruby2CR
         end
 
       else
-        STDERR.puts "ruby2cr: unhandled Prism node type: #{node.class.name}"
+        STDERR.puts "railcar: unhandled Prism node type: #{node.class.name}"
         Crystal::Nop.new
       end
     end

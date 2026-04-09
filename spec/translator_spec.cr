@@ -2,10 +2,10 @@ require "spec"
 require "../src/generator/prism_translator"
 
 def translate(ruby : String) : String
-  Ruby2CR::PrismTranslator.translate(ruby).to_s
+  Railcar::PrismTranslator.translate(ruby).to_s
 end
 
-describe Ruby2CR::PrismTranslator do
+describe Railcar::PrismTranslator do
   describe "literals" do
     it "translates strings" do
       translate(%("hello")).should eq %("hello")

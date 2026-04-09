@@ -10,7 +10,7 @@
 
 require "./turbo_broadcast"
 
-module Ruby2CR
+module Railcar
   module Broadcasts
     # Broadcast a replace action for this record
     def broadcast_replace_to(channel : String, target : String? = nil)

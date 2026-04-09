@@ -9,7 +9,7 @@ require "./controller_extractor"
 require "./route_extractor"
 require "./fixture_loader"
 
-module Ruby2CR
+module Railcar
   class AppModel
     getter name : String
     getter schemas : Array(TableSchema)

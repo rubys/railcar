@@ -5,7 +5,7 @@ require "./crystal_expr"
 require "./crystal_emitter"
 require "./controller_extractor"
 
-module Ruby2CR
+module Railcar
   class TestConverter
     include CrystalExpr
 
@@ -104,7 +104,7 @@ module Ruby2CR
       test_nodes << build_before_each
       each_test_block(klass) { |stmt| test_nodes << build_test_block(stmt) }
 
-      nodes << Crystal::Call.new(nil, "describe", [Crystal::Path.new(["Ruby2CR", describe_name])] of Crystal::ASTNode,
+      nodes << Crystal::Call.new(nil, "describe", [Crystal::Path.new(["Railcar", describe_name])] of Crystal::ASTNode,
         block: Crystal::Block.new(body: Crystal::Expressions.new(test_nodes)))
 
       Crystal::Expressions.new(nodes).to_s + "\n"
@@ -124,7 +124,7 @@ module Ruby2CR
         Crystal::Require.new("../src/routes"),
         Crystal::Require.new("../src/models/*"),
         Crystal::Require.new("./spec_helper"),
-        Crystal::Include.new(Crystal::Path.new(["Ruby2CR", "RouteHelpers"])),
+        Crystal::Include.new(Crystal::Path.new(["Railcar", "RouteHelpers"])),
       ] of Crystal::ASTNode
 
       # record TestResponse
@@ -274,7 +274,7 @@ module Ruby2CR
       args = call.arg_nodes
       count_expr = args[0]?.is_a?(Prism::StringNode) ? args[0].as(Prism::StringNode).value : "count"
       diff = args[1]?.is_a?(Prism::IntegerNode) ? args[1].as(Prism::IntegerNode).value : 1
-      model_count = count_expr.gsub(/(\w+)\.count/) { |m| "Ruby2CR::#{m}" }
+      model_count = count_expr.gsub(/(\w+)\.count/) { |m| "Railcar::#{m}" }
 
       stmts = [Crystal::Assign.new(Crystal::Var.new("before_count"), Crystal::MacroLiteral.new(model_count)).as(Crystal::ASTNode)]
       if block = call.block
@@ -293,7 +293,7 @@ module Ruby2CR
     private def build_assert_no_difference(call : Prism::CallNode, controller_test : Bool = false) : Array(Crystal::ASTNode)
       args = call.arg_nodes
       count_expr = args[0]?.is_a?(Prism::StringNode) ? args[0].as(Prism::StringNode).value : "count"
-      model_count = count_expr.gsub(/(\w+)\.count/) { |m| "Ruby2CR::#{m}" }
+      model_count = count_expr.gsub(/(\w+)\.count/) { |m| "Railcar::#{m}" }
 
       stmts = [Crystal::Assign.new(Crystal::Var.new("before_count"), Crystal::MacroLiteral.new(model_count)).as(Crystal::ASTNode)]
       if block = call.block
@@ -405,7 +405,7 @@ module Ruby2CR
       output = IO::Memory.new
       response = HTTP::Server::Response.new(output)
       context = HTTP::Server::Context.new(request, response)
-      router = Ruby2CR::Router.new
+      router = Railcar::Router.new
       router.dispatch(context)
       response.close
       output.rewind

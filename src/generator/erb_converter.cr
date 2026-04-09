@@ -13,7 +13,7 @@ require "./erb_compiler"
 require "./crystal_emitter"
 require "./source_parser"
 
-module Ruby2CR
+module Railcar
   class ERBConverter
     getter template_name : String
     getter controller : String
@@ -239,7 +239,7 @@ module Ruby2CR
         # For nested new forms (Comment.new), initialize the variable
         if child_class && !model_var
           model_class = CrystalEmitter.classify(child_class)
-          io << "<% #{child_class} = Ruby2CR::#{model_class}.new %>\n"
+          io << "<% #{child_class} = Railcar::#{model_class}.new %>\n"
         end
         emit_form_body(body, io, form_model)
       end

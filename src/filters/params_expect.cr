@@ -9,7 +9,7 @@
 
 require "compiler/crystal/syntax"
 
-module Ruby2CR
+module Railcar
   class ParamsExpect < Crystal::Transformer
     def transform(node : Crystal::Call) : Crystal::ASTNode
       if node.name == "expect" && is_params_receiver?(node.obj)

@@ -9,18 +9,18 @@ require "../src/filters/button_to_path_helper"
 require "../src/filters/render_to_partial"
 
 VIEW_FILTERS = [
-  Ruby2CR::InstanceVarToLocal.new,
-  Ruby2CR::TurboStreamConnect.new,
-  Ruby2CR::RailsHelpers.new,
-  Ruby2CR::LinkToPathHelper.new,
-  Ruby2CR::ButtonToPathHelper.new,
-  Ruby2CR::RenderToPartial.new,
+  Railcar::InstanceVarToLocal.new,
+  Railcar::TurboStreamConnect.new,
+  Railcar::RailsHelpers.new,
+  Railcar::LinkToPathHelper.new,
+  Railcar::ButtonToPathHelper.new,
+  Railcar::RenderToPartial.new,
 ] of Crystal::Transformer
 
-describe Ruby2CR::ErbCompiler do
+describe Railcar::ErbCompiler do
   it "converts simple ERB to Ruby source" do
     erb = "<h1><%= title %></h1>"
-    compiler = Ruby2CR::ErbCompiler.new(erb)
+    compiler = Railcar::ErbCompiler.new(erb)
     src = compiler.src
     src.should contain "_buf"
     src.should contain "title"
@@ -28,7 +28,7 @@ describe Ruby2CR::ErbCompiler do
 
   it "handles code blocks" do
     erb = "<% items.each do |item| %>\n  <p><%= item.name %></p>\n<% end %>\n"
-    compiler = Ruby2CR::ErbCompiler.new(erb)
+    compiler = Railcar::ErbCompiler.new(erb)
     src = compiler.src
     src.should contain "items.each"
     src.should contain "item.name"
@@ -36,7 +36,7 @@ describe Ruby2CR::ErbCompiler do
 
   it "handles if/else" do
     erb = "<% if show %>\n  <p>visible</p>\n<% else %>\n  <p>hidden</p>\n<% end %>\n"
-    compiler = Ruby2CR::ErbCompiler.new(erb)
+    compiler = Railcar::ErbCompiler.new(erb)
     src = compiler.src
     src.should contain "if show"
     src.should contain "visible"
@@ -44,10 +44,10 @@ describe Ruby2CR::ErbCompiler do
   end
 end
 
-describe Ruby2CR::ERBConverter do
+describe Railcar::ERBConverter do
   it "converts simple output expressions" do
     erb = "<h1><%= @article.title %></h1>"
-    ecr = Ruby2CR::ERBConverter.convert(erb, "show", "articles", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "show", "articles", view_filters: VIEW_FILTERS)
     ecr.should contain "article.title"
     ecr.should contain "<h1>"
     ecr.should_not contain "@article"
@@ -55,41 +55,41 @@ describe Ruby2CR::ERBConverter do
 
   it "converts link_to with model to path helper" do
     erb = %(<%= link_to "Show", @article, class: "btn" %>)
-    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
     ecr.should contain "article_path(article)"
     ecr.should contain "link_to"
   end
 
   it "converts link_to with path helper" do
     erb = %(<%= link_to "Back", articles_path, class: "btn" %>)
-    ecr = Ruby2CR::ERBConverter.convert(erb, "show", "articles", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "show", "articles", view_filters: VIEW_FILTERS)
     ecr.should contain "articles_path"
     ecr.should_not contain "articles_path_path"
   end
 
   it "converts render @collection to loop" do
     erb = %(<%= render @articles %>)
-    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
     ecr.should contain "articles.each"
     ecr.should contain "render_article_partial"
   end
 
   it "converts render partial with locals" do
     erb = %(<%= render "form", article: @article %>)
-    ecr = Ruby2CR::ERBConverter.convert(erb, "new", "articles", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "new", "articles", view_filters: VIEW_FILTERS)
     ecr.should contain "render_form_partial(article)"
   end
 
   it "strips turbo_stream_from" do
     erb = %(<%= turbo_stream_from "articles" %>\n<h1>Articles</h1>)
-    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
     ecr.should_not contain "turbo_stream"
     ecr.should contain "Articles"
   end
 
   it "converts if/else blocks" do
     erb = "<% if notice.present? %>\n  <p><%= notice %></p>\n<% end %>\n"
-    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
     ecr.should contain "<% if"
     ecr.should contain "notice"
     ecr.should contain "<% end %>"
@@ -97,7 +97,7 @@ describe Ruby2CR::ERBConverter do
 
   it "converts the blog index template" do
     erb = File.read(File.join(BLOG_DIR, "app/views/articles/index.html.erb"))
-    ecr = Ruby2CR::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "index", "articles", view_filters: VIEW_FILTERS)
 
     ecr.should contain "articles.each"
     ecr.should contain "render_article_partial"
@@ -107,7 +107,7 @@ describe Ruby2CR::ERBConverter do
 
   it "converts the blog show template" do
     erb = File.read(File.join(BLOG_DIR, "app/views/articles/show.html.erb"))
-    ecr = Ruby2CR::ERBConverter.convert(erb, "show", "articles", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "show", "articles", view_filters: VIEW_FILTERS)
 
     ecr.should contain "article.title"
     ecr.should contain "article.body"
@@ -124,7 +124,7 @@ describe Ruby2CR::ERBConverter do
       <%= form.submit "Add Comment", class: "bg-blue-600 text-white px-4 py-2 rounded" %>
     <% end %>
     ERB
-    ecr = Ruby2CR::ERBConverter.convert(erb, "show", "articles", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "show", "articles", view_filters: VIEW_FILTERS)
 
     ecr.should contain "<form"
     ecr.should contain "article_comments_path"
@@ -135,7 +135,7 @@ describe Ruby2CR::ERBConverter do
 
   it "converts the blog _form partial" do
     erb = File.read(File.join(BLOG_DIR, "app/views/articles/_form.html.erb"))
-    ecr = Ruby2CR::ERBConverter.convert(erb, "_form", "articles", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "_form", "articles", view_filters: VIEW_FILTERS)
 
     # Form structure
     ecr.should contain "<form"
@@ -159,7 +159,7 @@ describe Ruby2CR::ERBConverter do
 
   it "converts the blog _article partial" do
     erb = File.read(File.join(BLOG_DIR, "app/views/articles/_article.html.erb"))
-    ecr = Ruby2CR::ERBConverter.convert(erb, "_article", "articles", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "_article", "articles", view_filters: VIEW_FILTERS)
 
     ecr.should contain "dom_id(article"
     ecr.should contain "article_path(article)"
@@ -173,7 +173,7 @@ describe Ruby2CR::ERBConverter do
 
   it "converts the blog _comment partial" do
     erb = File.read(File.join(BLOG_DIR, "app/views/comments/_comment.html.erb"))
-    ecr = Ruby2CR::ERBConverter.convert(erb, "_comment", "comments", view_filters: VIEW_FILTERS)
+    ecr = Railcar::ERBConverter.convert(erb, "_comment", "comments", view_filters: VIEW_FILTERS)
 
     ecr.should contain "dom_id(comment"
     ecr.should contain "comment.commenter"

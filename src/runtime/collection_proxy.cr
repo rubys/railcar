@@ -1,4 +1,4 @@
-module Ruby2CR
+module Railcar
   # Proxy for has_many associations. Wraps a Relation scoped to the
   # owner's foreign key. Mirrors ActiveRecord::Associations::CollectionProxy.
   class CollectionProxy(T)

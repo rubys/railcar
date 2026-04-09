@@ -32,7 +32,7 @@ require "./ddl_generator"
 require "./seed_extractor"
 require "./test_converter"
 
-module Ruby2CR
+module Railcar
   class AppGenerator
     getter rails_dir : String
     getter output_dir : String
@@ -133,7 +133,7 @@ module Ruby2CR
           Crystal::Require.new("../helpers/route_helpers"),
           Crystal::Require.new("../helpers/view_helpers"),
         ] of Crystal::ASTNode
-        mod = Crystal::ModuleDef.new(Crystal::Path.new("Ruby2CR"), body: ast)
+        mod = Crystal::ModuleDef.new(Crystal::Path.new("Railcar"), body: ast)
         nodes = requires + [mod] of Crystal::ASTNode
         source = Crystal::Expressions.new(nodes).to_s + "\n"
 
@@ -234,7 +234,7 @@ module Ruby2CR
       # 6. RenderToECR          — render :template → response.print(layout { ECR.embed })
       # 7. ControllerSignature  — add typed params, inline before_actions, view rendering
       # 8. ControllerBoilerplate — inject includes, helpers, partial renderers
-      # 9. ModelNamespace       — Article → Ruby2CR::Article (must be last)
+      # 9. ModelNamespace       — Article → Railcar::Article (must be last)
       ast = ast.transform(InstanceVarToLocal.new)
       ast = ast.transform(ParamsExpect.new)
       ast = ast.transform(RespondToHTML.new)
@@ -255,8 +255,8 @@ module Ruby2CR
       requires << Crystal::Require.new("../helpers/route_helpers")
       requires << Crystal::Require.new("../helpers/view_helpers")
 
-      # Wrap in Ruby2CR module
-      mod = Crystal::ModuleDef.new(Crystal::Path.new("Ruby2CR"), body: ast)
+      # Wrap in Railcar module
+      mod = Crystal::ModuleDef.new(Crystal::Path.new("Railcar"), body: ast)
       nodes = requires + [mod] of Crystal::ASTNode
 
       # Serialize once
@@ -303,7 +303,7 @@ module Ruby2CR
 
       # Set db on all models
       models.each_key do |name|
-        io << "Ruby2CR::#{name}.db = db\n"
+        io << "Railcar::#{name}.db = db\n"
       end
       io << "\n"
 
@@ -326,7 +326,7 @@ module Ruby2CR
       # Start server with WebSocket support
       io << "# Start server\n"
       io << "log = ::Log.for(\"http\")\n"
-      io << "router = Ruby2CR::Router.new\n\n"
+      io << "router = Railcar::Router.new\n\n"
       io << "server = HTTP::Server.new do |context|\n"
       io << "  path = context.request.path\n"
       io << "  log.info { \"\#" << "{context.request.method} \#" << "{path}\" }\n"
@@ -337,7 +337,7 @@ module Ruby2CR
       io << "      context.response.headers[\"Sec-WebSocket-Protocol\"] = protocol\n"
       io << "    end\n"
       io << "    ws_handler = HTTP::WebSocketHandler.new do |ws, _ctx|\n"
-      io << "      Ruby2CR::TurboBroadcast.handle_connection(ws)\n"
+      io << "      Railcar::TurboBroadcast.handle_connection(ws)\n"
       io << "    end\n"
       io << "    ws_handler.call(context)\n"
       io << "  elsif path.starts_with?(\"/\")\n"
@@ -350,7 +350,7 @@ module Ruby2CR
       io << "    else\n"
       io << "      begin\n"
       io << "        router.dispatch(context)\n"
-      io << "      rescue ex : Ruby2CR::RecordNotFound\n"
+      io << "      rescue ex : Railcar::RecordNotFound\n"
       io << "        context.response.status_code = 404\n"
       io << "        context.response.print \"Not found\"\n"
       io << "      end\n"
@@ -390,7 +390,7 @@ module Ruby2CR
 
           # Set db on models
           models.each_key do |name|
-            io << "  Ruby2CR::#{name}.db = db\n"
+            io << "  Railcar::#{name}.db = db\n"
           end
           io << "  db\n"
           io << "end\n\n"

@@ -5,7 +5,7 @@
 require "./schema_extractor"
 require "./inflector"
 
-module Ruby2CR
+module Railcar
   class DDLGenerator
     SQL_TYPES = {
       "string"   => "TEXT",

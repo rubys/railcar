@@ -9,7 +9,7 @@
 require "../prism/bindings"
 require "../prism/deserializer"
 
-module Ruby2CR
+module Railcar
   record BeforeAction, method_name : String, only : Array(String)?
 
   record ControllerAction,

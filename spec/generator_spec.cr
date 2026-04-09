@@ -4,10 +4,10 @@ require "../src/generator/schema_extractor"
 require "../src/generator/model_extractor"
 require "../src/generator/crystal_emitter"
 
-describe Ruby2CR::SchemaExtractor do
+describe Railcar::SchemaExtractor do
   it "extracts articles table from migration" do
     source = File.read(Dir.glob(File.join(BLOG_DIR, "db/migrate/*_create_articles.rb")).first)
-    schema = Ruby2CR::SchemaExtractor.extract(source)
+    schema = Railcar::SchemaExtractor.extract(source)
     schema.should_not be_nil
     schema = schema.not_nil!
 
@@ -24,7 +24,7 @@ describe Ruby2CR::SchemaExtractor do
 
   it "extracts comments table with references" do
     source = File.read(Dir.glob(File.join(BLOG_DIR, "db/migrate/*_create_comments.rb")).first)
-    schema = Ruby2CR::SchemaExtractor.extract(source)
+    schema = Railcar::SchemaExtractor.extract(source)
     schema.should_not be_nil
     schema = schema.not_nil!
 
@@ -39,26 +39,26 @@ describe Ruby2CR::SchemaExtractor do
   end
 
   it "extracts all migrations from directory" do
-    schemas = Ruby2CR::SchemaExtractor.extract_all(File.join(BLOG_DIR, "db/migrate"))
+    schemas = Railcar::SchemaExtractor.extract_all(File.join(BLOG_DIR, "db/migrate"))
     schemas.size.should eq 2
     schemas.map(&.name).should contain "articles"
     schemas.map(&.name).should contain "comments"
   end
 
   it "maps Rails types to Crystal types" do
-    Ruby2CR::SchemaExtractor.crystal_type("string").should eq "String"
-    Ruby2CR::SchemaExtractor.crystal_type("text").should eq "String"
-    Ruby2CR::SchemaExtractor.crystal_type("integer").should eq "Int64"
-    Ruby2CR::SchemaExtractor.crystal_type("boolean").should eq "Bool"
-    Ruby2CR::SchemaExtractor.crystal_type("datetime").should eq "Time"
-    Ruby2CR::SchemaExtractor.crystal_type("float").should eq "Float64"
+    Railcar::SchemaExtractor.crystal_type("string").should eq "String"
+    Railcar::SchemaExtractor.crystal_type("text").should eq "String"
+    Railcar::SchemaExtractor.crystal_type("integer").should eq "Int64"
+    Railcar::SchemaExtractor.crystal_type("boolean").should eq "Bool"
+    Railcar::SchemaExtractor.crystal_type("datetime").should eq "Time"
+    Railcar::SchemaExtractor.crystal_type("float").should eq "Float64"
   end
 end
 
-describe Ruby2CR::ModelExtractor do
+describe Railcar::ModelExtractor do
   it "extracts Article model info" do
     source = File.read(File.join(BLOG_DIR, "app/models/article.rb"))
-    model = Ruby2CR::ModelExtractor.extract(source)
+    model = Railcar::ModelExtractor.extract(source)
     model.should_not be_nil
     model = model.not_nil!
 
@@ -86,7 +86,7 @@ describe Ruby2CR::ModelExtractor do
 
   it "extracts Comment model info" do
     source = File.read(File.join(BLOG_DIR, "app/models/comment.rb"))
-    model = Ruby2CR::ModelExtractor.extract(source)
+    model = Railcar::ModelExtractor.extract(source)
     model.should_not be_nil
     model = model.not_nil!
 
@@ -104,16 +104,16 @@ describe Ruby2CR::ModelExtractor do
   end
 end
 
-describe Ruby2CR::CrystalEmitter do
+describe Railcar::CrystalEmitter do
   it "generates Article model source" do
-    schema = Ruby2CR::SchemaExtractor.extract_file(
+    schema = Railcar::SchemaExtractor.extract_file(
       Dir.glob(File.join(BLOG_DIR, "db/migrate/*_create_articles.rb")).first
     ).not_nil!
-    model = Ruby2CR::ModelExtractor.extract_file(
+    model = Railcar::ModelExtractor.extract_file(
       File.join(BLOG_DIR, "app/models/article.rb")
     ).not_nil!
 
-    source = Ruby2CR::CrystalEmitter.generate(schema, model)
+    source = Railcar::CrystalEmitter.generate(schema, model)
 
     # Should contain key elements
     source.should contain "class Article < ApplicationRecord"
@@ -132,14 +132,14 @@ describe Ruby2CR::CrystalEmitter do
   end
 
   it "generates Comment model source" do
-    schema = Ruby2CR::SchemaExtractor.extract_file(
+    schema = Railcar::SchemaExtractor.extract_file(
       Dir.glob(File.join(BLOG_DIR, "db/migrate/*_create_comments.rb")).first
     ).not_nil!
-    model = Ruby2CR::ModelExtractor.extract_file(
+    model = Railcar::ModelExtractor.extract_file(
       File.join(BLOG_DIR, "app/models/comment.rb")
     ).not_nil!
 
-    source = Ruby2CR::CrystalEmitter.generate(schema, model)
+    source = Railcar::CrystalEmitter.generate(schema, model)
 
     source.should contain "class Comment < ApplicationRecord"
     source.should contain "model(\"comments\")"
@@ -151,7 +151,7 @@ describe Ruby2CR::CrystalEmitter do
   end
 
   it "generates all models from blog demo" do
-    results = Ruby2CR::CrystalEmitter.generate_all(
+    results = Railcar::CrystalEmitter.generate_all(
       File.join(BLOG_DIR, "db/migrate"),
       File.join(BLOG_DIR, "app/models")
     )
@@ -162,9 +162,9 @@ describe Ruby2CR::CrystalEmitter do
   end
 
   it "inflects correctly" do
-    Ruby2CR::CrystalEmitter.classify("articles").should eq "Article"
-    Ruby2CR::CrystalEmitter.classify("comments").should eq "Comment"
-    Ruby2CR::CrystalEmitter.singularize("articles").should eq "article"
-    Ruby2CR::CrystalEmitter.singularize("comments").should eq "comment"
+    Railcar::CrystalEmitter.classify("articles").should eq "Article"
+    Railcar::CrystalEmitter.classify("comments").should eq "Comment"
+    Railcar::CrystalEmitter.singularize("articles").should eq "article"
+    Railcar::CrystalEmitter.singularize("comments").should eq "comment"
   end
 end

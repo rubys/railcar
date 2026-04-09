@@ -1,4 +1,4 @@
-module Ruby2CR
+module Railcar
   # Chainable query builder, mirrors ActiveRecord::Relation.
   # Each method returns a new Relation (immutable chaining).
   class Relation(T)
@@ -86,7 +86,7 @@ module Ruby2CR
     def count : Int64
       sql = "SELECT COUNT(*) FROM #{T.table_name}"
       sql += " WHERE #{conditions.join(" AND ")}" unless conditions.empty?
-      Ruby2CR.log_sql(sql, params)
+      Railcar.log_sql(sql, params)
       T.db!.scalar(sql, args: params).as(Int64)
     end
 
@@ -109,7 +109,7 @@ module Ruby2CR
       sql += " LIMIT #{limit_value}" if limit_value
       sql += " OFFSET #{offset_value}" if offset_value
 
-      Ruby2CR.log_sql(sql, params)
+      Railcar.log_sql(sql, params)
       results = T.db!.query(sql, args: params) { |rs| T.from_rows(rs) }
 
       # Eager load associations

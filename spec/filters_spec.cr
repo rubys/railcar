@@ -16,8 +16,8 @@ require "../src/generator/schema_extractor"
 require "../src/generator/model_extractor"
 require "../src/generator/controller_extractor"
 
-describe Ruby2CR::InstanceVarToLocal do
-  filter = Ruby2CR::InstanceVarToLocal.new
+describe Railcar::InstanceVarToLocal do
+  filter = Railcar::InstanceVarToLocal.new
 
   it "converts @var read to local var" do
     node = Crystal::InstanceVar.new("@article")
@@ -51,7 +51,7 @@ describe Ruby2CR::InstanceVarToLocal do
   end
 
   it "works on translated Ruby source" do
-    ast = Ruby2CR::PrismTranslator.translate("@article = Article.find(1)")
+    ast = Railcar::PrismTranslator.translate("@article = Article.find(1)")
     result = ast.transform(filter)
     result.to_s.should eq "article = Article.find(1)"
   end
@@ -65,7 +65,7 @@ describe Ruby2CR::InstanceVarToLocal do
       end
     end
     RUBY
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    ast = Railcar::PrismTranslator.translate(ruby)
     result = ast.transform(filter)
     output = result.to_s
 
@@ -76,41 +76,41 @@ describe Ruby2CR::InstanceVarToLocal do
   end
 end
 
-describe Ruby2CR::ParamsExpect do
-  filter = Ruby2CR::ParamsExpect.new
+describe Railcar::ParamsExpect do
+  filter = Railcar::ParamsExpect.new
 
   it "converts params.expect(:id) to id" do
-    ast = Ruby2CR::PrismTranslator.translate("params.expect(:id)")
+    ast = Railcar::PrismTranslator.translate("params.expect(:id)")
     result = ast.transform(filter)
     result.to_s.should eq "id"
   end
 
   it "converts params.expect(:article_id) to article_id" do
-    ast = Ruby2CR::PrismTranslator.translate("params.expect(:article_id)")
+    ast = Railcar::PrismTranslator.translate("params.expect(:article_id)")
     result = ast.transform(filter)
     result.to_s.should eq "article_id"
   end
 
   it "leaves non-symbol expect unchanged" do
-    ast = Ruby2CR::PrismTranslator.translate("params.expect(article: [:title, :body])")
+    ast = Railcar::PrismTranslator.translate("params.expect(article: [:title, :body])")
     result = ast.transform(filter)
     result.to_s.should contain "expect"
   end
 
   it "transforms within larger expression" do
-    ast = Ruby2CR::PrismTranslator.translate("Article.find(params.expect(:id))")
+    ast = Railcar::PrismTranslator.translate("Article.find(params.expect(:id))")
     result = ast.transform(filter)
     result.to_s.should eq "Article.find(id)"
   end
 end
 
-describe Ruby2CR::ModelNamespace do
-  filter = Ruby2CR::ModelNamespace.new(["Article", "Comment"])
+describe Railcar::ModelNamespace do
+  filter = Railcar::ModelNamespace.new(["Article", "Comment"])
 
   it "namespaces known model constants" do
     node = Crystal::Path.new("Article")
     result = filter.transform(node)
-    result.to_s.should eq "Ruby2CR::Article"
+    result.to_s.should eq "Railcar::Article"
   end
 
   it "leaves unknown constants unchanged" do
@@ -120,23 +120,23 @@ describe Ruby2CR::ModelNamespace do
   end
 
   it "leaves already-namespaced paths unchanged" do
-    node = Crystal::Path.new(["Ruby2CR", "Article"])
+    node = Crystal::Path.new(["Railcar", "Article"])
     result = filter.transform(node)
-    result.to_s.should eq "Ruby2CR::Article"
+    result.to_s.should eq "Railcar::Article"
   end
 
   it "transforms in translated source" do
-    ast = Ruby2CR::PrismTranslator.translate("Article.find(1)")
+    ast = Railcar::PrismTranslator.translate("Article.find(1)")
     result = ast.transform(filter)
-    result.to_s.should eq "Ruby2CR::Article.find(1)"
+    result.to_s.should eq "Railcar::Article.find(1)"
   end
 end
 
-describe Ruby2CR::RedirectToResponse do
-  filter = Ruby2CR::RedirectToResponse.new
+describe Railcar::RedirectToResponse do
+  filter = Railcar::RedirectToResponse.new
 
   it "converts redirect_to with notice" do
-    ast = Ruby2CR::PrismTranslator.translate("redirect_to article, notice: \"Created.\"")
+    ast = Railcar::PrismTranslator.translate("redirect_to article, notice: \"Created.\"")
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "FLASH_STORE"
@@ -146,7 +146,7 @@ describe Ruby2CR::RedirectToResponse do
   end
 
   it "converts redirect_to path helper" do
-    ast = Ruby2CR::PrismTranslator.translate("redirect_to articles_path")
+    ast = Railcar::PrismTranslator.translate("redirect_to articles_path")
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "302"
@@ -154,7 +154,7 @@ describe Ruby2CR::RedirectToResponse do
   end
 
   it "leaves non-redirect calls unchanged" do
-    ast = Ruby2CR::PrismTranslator.translate("puts \"hello\"")
+    ast = Railcar::PrismTranslator.translate("puts \"hello\"")
     result = ast.transform(filter)
     result.to_s.should eq "puts(\"hello\")"
   end
@@ -171,13 +171,13 @@ describe "Filter pipeline" do
     end
     RUBY
 
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    ast = Railcar::PrismTranslator.translate(ruby)
 
     # Apply filters in order
-    ast = ast.transform(Ruby2CR::InstanceVarToLocal.new)
-    ast = ast.transform(Ruby2CR::ParamsExpect.new)
-    ast = ast.transform(Ruby2CR::RedirectToResponse.new)
-    ast = ast.transform(Ruby2CR::ModelNamespace.new(["Article", "Comment"]))
+    ast = ast.transform(Railcar::InstanceVarToLocal.new)
+    ast = ast.transform(Railcar::ParamsExpect.new)
+    ast = ast.transform(Railcar::RedirectToResponse.new)
+    ast = ast.transform(Railcar::ModelNamespace.new(["Article", "Comment"]))
 
     output = ast.to_s
     output.should contain "comment = article.comments.build"
@@ -189,8 +189,8 @@ describe "Filter pipeline" do
   end
 end
 
-describe Ruby2CR::RespondToHTML do
-  filter = Ruby2CR::RespondToHTML.new
+describe Railcar::RespondToHTML do
+  filter = Railcar::RespondToHTML.new
 
   it "extracts html body from respond_to" do
     ruby = <<-RUBY
@@ -199,7 +199,7 @@ describe Ruby2CR::RespondToHTML do
       format.json { render json: articles }
     end
     RUBY
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    ast = Railcar::PrismTranslator.translate(ruby)
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "redirect_to"
@@ -218,7 +218,7 @@ describe Ruby2CR::RespondToHTML do
       end
     end
     RUBY
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
+    ast = Railcar::PrismTranslator.translate(ruby)
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "redirect_to"
@@ -227,17 +227,17 @@ describe Ruby2CR::RespondToHTML do
   end
 
   it "leaves non-respond_to calls unchanged" do
-    ast = Ruby2CR::PrismTranslator.translate("foo(1)")
+    ast = Railcar::PrismTranslator.translate("foo(1)")
     result = ast.transform(filter)
     result.to_s.should eq "foo(1)"
   end
 end
 
-describe Ruby2CR::StrongParams do
-  filter = Ruby2CR::StrongParams.new
+describe Railcar::StrongParams do
+  filter = Railcar::StrongParams.new
 
   it "converts Model.new(article_params)" do
-    ast = Ruby2CR::PrismTranslator.translate("Article.new(article_params)")
+    ast = Railcar::PrismTranslator.translate("Article.new(article_params)")
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "extract_model_params"
@@ -245,7 +245,7 @@ describe Ruby2CR::StrongParams do
   end
 
   it "converts article.update(article_params)" do
-    ast = Ruby2CR::PrismTranslator.translate("article.update(article_params)")
+    ast = Railcar::PrismTranslator.translate("article.update(article_params)")
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "extract_model_params"
@@ -253,7 +253,7 @@ describe Ruby2CR::StrongParams do
   end
 
   it "converts comments.build(comment_params)" do
-    ast = Ruby2CR::PrismTranslator.translate("article.comments.build(comment_params)")
+    ast = Railcar::PrismTranslator.translate("article.comments.build(comment_params)")
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "extract_model_params"
@@ -261,17 +261,17 @@ describe Ruby2CR::StrongParams do
   end
 
   it "leaves non-params arguments unchanged" do
-    ast = Ruby2CR::PrismTranslator.translate("Article.new(attrs)")
+    ast = Railcar::PrismTranslator.translate("Article.new(attrs)")
     result = ast.transform(filter)
     result.to_s.should eq "Article.new(attrs)"
   end
 end
 
-describe Ruby2CR::RenderToECR do
-  filter = Ruby2CR::RenderToECR.new("articles")
+describe Railcar::RenderToECR do
+  filter = Railcar::RenderToECR.new("articles")
 
   it "converts render :new" do
-    ast = Ruby2CR::PrismTranslator.translate("render :new")
+    ast = Railcar::PrismTranslator.translate("render :new")
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "response.print"
@@ -281,7 +281,7 @@ describe Ruby2CR::RenderToECR do
   end
 
   it "converts render :edit with status" do
-    ast = Ruby2CR::PrismTranslator.translate("render :edit, status: :unprocessable_entity")
+    ast = Railcar::PrismTranslator.translate("render :edit, status: :unprocessable_entity")
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "422"
@@ -290,7 +290,7 @@ describe Ruby2CR::RenderToECR do
   end
 
   it "leaves non-render calls unchanged" do
-    ast = Ruby2CR::PrismTranslator.translate("redirect_to articles_path")
+    ast = Railcar::PrismTranslator.translate("redirect_to articles_path")
     result = ast.transform(filter)
     result.to_s.should contain "redirect_to"
   end
@@ -313,17 +313,17 @@ describe "Full controller pipeline" do
     end
     RUBY
 
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    ast = ast.transform(Ruby2CR::InstanceVarToLocal.new)
-    ast = ast.transform(Ruby2CR::ParamsExpect.new)
-    ast = ast.transform(Ruby2CR::RespondToHTML.new)
-    ast = ast.transform(Ruby2CR::StrongParams.new)
-    ast = ast.transform(Ruby2CR::RedirectToResponse.new)
-    ast = ast.transform(Ruby2CR::RenderToECR.new("articles"))
-    ast = ast.transform(Ruby2CR::ModelNamespace.new(["Article", "Comment"]))
+    ast = Railcar::PrismTranslator.translate(ruby)
+    ast = ast.transform(Railcar::InstanceVarToLocal.new)
+    ast = ast.transform(Railcar::ParamsExpect.new)
+    ast = ast.transform(Railcar::RespondToHTML.new)
+    ast = ast.transform(Railcar::StrongParams.new)
+    ast = ast.transform(Railcar::RedirectToResponse.new)
+    ast = ast.transform(Railcar::RenderToECR.new("articles"))
+    ast = ast.transform(Railcar::ModelNamespace.new(["Article", "Comment"]))
 
     output = ast.to_s
-    output.should contain "Ruby2CR::Article.new(extract_model_params(params, \"article\"))"
+    output.should contain "Railcar::Article.new(extract_model_params(params, \"article\"))"
     output.should contain "article.save"
     output.should contain "FLASH_STORE"
     output.should contain "article_path(article)"
@@ -338,23 +338,23 @@ describe "Full controller pipeline" do
   end
 end
 
-describe Ruby2CR::StripCallbacks do
-  filter = Ruby2CR::StripCallbacks.new
+describe Railcar::StripCallbacks do
+  filter = Railcar::StripCallbacks.new
 
   it "strips broadcasts_to" do
-    ast = Ruby2CR::PrismTranslator.translate("broadcasts_to :articles")
+    ast = Railcar::PrismTranslator.translate("broadcasts_to :articles")
     result = ast.transform(filter)
     result.to_s.strip.should eq ""
   end
 
   it "strips after_create_commit" do
-    ast = Ruby2CR::PrismTranslator.translate("after_create_commit { do_something }")
+    ast = Railcar::PrismTranslator.translate("after_create_commit { do_something }")
     result = ast.transform(filter)
     result.to_s.strip.should eq ""
   end
 
   it "leaves model declarations unchanged" do
-    ast = Ruby2CR::PrismTranslator.translate("has_many :comments, dependent: :destroy")
+    ast = Railcar::PrismTranslator.translate("has_many :comments, dependent: :destroy")
     result = ast.transform(filter)
     result.to_s.should contain "has_many"
   end
@@ -371,23 +371,23 @@ describe "Full model pipeline" do
     end
     RUBY
 
-    schema = Ruby2CR::TableSchema.new("articles", [
-      Ruby2CR::Column.new("title", "string"),
-      Ruby2CR::Column.new("body", "text"),
-      Ruby2CR::Column.new("created_at", "datetime"),
-      Ruby2CR::Column.new("updated_at", "datetime"),
+    schema = Railcar::TableSchema.new("articles", [
+      Railcar::Column.new("title", "string"),
+      Railcar::Column.new("body", "text"),
+      Railcar::Column.new("created_at", "datetime"),
+      Railcar::Column.new("updated_at", "datetime"),
     ])
-    model_info = Ruby2CR::ModelInfo.new("Article", "ApplicationRecord", [
-      Ruby2CR::Association.new(:has_many, "comments", {"dependent" => "destroy"}),
+    model_info = Railcar::ModelInfo.new("Article", "ApplicationRecord", [
+      Railcar::Association.new(:has_many, "comments", {"dependent" => "destroy"}),
     ], [
-      Ruby2CR::Validation.new("title", "presence"),
-      Ruby2CR::Validation.new("body", "presence"),
-      Ruby2CR::Validation.new("body", "length", {"minimum" => "10"}),
+      Railcar::Validation.new("title", "presence"),
+      Railcar::Validation.new("body", "presence"),
+      Railcar::Validation.new("body", "length", {"minimum" => "10"}),
     ])
 
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    ast = ast.transform(Ruby2CR::StripCallbacks.new)
-    ast = ast.transform(Ruby2CR::ModelBoilerplate.new(schema, model_info))
+    ast = Railcar::PrismTranslator.translate(ruby)
+    ast = ast.transform(Railcar::StripCallbacks.new)
+    ast = ast.transform(Railcar::ModelBoilerplate.new(schema, model_info))
 
     output = ast.to_s
     output.should contain "class Article < ApplicationRecord"
@@ -408,49 +408,49 @@ end
 
 # --- Isolated filter tests for boilerplate filters ---
 
-describe Ruby2CR::ControllerSignature do
+describe Railcar::ControllerSignature do
   it "adds response parameter to actions" do
-    ast = Ruby2CR::PrismTranslator.translate("def index\nend")
-    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, [] of Ruby2CR::BeforeAction))
+    ast = Railcar::PrismTranslator.translate("def index\nend")
+    result = ast.transform(Railcar::ControllerSignature.new("articles", nil, [] of Railcar::BeforeAction))
     output = result.to_s
     output.should contain "response"
     output.should contain "HTTP::Server::Response"
   end
 
   it "adds id parameter to show/edit/update/destroy" do
-    ast = Ruby2CR::PrismTranslator.translate("def show\nend")
-    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, [] of Ruby2CR::BeforeAction))
+    ast = Railcar::PrismTranslator.translate("def show\nend")
+    result = ast.transform(Railcar::ControllerSignature.new("articles", nil, [] of Railcar::BeforeAction))
     output = result.to_s
     output.should contain "id : Int64"
   end
 
   it "adds params parameter to create/update" do
-    ast = Ruby2CR::PrismTranslator.translate("def create\nend")
-    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, [] of Ruby2CR::BeforeAction))
+    ast = Railcar::PrismTranslator.translate("def create\nend")
+    result = ast.transform(Railcar::ControllerSignature.new("articles", nil, [] of Railcar::BeforeAction))
     output = result.to_s
     output.should contain "params : Hash(String, String)"
   end
 
   it "adds flash consumption for render actions" do
-    ast = Ruby2CR::PrismTranslator.translate("def index\nend")
-    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, [] of Ruby2CR::BeforeAction))
+    ast = Railcar::PrismTranslator.translate("def index\nend")
+    result = ast.transform(Railcar::ControllerSignature.new("articles", nil, [] of Railcar::BeforeAction))
     output = result.to_s
     output.should contain "FLASH_STORE"
     output.should contain "notice"
   end
 
   it "inlines before_action model loading" do
-    before = [Ruby2CR::BeforeAction.new("set_article", ["show", "edit", "update", "destroy"])]
-    ast = Ruby2CR::PrismTranslator.translate("def show\nend")
-    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, before))
+    before = [Railcar::BeforeAction.new("set_article", ["show", "edit", "update", "destroy"])]
+    ast = Railcar::PrismTranslator.translate("def show\nend")
+    result = ast.transform(Railcar::ControllerSignature.new("articles", nil, before))
     output = result.to_s
     output.should contain "Article.find(id)"
   end
 
   it "strips set_ and _params methods" do
     ruby = "def set_article\nend\ndef article_params\nend\ndef index\nend"
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, [] of Ruby2CR::BeforeAction))
+    ast = Railcar::PrismTranslator.translate(ruby)
+    result = ast.transform(Railcar::ControllerSignature.new("articles", nil, [] of Railcar::BeforeAction))
     output = result.to_s
     output.should_not contain "set_article"
     output.should_not contain "article_params"
@@ -458,26 +458,26 @@ describe Ruby2CR::ControllerSignature do
   end
 
   it "adds view rendering for display actions" do
-    ast = Ruby2CR::PrismTranslator.translate("def index\nend")
-    result = ast.transform(Ruby2CR::ControllerSignature.new("articles", nil, [] of Ruby2CR::BeforeAction))
+    ast = Railcar::PrismTranslator.translate("def index\nend")
+    result = ast.transform(Railcar::ControllerSignature.new("articles", nil, [] of Railcar::BeforeAction))
     output = result.to_s
     output.should contain "ECR.embed"
     output.should contain "articles/index.ecr"
   end
 
   it "adds nested parent id parameter" do
-    ast = Ruby2CR::PrismTranslator.translate("def create\nend")
-    result = ast.transform(Ruby2CR::ControllerSignature.new("comments", "article", [] of Ruby2CR::BeforeAction))
+    ast = Railcar::PrismTranslator.translate("def create\nend")
+    result = ast.transform(Railcar::ControllerSignature.new("comments", "article", [] of Railcar::BeforeAction))
     output = result.to_s
     output.should contain "article_id"
   end
 end
 
-describe Ruby2CR::ControllerBoilerplate do
+describe Railcar::ControllerBoilerplate do
   it "injects include statements" do
     ruby = "class ArticlesController\ndef index\nend\nend"
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    result = ast.transform(Ruby2CR::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
+    ast = Railcar::PrismTranslator.translate(ruby)
+    result = ast.transform(Railcar::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
     output = result.to_s
     output.should contain "include RouteHelpers"
     output.should contain "include ViewHelpers"
@@ -485,8 +485,8 @@ describe Ruby2CR::ControllerBoilerplate do
 
   it "injects extract_model_params helper" do
     ruby = "class ArticlesController\ndef index\nend\nend"
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    result = ast.transform(Ruby2CR::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
+    ast = Railcar::PrismTranslator.translate(ruby)
+    result = ast.transform(Railcar::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
     output = result.to_s
     output.should contain "extract_model_params"
     output.should contain "Hash(String, DB::Any)"
@@ -494,8 +494,8 @@ describe Ruby2CR::ControllerBoilerplate do
 
   it "injects layout helper" do
     ruby = "class ArticlesController\ndef index\nend\nend"
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    result = ast.transform(Ruby2CR::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
+    ast = Railcar::PrismTranslator.translate(ruby)
+    result = ast.transform(Railcar::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
     output = result.to_s
     output.should contain "def layout(title : String, &)"
     output.should contain "yield"
@@ -505,34 +505,34 @@ describe Ruby2CR::ControllerBoilerplate do
 
   it "preserves existing class body" do
     ruby = "class ArticlesController\ndef index\nend\nend"
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    result = ast.transform(Ruby2CR::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
+    ast = Railcar::PrismTranslator.translate(ruby)
+    result = ast.transform(Railcar::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
     output = result.to_s
     output.should contain "def index"
   end
 
   it "skips non-controller classes" do
     ruby = "class Article\nend"
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    result = ast.transform(Ruby2CR::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
+    ast = Railcar::PrismTranslator.translate(ruby)
+    result = ast.transform(Railcar::ControllerBoilerplate.new("articles", "/tmp/nonexistent"))
     output = result.to_s
     output.should_not contain "RouteHelpers"
   end
 end
 
-describe Ruby2CR::ModelBoilerplate do
-  schema = Ruby2CR::TableSchema.new("articles", [
-    Ruby2CR::Column.new("title", "string"),
-    Ruby2CR::Column.new("body", "text"),
+describe Railcar::ModelBoilerplate do
+  schema = Railcar::TableSchema.new("articles", [
+    Railcar::Column.new("title", "string"),
+    Railcar::Column.new("body", "text"),
   ])
-  model = Ruby2CR::ModelInfo.new("Article", "ApplicationRecord",
-    [] of Ruby2CR::Association,
-    [Ruby2CR::Validation.new("title", "presence")])
+  model = Railcar::ModelInfo.new("Article", "ApplicationRecord",
+    [] of Railcar::Association,
+    [Railcar::Validation.new("title", "presence")])
 
   it "wraps body in model block with columns" do
     ruby = "class Article < ApplicationRecord\nvalidates :title, presence: true\nend"
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    result = ast.transform(Ruby2CR::ModelBoilerplate.new(schema, model))
+    ast = Railcar::PrismTranslator.translate(ruby)
+    result = ast.transform(Railcar::ModelBoilerplate.new(schema, model))
     output = result.to_s
     output.should contain "model(\"articles\")"
     output.should contain "column(title, String)"
@@ -541,22 +541,22 @@ describe Ruby2CR::ModelBoilerplate do
 
   it "generates run_validations for presence validations" do
     ruby = "class Article < ApplicationRecord\nvalidates :title, presence: true\nend"
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    result = ast.transform(Ruby2CR::ModelBoilerplate.new(schema, model))
+    ast = Railcar::PrismTranslator.translate(ruby)
+    result = ast.transform(Railcar::ModelBoilerplate.new(schema, model))
     output = result.to_s
     output.should contain "run_validations"
     output.should contain "validate_presence_title"
   end
 
   it "generates destroy override for dependent associations" do
-    schema_with_fk = Ruby2CR::TableSchema.new("articles", [Ruby2CR::Column.new("title", "string")])
-    model_with_dep = Ruby2CR::ModelInfo.new("Article", "ApplicationRecord",
-      [Ruby2CR::Association.new(:has_many, "comments", {"dependent" => "destroy"})],
-      [] of Ruby2CR::Validation)
+    schema_with_fk = Railcar::TableSchema.new("articles", [Railcar::Column.new("title", "string")])
+    model_with_dep = Railcar::ModelInfo.new("Article", "ApplicationRecord",
+      [Railcar::Association.new(:has_many, "comments", {"dependent" => "destroy"})],
+      [] of Railcar::Validation)
 
     ruby = "class Article < ApplicationRecord\nhas_many :comments, dependent: :destroy\nend"
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    result = ast.transform(Ruby2CR::ModelBoilerplate.new(schema_with_fk, model_with_dep))
+    ast = Railcar::PrismTranslator.translate(ruby)
+    result = ast.transform(Railcar::ModelBoilerplate.new(schema_with_fk, model_with_dep))
     output = result.to_s
     output.should contain "def destroy"
     output.should contain "comments.destroy_all"
@@ -564,12 +564,12 @@ describe Ruby2CR::ModelBoilerplate do
   end
 
   it "skips run_validations when no validations" do
-    empty_model = Ruby2CR::ModelInfo.new("Article", "ApplicationRecord",
-      [] of Ruby2CR::Association, [] of Ruby2CR::Validation)
+    empty_model = Railcar::ModelInfo.new("Article", "ApplicationRecord",
+      [] of Railcar::Association, [] of Railcar::Validation)
 
     ruby = "class Article < ApplicationRecord\nend"
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    result = ast.transform(Ruby2CR::ModelBoilerplate.new(schema, empty_model))
+    ast = Railcar::PrismTranslator.translate(ruby)
+    result = ast.transform(Railcar::ModelBoilerplate.new(schema, empty_model))
     output = result.to_s
     output.should_not contain "run_validations"
   end

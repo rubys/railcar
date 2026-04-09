@@ -4,7 +4,7 @@
 require "../prism/bindings"
 require "../prism/deserializer"
 
-module Ruby2CR
+module Railcar
   record Association,
     kind : Symbol,          # :has_many, :belongs_to, :has_one
     name : String,          # :comments, :article

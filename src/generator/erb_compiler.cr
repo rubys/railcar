@@ -4,7 +4,7 @@
 # _buf += and _buf.append=. The output can then be parsed by Prism
 # and the AST transformed before emitting ECR.
 
-module Ruby2CR
+module Railcar
   class ErbCompiler
     BLOCK_EXPR = /((\s|\))do|\{)(\s*\|[^|]*\|)?\s*$/
 

@@ -9,7 +9,7 @@
 
 require "compiler/crystal/syntax"
 
-module Ruby2CR
+module Railcar
   class InstanceVarToLocal < Crystal::Transformer
     def transform(node : Crystal::InstanceVar) : Crystal::ASTNode
       Crystal::Var.new(node.name.lchop("@"))

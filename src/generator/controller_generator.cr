@@ -7,7 +7,7 @@ require "./crystal_expr"
 require "./crystal_emitter"
 require "./controller_extractor"
 
-module Ruby2CR
+module Railcar
   class ControllerGenerator
     include CrystalExpr
 

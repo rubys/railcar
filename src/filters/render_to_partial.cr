@@ -12,7 +12,7 @@
 require "compiler/crystal/syntax"
 require "../generator/inflector"
 
-module Ruby2CR
+module Railcar
   class RenderToPartial < Crystal::Transformer
     def transform(node : Crystal::Call) : Crystal::ASTNode
       if node.name == "render" && node.obj.nil? && !node.args.empty?

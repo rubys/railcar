@@ -6,7 +6,7 @@
 require "../prism/bindings"
 require "../prism/deserializer"
 
-module Ruby2CR
+module Railcar
   # Represents a single column in a table
   record Column, name : String, type : String, options : Hash(String, String) = {} of String => String
 

@@ -34,7 +34,7 @@ class Crystal::ASTNode
   end
 end
 
-module Ruby2CR
+module Railcar
   module CrystalExpr
     # --- AST-level API ---
 
@@ -72,7 +72,7 @@ module Ruby2CR
       when Prism::SelfNode
         Crystal::Var.new("self")
       when Prism::ConstantReadNode
-        Crystal::Path.new(["Ruby2CR", node.name])
+        Crystal::Path.new(["Railcar", node.name])
       when Prism::ConstantPathNode
         Crystal::Path.new(node.full_path.split("::"))
       when Prism::ArrayNode

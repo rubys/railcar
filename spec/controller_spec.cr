@@ -3,9 +3,9 @@ require "./test_paths"
 require "../src/generator/controller_extractor"
 require "../src/generator/controller_generator"
 
-describe Ruby2CR::ControllerExtractor do
+describe Railcar::ControllerExtractor do
   it "extracts CommentsController structure" do
-    info = Ruby2CR::ControllerExtractor.extract_file(
+    info = Railcar::ControllerExtractor.extract_file(
       File.join(BLOG_DIR, "app/controllers/comments_controller.rb")
     )
     info.should_not be_nil
@@ -35,7 +35,7 @@ describe Ruby2CR::ControllerExtractor do
   end
 
   it "extracts ArticlesController structure" do
-    info = Ruby2CR::ControllerExtractor.extract_file(
+    info = Railcar::ControllerExtractor.extract_file(
       File.join(BLOG_DIR, "app/controllers/articles_controller.rb")
     )
     info.should_not be_nil
@@ -62,14 +62,14 @@ describe Ruby2CR::ControllerExtractor do
   end
 end
 
-describe Ruby2CR::ControllerGenerator do
+describe Railcar::ControllerGenerator do
   it "generates comments#create action" do
-    info = Ruby2CR::ControllerExtractor.extract_file(
+    info = Railcar::ControllerExtractor.extract_file(
       File.join(BLOG_DIR, "app/controllers/comments_controller.rb")
     ).not_nil!
 
     create = info.actions.find { |a| a.name == "create" }.not_nil!
-    source = Ruby2CR::ControllerGenerator.generate_action(create, "comments")
+    source = Railcar::ControllerGenerator.generate_action(create, "comments")
 
     source.should contain "def create(response, params"
     source.should contain "article.comments.build"
@@ -79,12 +79,12 @@ describe Ruby2CR::ControllerGenerator do
   end
 
   it "generates comments#destroy action" do
-    info = Ruby2CR::ControllerExtractor.extract_file(
+    info = Railcar::ControllerExtractor.extract_file(
       File.join(BLOG_DIR, "app/controllers/comments_controller.rb")
     ).not_nil!
 
     destroy = info.actions.find { |a| a.name == "destroy" }.not_nil!
-    source = Ruby2CR::ControllerGenerator.generate_action(destroy, "comments")
+    source = Railcar::ControllerGenerator.generate_action(destroy, "comments")
 
     source.should contain "def destroy(response, id"
     source.should contain "destroy"
@@ -93,12 +93,12 @@ describe Ruby2CR::ControllerGenerator do
   end
 
   it "generates articles#index action" do
-    info = Ruby2CR::ControllerExtractor.extract_file(
+    info = Railcar::ControllerExtractor.extract_file(
       File.join(BLOG_DIR, "app/controllers/articles_controller.rb")
     ).not_nil!
 
     index = info.actions.find { |a| a.name == "index" }.not_nil!
-    source = Ruby2CR::ControllerGenerator.generate_action(index, "articles")
+    source = Railcar::ControllerGenerator.generate_action(index, "articles")
 
     source.should contain "def index(response)"
     source.should contain "includes"
@@ -106,12 +106,12 @@ describe Ruby2CR::ControllerGenerator do
   end
 
   it "generates articles#create with respond_to" do
-    info = Ruby2CR::ControllerExtractor.extract_file(
+    info = Railcar::ControllerExtractor.extract_file(
       File.join(BLOG_DIR, "app/controllers/articles_controller.rb")
     ).not_nil!
 
     create = info.actions.find { |a| a.name == "create" }.not_nil!
-    source = Ruby2CR::ControllerGenerator.generate_action(create, "articles")
+    source = Railcar::ControllerGenerator.generate_action(create, "articles")
 
     source.should contain "def create(response, params"
     source.should contain "Article.new"
@@ -120,12 +120,12 @@ describe Ruby2CR::ControllerGenerator do
   end
 
   it "generates articles#destroy with respond_to" do
-    info = Ruby2CR::ControllerExtractor.extract_file(
+    info = Railcar::ControllerExtractor.extract_file(
       File.join(BLOG_DIR, "app/controllers/articles_controller.rb")
     ).not_nil!
 
     destroy = info.actions.find { |a| a.name == "destroy" }.not_nil!
-    source = Ruby2CR::ControllerGenerator.generate_action(destroy, "articles")
+    source = Railcar::ControllerGenerator.generate_action(destroy, "articles")
 
     source.should contain "def destroy(response, id"
     source.should contain "destroy"

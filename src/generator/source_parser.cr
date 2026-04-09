@@ -6,7 +6,7 @@
 require "compiler/crystal/syntax"
 require "./prism_translator"
 
-module Ruby2CR
+module Railcar
   module SourceParser
     def self.parse(path : String) : Crystal::ASTNode
       parse_source(File.read(path), path)

@@ -14,7 +14,7 @@
 
 require "compiler/crystal/syntax"
 
-module Ruby2CR
+module Railcar
   class TurboStreamConnect < Crystal::Transformer
     def transform(node : Crystal::Call) : Crystal::ASTNode
       if node.name == "turbo_stream_from" && node.obj.nil?

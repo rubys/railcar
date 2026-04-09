@@ -1,7 +1,7 @@
 # Generates Crystal model source files from extracted schema and model metadata.
 #
 # Takes TableSchema (from migrations) + ModelInfo (from model files) and
-# produces Crystal source that uses the Ruby2CR runtime macros.
+# produces Crystal source that uses the Railcar runtime macros.
 #
 # Uses Crystal's own AST for code generation, ensuring output is valid Crystal.
 
@@ -10,7 +10,7 @@ require "./schema_extractor"
 require "./model_extractor"
 require "./inflector"
 
-module Ruby2CR
+module Railcar
   class CrystalEmitter
     # Delegate to Inflector for backward compatibility
     def self.classify(word : String) : String
@@ -35,7 +35,7 @@ module Ruby2CR
 
       class_def = build_class(schema, model)
       mod_def = Crystal::ModuleDef.new(
-        Crystal::Path.new("Ruby2CR"),
+        Crystal::Path.new("Railcar"),
         body: class_def
       )
 

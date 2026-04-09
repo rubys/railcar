@@ -6,7 +6,7 @@
 require "./app_model"
 require "./schema_extractor"
 
-module Ruby2CR
+module Railcar
   class RbsGenerator
     getter app : AppModel
 

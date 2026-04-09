@@ -5,7 +5,7 @@ require "./errors"
 require "./turbo_broadcast"
 require "./broadcasts"
 
-module Ruby2CR
+module Railcar
   Log = ::Log.for("sql")
 
   def self.log_sql(sql : String, params = nil)
@@ -85,7 +85,7 @@ module Ruby2CR
       # ----- Finders -----
 
       def self.find(id : Int64) : self
-        Ruby2CR.log_sql("SELECT * FROM #{table_name} WHERE id = ?", [id])
+        Railcar.log_sql("SELECT * FROM #{table_name} WHERE id = ?", [id])
         row = db!.query_one?(
           "SELECT * FROM #{table_name} WHERE id = ?", id
         ) { |rs| row_to_hash(rs) }
@@ -135,7 +135,7 @@ module Ruby2CR
       end
 
       def self.count : Int64
-        Ruby2CR.log_sql("SELECT COUNT(*) FROM #{table_name}")
+        Railcar.log_sql("SELECT COUNT(*) FROM #{table_name}")
         db!.scalar("SELECT COUNT(*) FROM #{table_name}").as(Int64)
       end
 

@@ -10,7 +10,7 @@ require "../prism/bindings"
 require "../prism/deserializer"
 require "../generator/crystal_emitter"  # for inflection
 
-module Ruby2CR
+module Railcar
   # A single route entry
   record Route,
     method : String,           # GET, POST, PATCH, DELETE
@@ -190,7 +190,7 @@ module Ruby2CR
     def self.generate_helpers(route_set : RouteSet) : String
       io = IO::Memory.new
       io << "# Generated route helpers from config/routes.rb\n\n"
-      io << "module Ruby2CR::RouteHelpers\n"
+      io << "module Railcar::RouteHelpers\n"
 
       # Collect unique helper names with their paths
       helpers = {} of String => {path: String, params: Array(String)}
@@ -215,7 +215,7 @@ module Ruby2CR
           # Build interpolated path
           path_expr = info[:path]
           info[:params].each do |p|
-            path_expr = path_expr.gsub(":#{p}", "\#{#{p}.is_a?(Ruby2CR::ApplicationRecord) ? #{p}.id : #{p}}")
+            path_expr = path_expr.gsub(":#{p}", "\#{#{p}.is_a?(Railcar::ApplicationRecord) ? #{p}.id : #{p}}")
           end
           io << "    #{path_expr.inspect.gsub("\\#", "#")}\n"
           io << "  end\n\n"
@@ -233,7 +233,7 @@ module Ruby2CR
       io << "require \"./controllers/*\"\n"
       io << "require \"./helpers/route_helpers\"\n"
       io << "require \"./helpers/view_helpers\"\n\n"
-      io << "module Ruby2CR\n"
+      io << "module Railcar\n"
       io << "  class Router\n"
       io << "    include RouteHelpers\n"
       io << "    include ViewHelpers\n\n"

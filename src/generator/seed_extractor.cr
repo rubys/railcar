@@ -6,7 +6,7 @@
 require "../prism/bindings"
 require "../prism/deserializer"
 
-module Ruby2CR
+module Railcar
   class SeedExtractor
     # Generate Crystal seed code from a Rails db/seeds.rb file
     def self.generate(seeds_path : String, first_model : String = "Model") : String
@@ -17,7 +17,7 @@ module Ruby2CR
       stmts = ast.statements
       return "" unless stmts.is_a?(Prism::StatementsNode)
 
-      io << "if Ruby2CR::#{first_model}.count == 0\n"
+      io << "if Railcar::#{first_model}.count == 0\n"
 
       stmts.body.each do |stmt|
         case stmt
@@ -67,7 +67,7 @@ module Ruby2CR
           end
         end
       when Prism::ConstantReadNode
-        "Ruby2CR::#{node.name}"
+        "Railcar::#{node.name}"
       when Prism::LocalVariableReadNode
         node.name
       when Prism::StringNode

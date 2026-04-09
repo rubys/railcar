@@ -7,33 +7,33 @@ require "../src/filters/render_to_partial"
 require "../src/filters/instance_var_to_local"
 require "../src/generator/prism_translator"
 
-describe Ruby2CR::StripTurboStream do
-  filter = Ruby2CR::StripTurboStream.new
+describe Railcar::StripTurboStream do
+  filter = Railcar::StripTurboStream.new
 
   it "strips turbo_stream_from" do
-    ast = Ruby2CR::PrismTranslator.translate(%q(turbo_stream_from "articles"))
+    ast = Railcar::PrismTranslator.translate(%q(turbo_stream_from "articles"))
     result = ast.transform(filter)
     result.to_s.strip.should eq ""
   end
 
   it "strips content_for" do
-    ast = Ruby2CR::PrismTranslator.translate(%q(content_for :head, "title"))
+    ast = Railcar::PrismTranslator.translate(%q(content_for :head, "title"))
     result = ast.transform(filter)
     result.to_s.strip.should eq ""
   end
 
   it "preserves other calls" do
-    ast = Ruby2CR::PrismTranslator.translate(%q(link_to "Show", article))
+    ast = Railcar::PrismTranslator.translate(%q(link_to "Show", article))
     result = ast.transform(filter)
     result.to_s.should contain "link_to"
   end
 end
 
-describe Ruby2CR::LinkToPathHelper do
-  filter = Ruby2CR::LinkToPathHelper.new
+describe Railcar::LinkToPathHelper do
+  filter = Railcar::LinkToPathHelper.new
 
   it "converts instance variable to path helper" do
-    ast = Ruby2CR::PrismTranslator.translate(%q(link_to "Show", @article))
+    ast = Railcar::PrismTranslator.translate(%q(link_to "Show", @article))
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "article_path(article)"
@@ -54,7 +54,7 @@ describe Ruby2CR::LinkToPathHelper do
   end
 
   it "preserves class keyword argument" do
-    ast = Ruby2CR::PrismTranslator.translate(%q(link_to "Show", @article, class: "btn"))
+    ast = Railcar::PrismTranslator.translate(%q(link_to "Show", @article, class: "btn"))
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "article_path(article)"
@@ -62,11 +62,11 @@ describe Ruby2CR::LinkToPathHelper do
   end
 end
 
-describe Ruby2CR::ButtonToPathHelper do
-  filter = Ruby2CR::ButtonToPathHelper.new
+describe Railcar::ButtonToPathHelper do
+  filter = Railcar::ButtonToPathHelper.new
 
   it "converts instance variable to path helper" do
-    ast = Ruby2CR::PrismTranslator.translate(%q(button_to "Delete", @article, method: :delete))
+    ast = Railcar::PrismTranslator.translate(%q(button_to "Delete", @article, method: :delete))
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "article_path(article)"
@@ -80,11 +80,11 @@ describe Ruby2CR::ButtonToPathHelper do
   end
 end
 
-describe Ruby2CR::RenderToPartial do
-  filter = Ruby2CR::RenderToPartial.new
+describe Railcar::RenderToPartial do
+  filter = Railcar::RenderToPartial.new
 
   it "converts render @collection to loop" do
-    ast = Ruby2CR::PrismTranslator.translate(%q(render @articles))
+    ast = Railcar::PrismTranslator.translate(%q(render @articles))
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "articles.each"
@@ -100,7 +100,7 @@ describe Ruby2CR::RenderToPartial do
   end
 
   it "converts render partial with locals" do
-    ast = Ruby2CR::PrismTranslator.translate(%q(render "form", article: @article))
+    ast = Railcar::PrismTranslator.translate(%q(render "form", article: @article))
     result = ast.transform(filter)
     output = result.to_s
     output.should contain "render_form_partial"
@@ -118,11 +118,11 @@ end
 describe "View filter pipeline" do
   it "applies all view filters in sequence" do
     ruby = %q(link_to "Show", @article; render @articles; turbo_stream_from "articles")
-    ast = Ruby2CR::PrismTranslator.translate(ruby)
-    ast = ast.transform(Ruby2CR::InstanceVarToLocal.new)
-    ast = ast.transform(Ruby2CR::StripTurboStream.new)
-    ast = ast.transform(Ruby2CR::LinkToPathHelper.new)
-    ast = ast.transform(Ruby2CR::RenderToPartial.new)
+    ast = Railcar::PrismTranslator.translate(ruby)
+    ast = ast.transform(Railcar::InstanceVarToLocal.new)
+    ast = ast.transform(Railcar::StripTurboStream.new)
+    ast = ast.transform(Railcar::LinkToPathHelper.new)
+    ast = ast.transform(Railcar::RenderToPartial.new)
 
     output = ast.to_s
     output.should contain "article_path(article)"

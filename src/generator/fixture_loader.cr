@@ -8,7 +8,7 @@ require "./schema_extractor"
 require "./model_extractor"
 require "./crystal_emitter"
 
-module Ruby2CR
+module Railcar
   record FixtureRecord, label : String, fields : Hash(String, String)
 
   record FixtureTable, name : String, records : Array(FixtureRecord)
@@ -102,7 +102,7 @@ module Ruby2CR
       sorted.each do |table|
         singular = CrystalEmitter.singularize(table.name)
         model_class = CrystalEmitter.classify(singular)
-        io << "FIXTURE_#{table.name.upcase} = {} of String => Ruby2CR::#{model_class}\n"
+        io << "FIXTURE_#{table.name.upcase} = {} of String => Railcar::#{model_class}\n"
       end
       io << "\n"
 
@@ -114,7 +114,7 @@ module Ruby2CR
         model_class = CrystalEmitter.classify(singular)
 
         table.records.each do |record|
-          io << "  FIXTURE_#{table.name.upcase}[\"#{record.label}\"] = Ruby2CR::#{model_class}.create!(\n"
+          io << "  FIXTURE_#{table.name.upcase}[\"#{record.label}\"] = Railcar::#{model_class}.create!(\n"
           record.fields.each_with_index do |(field, value), i|
             comma = i < record.fields.size - 1 ? "," : ""
             # Check if this field is a belongs_to reference
@@ -135,11 +135,11 @@ module Ruby2CR
       sorted.each do |table|
         singular = CrystalEmitter.singularize(table.name)
         model_class = CrystalEmitter.classify(singular)
-        io << "def #{table.name}(label : String) : Ruby2CR::#{model_class}\n"
+        io << "def #{table.name}(label : String) : Railcar::#{model_class}\n"
         io << "  FIXTURE_#{table.name.upcase}[label]\n"
         io << "end\n\n"
         # Also support symbol-like access: articles(:one)
-        io << "def #{table.name}(label : Symbol) : Ruby2CR::#{model_class}\n"
+        io << "def #{table.name}(label : Symbol) : Railcar::#{model_class}\n"
         io << "  FIXTURE_#{table.name.upcase}[label.to_s]\n"
         io << "end\n\n"
       end

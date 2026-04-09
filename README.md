@@ -1,12 +1,18 @@
-# ruby2cr
+# Railcar
 
-Converts a Ruby on Rails application into a Crystal web application.
+Three things in one:
 
-**Status:** Early proof of concept. Tested against a Rails blog demo (articles, comments, nested resources). The architecture is designed for incremental extension -- new Rails patterns are added by writing composable filters.
+1. **Transpiler** -- converts a Ruby on Rails application into a Crystal web application
+2. **Framework** -- a Rails-compatible runtime for Crystal, currently covering ActiveRecord and Hotwire, with more to come
+3. **RBS generator** -- produces RBS type signatures for existing Rails apps (prototype; planned to leverage Crystal's semantic type inference alongside Rails conventions for comprehensive coverage)
+
+These mix and match. Both Ruby and Crystal input files are supported in the same project, so you can start with a Rails app, generate the Crystal version, then gradually rewrite individual files in Crystal. The pipeline handles both seamlessly.
+
+**Status:** Early proof of concept -- see [Status](#status) below.
 
 ## What it does
 
-Given a Rails app directory, ruby2cr parses the source code, applies a chain of AST transformations, and generates a Crystal application that compiles and runs.
+Given a Rails app directory, Railcar parses the source code, applies a chain of AST transformations, and generates a Crystal application that compiles and runs.
 
 ```
 Source (.rb or .cr)
@@ -24,8 +30,6 @@ Filter chain (composable transformations)
 Crystal source output (via Crystal.format)
 ```
 
-Both Ruby and Crystal input files are supported. This means you can start with a Rails app, generate the Crystal version, then gradually rewrite individual files in Crystal as you learn the language. The pipeline handles both seamlessly.
-
 ## Prerequisites
 
 - [Crystal](https://crystal-lang.org/install/) >= 1.10.0
@@ -40,15 +44,19 @@ make
 
 This will:
 1. Locate and build `libprism` from the prism gem
-2. Compile the `ruby2cr` binary to `build/ruby2cr`
+2. Compile the `railcar` binary to `build/railcar`
 
 ## Usage
 
 ```bash
-build/ruby2cr /path/to/rails/app /path/to/output
+# Generate a Crystal app
+build/railcar /path/to/rails/app /path/to/output
 cd /path/to/output
 shards install
 crystal build src/app.cr
+
+# Generate RBS type signatures
+build/railcar --rbs /path/to/rails/app /path/to/output
 ```
 
 ## Test
@@ -70,9 +78,28 @@ The blog demo exercises these patterns:
 - **Tests** -- Minitest to Crystal spec, model and controller tests, fixtures with dependency ordering
 - **Runtime** -- ActiveRecord-like ORM with macros, query chaining, validations, associations
 
+## Status
+
+The architecture is solid: a clean pipeline from Prism parse through composable AST filters to Crystal output, with a language-agnostic intermediate representation that separates concerns well. The filter chain is the right abstraction -- each new Rails pattern is a small, testable transformer.
+
+The implementation, however, is held together with bailing wire and chewing gum. A non-exhaustive list:
+
+- **Hard-coded database** -- SQLite only, connection string baked into the generated app
+- **Hard-coded layout** -- a single inline HTML template rather than converting the Rails layout
+- **Hard-coded import map** -- Turbo JS served as a static file, no asset pipeline
+- **Hard-coded port** -- always binds to 0.0.0.0:3000
+- **Flash as a global hash** -- `FLASH_STORE` is a process-global `Hash`, not per-request
+- **Form builder in the ERB converter** -- ~150 lines of Rails form semantics embedded in what should be a structural pass
+- **`content_for` silently dropped** -- stripped inside the Turbo Stream filter because it was convenient
+- **Duplicate `model_to_path` logic** -- copy-pasted between `LinkToPathHelper` and `ButtonToPathHelper`
+
+These shortcuts are in place not because the problems are hard, but because they are known to be solvable -- each has a clear path to a proper implementation. The goal at this stage was to prove the pipeline works end to end.
+
+Despite all of this, the proof of concept produces real, observable results: a Rails blog app with models, controllers, views, nested resources, validations, and tests compiles to Crystal and runs.
+
 ## What needs work
 
-This is a proof of concept. Many common Rails patterns are not yet implemented:
+Many common Rails patterns are not yet implemented:
 
 - **Models** -- scopes, enums, callbacks (beyond stripping), polymorphic associations, `has_one :through`, custom validators
 - **Controllers** -- filters beyond `before_action`, rescue_from, streaming, multi-format responses
@@ -85,7 +112,7 @@ The filter architecture is designed so each of these can be added incrementally.
 
 ## Relationship to ruby2js
 
-ruby2cr is a sibling project to [ruby2js](https://www.ruby2js.com/), which transpiles Ruby to JavaScript. They share the same Prism parser, the same inflector, and the same architectural philosophy: parse source, transform an AST through composable filters, serialize the result. Knowledge from one project transfers to the other.
+Railcar is a sibling project to [ruby2js](https://www.ruby2js.com/), which transpiles Ruby to JavaScript. They share the same Prism parser, the same inflector, and the same architectural philosophy: parse source, transform an AST through composable filters, serialize the result. Knowledge from one project transfers to the other.
 
 ## License
 

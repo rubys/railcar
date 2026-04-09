@@ -10,7 +10,7 @@
 
 require "compiler/crystal/syntax"
 
-module Ruby2CR
+module Railcar
   class RedirectToResponse < Crystal::Transformer
     def transform(node : Crystal::Call) : Crystal::ASTNode
       return transform_children(node) unless node.name == "redirect_to" && node.obj.nil?

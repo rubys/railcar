@@ -15,7 +15,7 @@ require "json"
 require "base64"
 require "log"
 
-module Ruby2CR
+module Railcar
   class TurboBroadcast
     Log = ::Log.for("cable")
     # Channel name → set of subscribed WebSockets
