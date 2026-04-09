@@ -317,17 +317,22 @@ module Ruby2CR
         io << "\n"
       end
 
+      # Configure logging
+      io << "Log.setup_from_env\n\n"
+
       # Start server with WebSocket support
       io << "# Start server\n"
+      io << "log = ::Log.for(\"http\")\n"
       io << "router = Ruby2CR::Router.new\n"
       io << "ws_handler = HTTP::WebSocketHandler.new do |ws, context|\n"
       io << "  Ruby2CR::TurboBroadcast.handle_connection(ws)\n"
       io << "end\n\n"
       io << "server = HTTP::Server.new do |context|\n"
       io << "  path = context.request.path\n"
+      io << "  log.info { \"\#" << "{context.request.method} \#" << "{path}\" }\n"
       io << "  if path == \"/cable\"\n"
       io << "    ws_handler.call(context)\n"
-      io << "  elsif path.starts_with?(\"/\") && File.exists?(\"public\" + path)\n"
+      io << "  elsif path.starts_with?(\"/\") && File.file?(\"public\" + path)\n"
       io << "    # Serve static files\n"
       io << "    context.response.content_type = MIME.from_filename(path, \"application/octet-stream\")\n"
       io << "    context.response.print(File.read(\"public\" + path))\n"

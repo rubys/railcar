@@ -150,12 +150,35 @@ module Ruby2CR
       io << " |" << block_args << "|" unless block_args.empty?
       io << " %>\n"
 
-      # Block body — use emit_statements to properly decompose buffer ops
+      # Block body — buffer ops go through emit_statements,
+      # other calls (like render_partial) are output expressions
       if body = block.body
-        emit_statements(body, io)
+        emit_block_body(body, io)
       end
 
       io << "<% end %>"
+    end
+
+    private def emit_block_body(node : Crystal::ASTNode, io : IO)
+      case node
+      when Crystal::Expressions
+        node.expressions.each { |stmt| emit_block_body(stmt, io) }
+      when Crystal::OpAssign, Crystal::Assign
+        # Buffer operations — decompose as template
+        emit_statement(node, io)
+      when Crystal::Call
+        obj = node.obj
+        if obj.is_a?(Crystal::Var) && obj.name == "_buf"
+          emit_statement(node, io)
+        else
+          # Non-buffer calls in block body are output expressions
+          io << "<%= " << node.to_s << " %>\n"
+        end
+      when Crystal::If
+        emit_if(node, io)
+      else
+        emit_statement(node, io)
+      end
     end
 
     # Serialize a call without its block
