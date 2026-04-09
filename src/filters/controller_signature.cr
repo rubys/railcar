@@ -153,8 +153,8 @@ module Ruby2CR
       title_expr = case action_name
                    when "index" then Crystal::StringLiteral.new(controller_name.capitalize)
                    when "show"  then Crystal::Call.new(Crystal::Var.new(singular), "title")
-                   when "new"   then Crystal::StringLiteral.new("New #{Inflector.classify(singular)}")
-                   when "edit"  then Crystal::StringLiteral.new("Edit #{Inflector.classify(singular)}")
+                   when "new"   then Crystal::StringLiteral.new("New #{singular}")
+                   when "edit"  then Crystal::StringLiteral.new("Editing #{singular}")
                    else Crystal::StringLiteral.new(action_name.capitalize)
                    end
 
