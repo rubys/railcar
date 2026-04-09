@@ -235,7 +235,13 @@ module Ruby2CR
       end
 
       if body = block.body
-        emit_form_body(body, io, model_var || child_class || "item")
+        form_model = model_var || child_class || "item"
+        # For nested new forms (Comment.new), initialize the variable
+        if child_class && !model_var
+          model_class = CrystalEmitter.classify(child_class)
+          io << "<% #{child_class} = Ruby2CR::#{model_class}.new %>\n"
+        end
+        emit_form_body(body, io, form_model)
       end
 
       io << "</form>"
@@ -304,7 +310,7 @@ module Ruby2CR
         field_id = "#{model_prefix}_#{field}"
         css = extract_named_string(call, "class")
         cls_attr = css ? %(, class: "#{css}") : ""
-        io << "<%= text_field_tag(\"#{model_prefix}[#{field}]\", id: \"#{field_id}\"#{cls_attr}) %>"
+        io << "<%= text_field_tag(\"#{model_prefix}[#{field}]\", #{model_prefix}.#{field}, id: \"#{field_id}\"#{cls_attr}) %>"
       when "text_area", "textarea"
         field = extract_symbol_arg(call)
         return unless field
@@ -313,7 +319,7 @@ module Ruby2CR
         rows = extract_named_string(call, "rows")
         cls_attr = css ? %(, class: "#{css}") : ""
         rows_attr = rows ? %(, rows: #{rows}) : ""
-        io << "<%= text_area_tag(\"#{model_prefix}[#{field}]\", id: \"#{field_id}\"#{rows_attr}#{cls_attr}) %>"
+        io << "<%= text_area_tag(\"#{model_prefix}[#{field}]\", #{model_prefix}.#{field}, id: \"#{field_id}\"#{rows_attr}#{cls_attr}) %>"
       when "submit"
         explicit_text = call.args[0]?.is_a?(Crystal::StringLiteral) ? call.args[0].as(Crystal::StringLiteral).value : nil
         css = extract_named_string(call, "class")
