@@ -28,7 +28,9 @@ jobs:
         run: shards install
 
       - name: Build libprism
-        run: sudo make build/lib/libprism.a
+        run: |
+          sudo make build/lib/libprism.a
+          sudo chown -R $(id -u):$(id -g) build
 
       - name: Download demo blog
         run: make build/demo/blog/Gemfile
