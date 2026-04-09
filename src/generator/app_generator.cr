@@ -60,6 +60,7 @@ module Ruby2CR
       generate_routes
       generate_app_entry(app_name)
       generate_tailwind
+      copy_turbo_js
       generate_tests
 
       puts "Done! Output in #{output_dir}/"
@@ -470,6 +471,38 @@ module Ruby2CR
       nil
     end
 
+    # Copy turbo.min.js from turbo-rails gem
+    private def copy_turbo_js
+      public_dir = File.join(output_dir, "public")
+      mkdir(public_dir)
+
+      turbo_js = find_turbo_js
+      unless turbo_js
+        puts "  turbo.min.js: not found (skipping)"
+        puts "  Install: gem install turbo-rails"
+        return
+      end
+
+      copy_file(turbo_js, File.join(public_dir, "turbo.min.js"))
+      size = File.size(File.join(public_dir, "turbo.min.js"))
+      puts "  public/turbo.min.js (#{size} bytes)"
+    end
+
+    private def find_turbo_js : String?
+      begin
+        output = IO::Memory.new
+        result = Process.run("ruby",
+          ["-e", "puts Gem::Specification.find_by_name('turbo-rails').gem_dir + '/app/assets/javascripts/turbo.min.js'"],
+          output: output, error: Process::Redirect::Close)
+        if result.success?
+          path = output.to_s.strip
+          return path if File.exists?(path)
+        end
+      rescue
+      end
+      nil
+    end
+
     private def generate_layout : String
       <<-ECR
       <!DOCTYPE html>
@@ -477,8 +510,7 @@ module Ruby2CR
       <head>
         <title><%= title %></title>
         <link rel="stylesheet" href="/app.css">
-        <script type="importmap">{"imports":{"@hotwired/turbo":"https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/dist/turbo.es2017-esm.js","@rails/actioncable/src":"https://cdn.jsdelivr.net/npm/@rails/actioncable@8/src/index.js","@rails/actioncable":"https://cdn.jsdelivr.net/npm/@rails/actioncable@8/src/index.js"}}</script>
-        <script type="module">import "@hotwired/turbo";import "https://cdn.jsdelivr.net/npm/@hotwired/turbo-rails@8/app/javascript/turbo/index.js";</script>
+        <script type="module" src="/turbo.min.js"></script>
       </head>
       <body>
         <main class="container mx-auto mt-28 px-5 flex flex-col">
