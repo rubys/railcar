@@ -21,9 +21,8 @@ module Ruby2CR::ViewHelpers
     form_class = opts[:form_class]?
 
     html = String.build do |io|
-      io << %(<form class="button_to" method="post" action="#{HTML.escape(path)}")
-      io << %( class="#{HTML.escape(form_class)}") if form_class
-      io << ">"
+      fc = form_class || "button_to"
+      io << %(<form class="#{HTML.escape(fc)}" method="post" action="#{HTML.escape(path)}">)
       if method != "post"
         io << %(<input type="hidden" name="_method" value="#{HTML.escape(method)}">)
       end
@@ -116,7 +115,7 @@ module Ruby2CR::ViewHelpers
 
   def submit_tag(text : String = "Submit", **opts) : String
     cls = opts[:class]?
-    html = %(<input type="submit" value="#{HTML.escape(text)}")
+    html = %(<input type="submit" name="commit" value="#{HTML.escape(text)}")
     html += %( class="#{HTML.escape(cls)}") if cls
     html += ">"
     html
