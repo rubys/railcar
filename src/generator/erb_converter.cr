@@ -212,7 +212,7 @@ module Ruby2CR
               model_var = val.to_s
             end
           when "class"
-            css_class = na.value.to_s
+            css_class = na.value.is_a?(Crystal::StringLiteral) ? na.value.as(Crystal::StringLiteral).value : na.value.to_s
           end
         end
       end
@@ -221,12 +221,12 @@ module Ruby2CR
 
       if parent_var && child_class
         plural = CrystalEmitter.pluralize(child_class)
-        io << "<form action=\"<%= #{parent_var}_#{plural}_path(#{parent_var}) %>\" method=\"post\"#{css_attr}>\n"
+        io << "<form#{css_attr} action=\"<%= #{parent_var}_#{plural}_path(#{parent_var}) %>\" accept-charset=\"UTF-8\" method=\"post\">\n"
       elsif model_var
         plural = CrystalEmitter.pluralize(model_var)
         io << "<% _action = #{model_var}.persisted? ? #{model_var}_path(#{model_var}) : #{plural}_path %>\n"
         io << "<% _method = #{model_var}.persisted? ? \"patch\" : \"post\" %>\n"
-        io << "<form action=\"<%= _action %>\" method=\"post\"#{css_attr}>\n"
+        io << "<form#{css_attr} action=\"<%= _action %>\" accept-charset=\"UTF-8\" method=\"post\">\n"
         io << "  <% if _method != \"post\" %>\n"
         io << "    <input type=\"hidden\" name=\"_method\" value=\"<%= _method %>\">\n"
         io << "  <% end %>\n"
@@ -287,32 +287,44 @@ module Ruby2CR
       receiver = call.obj
       method = call.name
 
+      # Rails form field id: "article_title" (model_field)
+      field_id = nil
+
       case method
       when "label"
         field = extract_symbol_arg(call)
         return unless field
+        field_id = "#{model_prefix}_#{field}"
         css = extract_named_string(call, "class")
         cls_attr = css ? %(, class: "#{css}") : ""
-        io << "<%= label_tag(\"#{model_prefix}[#{field}]\", \"#{field.capitalize}\"#{cls_attr}) %>"
+        io << "<%= label_tag(\"#{field_id}\", \"#{field.capitalize}\"#{cls_attr}) %>"
       when "text_field"
         field = extract_symbol_arg(call)
         return unless field
+        field_id = "#{model_prefix}_#{field}"
         css = extract_named_string(call, "class")
         cls_attr = css ? %(, class: "#{css}") : ""
-        io << "<%= text_field_tag(\"#{model_prefix}[#{field}]\"#{cls_attr}) %>"
+        io << "<%= text_field_tag(\"#{model_prefix}[#{field}]\", id: \"#{field_id}\"#{cls_attr}) %>"
       when "text_area", "textarea"
         field = extract_symbol_arg(call)
         return unless field
+        field_id = "#{model_prefix}_#{field}"
         css = extract_named_string(call, "class")
         rows = extract_named_string(call, "rows")
         cls_attr = css ? %(, class: "#{css}") : ""
         rows_attr = rows ? %(, rows: #{rows}) : ""
-        io << "<%= text_area_tag(\"#{model_prefix}[#{field}]\"#{rows_attr}#{cls_attr}) %>"
+        io << "<%= text_area_tag(\"#{model_prefix}[#{field}]\", id: \"#{field_id}\"#{rows_attr}#{cls_attr}) %>"
       when "submit"
-        text = call.args[0]?.is_a?(Crystal::StringLiteral) ? call.args[0].as(Crystal::StringLiteral).value : "Submit"
+        explicit_text = call.args[0]?.is_a?(Crystal::StringLiteral) ? call.args[0].as(Crystal::StringLiteral).value : nil
+        # Derive submit text from model state if not explicit
+        default_text = "<%= #{model_prefix}.persisted? ? \"Update #{model_prefix.capitalize}\" : \"Create #{model_prefix.capitalize}\" %>"
         css = extract_named_string(call, "class")
         cls_attr = css ? %(, class: "#{css}") : ""
-        io << "<%= submit_tag(\"#{text}\"#{cls_attr}) %>"
+        if explicit_text
+          io << "<%= submit_tag(\"#{explicit_text}\"#{cls_attr}) %>"
+        else
+          io << "<input type=\"submit\" name=\"commit\" value=\"#{default_text}\"#{cls_attr.gsub("class:", " class=")}>"
+        end
       else
         io << "<%= " << call.to_s << " %>"
       end

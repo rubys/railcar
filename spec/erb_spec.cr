@@ -150,7 +150,7 @@ describe Ruby2CR::ERBConverter do
     ecr.should contain "label_tag"
     ecr.should contain "text_field_tag"
     ecr.should contain "text_area_tag"
-    ecr.should contain "submit_tag"
+    ecr.should contain "type=\"submit\""
 
     # Should not contain raw buffer operations
     ecr.should_not contain "_buf"

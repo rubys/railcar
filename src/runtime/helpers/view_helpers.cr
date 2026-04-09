@@ -81,8 +81,12 @@ module Ruby2CR::ViewHelpers
 
   def text_field_tag(name : String, value : String = "", **opts) : String
     cls = opts[:class]?
-    html = %(<input type="text" name="#{HTML.escape(name)}" value="#{HTML.escape(value)}")
+    id = opts[:id]?
+    html = %(<input)
     html += %( class="#{HTML.escape(cls)}") if cls
+    html += %( type="text" name="#{HTML.escape(name)}")
+    html += %( id="#{HTML.escape(id)}") if id
+    html += %( value="#{HTML.escape(value)}") unless value.empty?
     html += ">"
     html
   end
@@ -90,10 +94,13 @@ module Ruby2CR::ViewHelpers
   def text_area_tag(name : String, value : String = "", **opts) : String
     cls = opts[:class]?
     rows = opts[:rows]?
-    html = %(<textarea name="#{HTML.escape(name)}")
-    html += %( class="#{HTML.escape(cls)}") if cls
+    id = opts[:id]?
+    html = %(<textarea)
     html += %( rows="#{rows}") if rows
-    html += ">\n#{HTML.escape(value)}</textarea>"
+    html += %( class="#{HTML.escape(cls)}") if cls
+    html += %( name="#{HTML.escape(name)}")
+    html += %( id="#{HTML.escape(id)}") if id
+    html += ">#{HTML.escape(value)}</textarea>"
     html
   end
 
