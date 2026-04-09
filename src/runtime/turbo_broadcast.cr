@@ -97,9 +97,12 @@ module Ruby2CR
         signed = id_data["signed_stream_name"]?.try(&.as_s)
         return unless signed
 
-        # Decode the stream name (base64-encoded JSON string)
+        # Decode the stream name
+        # Format: base64(JSON(stream_name)) + "--" + signature
+        # Strip signature, decode base64, parse JSON
         channel_name = begin
-          decoded = Base64.decode_string(signed)
+          base64_part = signed.split("--").first
+          decoded = Base64.decode_string(base64_part)
           JSON.parse(decoded).as_s
         rescue
           signed  # Fall back to using it directly
@@ -113,7 +116,8 @@ module Ruby2CR
         signed = id_data["signed_stream_name"]?.try(&.as_s)
         return unless signed
         channel_name = begin
-          decoded = Base64.decode_string(signed)
+          base64_part = signed.split("--").first
+          decoded = Base64.decode_string(base64_part)
           JSON.parse(decoded).as_s
         rescue
           signed
