@@ -130,6 +130,8 @@ module Ruby2CR
           Crystal::Require.new("../runtime/relation"),
           Crystal::Require.new("../runtime/collection_proxy"),
           Crystal::Require.new("../runtime/broadcasts"),
+          Crystal::Require.new("../helpers/route_helpers"),
+          Crystal::Require.new("../helpers/view_helpers"),
         ] of Crystal::ASTNode
         mod = Crystal::ModuleDef.new(Crystal::Path.new("Ruby2CR"), body: ast)
         nodes = requires + [mod] of Crystal::ASTNode

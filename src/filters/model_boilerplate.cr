@@ -34,6 +34,11 @@ module Ruby2CR
       destroy_def = build_destroy_override
       class_body << destroy_def if destroy_def
 
+      # Broadcast support: include helpers and render_broadcast_partial
+      class_body << Crystal::Include.new(Crystal::Path.new("RouteHelpers"))
+      class_body << Crystal::Include.new(Crystal::Path.new("ViewHelpers"))
+      class_body << build_render_broadcast_partial
+
       Crystal::ClassDef.new(
         node.name,
         body: Crystal::Expressions.new(class_body),
@@ -140,6 +145,39 @@ module Ruby2CR
         return_type: Crystal::Path.new("Bool")
       )
       def_node
+    end
+
+    private def build_render_broadcast_partial : Crystal::Def
+      singular = Inflector.singularize(schema.name)
+      ecr_path = "src/views/#{schema.name}/_#{singular}.ecr"
+
+      # article = self
+      self_assign = Crystal::Assign.new(
+        Crystal::Var.new(singular),
+        Crystal::Var.new("self")
+      )
+
+      # ECR.embed(path, __str__)
+      ecr_call = Crystal::Call.new(
+        Crystal::Path.new("ECR"), "embed",
+        [Crystal::StringLiteral.new(ecr_path), Crystal::Var.new("__str__")] of Crystal::ASTNode
+      )
+
+      # String.build do |__str__| ECR.embed(...) end
+      string_build = Crystal::Call.new(
+        Crystal::Path.new("String"), "build",
+        block: Crystal::Block.new(
+          args: [Crystal::Var.new("__str__")],
+          body: ecr_call
+        )
+      )
+
+      body = Crystal::Expressions.new([self_assign, string_build] of Crystal::ASTNode)
+
+      Crystal::Def.new("render_broadcast_partial",
+        body: body,
+        return_type: Crystal::Path.new("String")
+      )
     end
 
     private def is_association_call?(node : Crystal::ASTNode) : Bool
