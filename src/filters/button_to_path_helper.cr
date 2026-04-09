@@ -27,6 +27,28 @@ module Ruby2CR
                     model_to_path(target)
                   end
         node.args = args
+
+        # Convert symbol values to strings and flatten data: hash
+        if named = node.named_args
+          new_named = [] of Crystal::NamedArgument
+          named.each do |na|
+            if na.name == "data" && na.value.is_a?(Crystal::HashLiteral)
+              # Flatten data: {turbo_confirm: "..."} → data_turbo_confirm: "..."
+              na.value.as(Crystal::HashLiteral).entries.each do |entry|
+                key_name = case entry.key
+                           when Crystal::SymbolLiteral then entry.key.as(Crystal::SymbolLiteral).value
+                           when Crystal::StringLiteral then entry.key.as(Crystal::StringLiteral).value
+                           else entry.key.to_s
+                           end
+                new_named << Crystal::NamedArgument.new("data_#{key_name}", entry.value).as(Crystal::NamedArgument)
+              end
+            else
+              value = na.value.is_a?(Crystal::SymbolLiteral) ? Crystal::StringLiteral.new(na.value.as(Crystal::SymbolLiteral).value).as(Crystal::ASTNode) : na.value
+              new_named << Crystal::NamedArgument.new(na.name, value).as(Crystal::NamedArgument)
+            end
+          end
+          node.named_args = new_named
+        end
       end
       node.obj = node.obj.try(&.transform(self))
       node.args = node.args.map(&.transform(self).as(Crystal::ASTNode))

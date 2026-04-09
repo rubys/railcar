@@ -26,6 +26,7 @@ require "../filters/turbo_stream_connect"
 require "../filters/link_to_path_helper"
 require "../filters/button_to_path_helper"
 require "../filters/render_to_partial"
+require "../filters/rails_helpers"
 require "./source_parser"
 require "./ddl_generator"
 require "./seed_extractor"
@@ -431,6 +432,7 @@ module Ruby2CR
       [
         InstanceVarToLocal.new,      # @article → article
         TurboStreamConnect.new,      # turbo_stream_from → turbo-cable-stream-source element
+        RailsHelpers.new,            # present? → truthy, count → size, dom_id symbols → strings
         LinkToPathHelper.new,        # link_to(@article) → link_to(article_path(article))
         ButtonToPathHelper.new,      # button_to(@article) → button_to(article_path(article))
         RenderToPartial.new,         # render @articles → articles.each { render_article_partial }

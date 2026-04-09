@@ -19,6 +19,8 @@ module Ruby2CR
     def transform(node : Crystal::Call) : Crystal::ASTNode
       if node.name == "turbo_stream_from" && node.obj.nil?
         convert_to_element(node)
+      elsif node.name == "content_for" && node.obj.nil?
+        Crystal::Nop.new
       else
         node.obj = node.obj.try(&.transform(self))
         node.args = node.args.map(&.transform(self).as(Crystal::ASTNode))

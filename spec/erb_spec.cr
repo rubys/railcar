@@ -2,14 +2,16 @@ require "spec"
 require "./test_paths"
 require "../src/generator/erb_converter"
 require "../src/filters/instance_var_to_local"
-require "../src/filters/strip_turbo_stream"
+require "../src/filters/turbo_stream_connect"
+require "../src/filters/rails_helpers"
 require "../src/filters/link_to_path_helper"
 require "../src/filters/button_to_path_helper"
 require "../src/filters/render_to_partial"
 
 VIEW_FILTERS = [
   Ruby2CR::InstanceVarToLocal.new,
-  Ruby2CR::StripTurboStream.new,
+  Ruby2CR::TurboStreamConnect.new,
+  Ruby2CR::RailsHelpers.new,
   Ruby2CR::LinkToPathHelper.new,
   Ruby2CR::ButtonToPathHelper.new,
   Ruby2CR::RenderToPartial.new,
@@ -129,5 +131,54 @@ describe Ruby2CR::ERBConverter do
     ecr.should contain "label_tag"
     ecr.should contain "text_field_tag"
     ecr.should contain "submit_tag"
+  end
+
+  it "converts the blog _form partial" do
+    erb = File.read(File.join(BLOG_DIR, "app/views/articles/_form.html.erb"))
+    ecr = Ruby2CR::ERBConverter.convert(erb, "_form", "articles", view_filters: VIEW_FILTERS)
+
+    # Form structure
+    ecr.should contain "<form"
+    ecr.should contain "article"
+
+    # Error display
+    ecr.should contain "<% if"
+    ecr.should contain "errors"
+    ecr.should contain "<% end %>"
+
+    # Form fields
+    ecr.should contain "label_tag"
+    ecr.should contain "text_field_tag"
+    ecr.should contain "text_area_tag"
+    ecr.should contain "submit_tag"
+
+    # Should not contain raw buffer operations
+    ecr.should_not contain "_buf"
+    ecr.should_not contain "append"
+  end
+
+  it "converts the blog _article partial" do
+    erb = File.read(File.join(BLOG_DIR, "app/views/articles/_article.html.erb"))
+    ecr = Ruby2CR::ERBConverter.convert(erb, "_article", "articles", view_filters: VIEW_FILTERS)
+
+    ecr.should contain "dom_id(article"
+    ecr.should contain "article_path(article)"
+    ecr.should contain "link_to"
+    ecr.should contain "pluralize"
+    ecr.should contain "truncate"
+    ecr.should contain "button_to"
+    ecr.should contain "data_turbo_confirm"
+    ecr.should_not contain "_buf"
+  end
+
+  it "converts the blog _comment partial" do
+    erb = File.read(File.join(BLOG_DIR, "app/views/comments/_comment.html.erb"))
+    ecr = Ruby2CR::ERBConverter.convert(erb, "_comment", "comments", view_filters: VIEW_FILTERS)
+
+    ecr.should contain "dom_id(comment"
+    ecr.should contain "comment.commenter"
+    ecr.should contain "comment.body"
+    ecr.should contain "button_to"
+    ecr.should_not contain "_buf"
   end
 end
