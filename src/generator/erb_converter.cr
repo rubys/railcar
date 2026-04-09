@@ -316,14 +316,16 @@ module Ruby2CR
         io << "<%= text_area_tag(\"#{model_prefix}[#{field}]\", id: \"#{field_id}\"#{rows_attr}#{cls_attr}) %>"
       when "submit"
         explicit_text = call.args[0]?.is_a?(Crystal::StringLiteral) ? call.args[0].as(Crystal::StringLiteral).value : nil
-        # Derive submit text from model state if not explicit
-        default_text = "<%= #{model_prefix}.persisted? ? \"Update #{model_prefix.capitalize}\" : \"Create #{model_prefix.capitalize}\" %>"
         css = extract_named_string(call, "class")
-        cls_attr = css ? %(, class: "#{css}") : ""
         if explicit_text
+          cls_attr = css ? %(, class: "#{css}") : ""
           io << "<%= submit_tag(\"#{explicit_text}\"#{cls_attr}) %>"
         else
-          io << "<input type=\"submit\" name=\"commit\" value=\"#{default_text}\"#{cls_attr.gsub("class:", " class=")}>"
+          # Derive submit text from model state
+          css_attr = css ? %( class="#{css}") : ""
+          io << "<input type=\"submit\" name=\"commit\" value=\""
+          io << "<%= #{model_prefix}.persisted? ? \"Update #{model_prefix.capitalize}\" : \"Create #{model_prefix.capitalize}\" %>"
+          io << "\"#{css_attr}>"
         end
       else
         io << "<%= " << call.to_s << " %>"
