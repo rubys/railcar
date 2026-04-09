@@ -192,24 +192,25 @@ module Ruby2CR
         create!(hash)
       end
 
-    end
 
-    macro finished
-      def run_after_save_callbacks
-        {% for method in @type.methods %}
-          {% if method.name.starts_with?("_after_save_") %}
-            {{method.name}}
-          {% end %}
-        {% end %}
+      macro finished
+        def run_after_save_callbacks
+          \{% for method in @type.methods %}
+            \{% if method.name.starts_with?("_after_save_") %}
+              \{{method.name}}
+            \{% end %}
+          \{% end %}
+        end
+
+        def run_after_destroy_callbacks
+          \{% for method in @type.methods %}
+            \{% if method.name.starts_with?("_after_destroy_") %}
+              \{{method.name}}
+            \{% end %}
+          \{% end %}
+        end
       end
 
-      def run_after_destroy_callbacks
-        {% for method in @type.methods %}
-          {% if method.name.starts_with?("_after_destroy_") %}
-            {{method.name}}
-          {% end %}
-        {% end %}
-      end
     end
 
     # ----- Column macro -----

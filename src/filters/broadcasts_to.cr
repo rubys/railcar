@@ -140,8 +140,14 @@ module Ruby2CR
       parts = node.expressions.map do |part|
         case part
         when Crystal::Call
-          if part.obj.is_a?(Crystal::Call) && param_names.includes?(part.obj.as(Crystal::Call).name)
-            # comment.article_id → self.article_id → just article_id
+          obj = part.obj
+          obj_name = case obj
+                     when Crystal::Call then obj.name
+                     when Crystal::Var then obj.name
+                     else nil
+                     end
+          if obj_name && param_names.includes?(obj_name)
+            # comment.article_id → article_id (call on self)
             Crystal::Call.new(nil, part.name).as(Crystal::ASTNode)
           else
             part.as(Crystal::ASTNode)
