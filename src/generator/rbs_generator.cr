@@ -9,13 +9,18 @@
 require "./app_model"
 require "./schema_extractor"
 require "./prism_translator"
+require "./source_parser"
 require "../semantic"
+require "../filters/respond_to_html"
+require "../filters/strip_turbo_stream"
+require "../filters/strip_callbacks"
 
 module Railcar
   class RbsGenerator
     getter app : AppModel
+    getter rails_dir : String
 
-    def initialize(@app)
+    def initialize(@app, @rails_dir = "")
     end
 
     def generate(output_dir : String)
@@ -144,6 +149,39 @@ module Railcar
     # return types in controller method bodies.
     private def generate_model_stubs(schema_map : Hash(String, TableSchema)) : String
       String.build do |io|
+        # Stub for controller base
+        io << "class ApplicationController\n"
+        io << "  macro before_action(*args, **kwargs)\n"
+        io << "  end\n"
+        io << "  macro private\n"
+        io << "  end\n"
+        io << "  def redirect_to(*args, **kwargs)\n"
+        io << "  end\n"
+        io << "  def render(*args, **kwargs)\n"
+        io << "  end\n"
+        io << "  def head(*args)\n"
+        io << "  end\n"
+        io << "end\n\n"
+
+        # Route helpers
+        app.routes.routes.each do |route|
+          io << "def #{route.controller}_path(*args) : String\n"
+          io << "  \"\"\n"
+          io << "end\n"
+        end
+        # Singular path helpers from model names
+        app.models.each_key do |name|
+          singular = Inflector.underscore(name)
+          plural = Inflector.pluralize(singular)
+          io << "def #{singular}_path(*args) : String\n"
+          io << "  \"\"\n"
+          io << "end\n"
+          io << "def #{plural}_path(*args) : String\n"
+          io << "  \"\"\n"
+          io << "end\n"
+        end
+        io << "\n"
+
         # Stub for params
         io << "class ActionController::Parameters\n"
         io << "  def expect(**args) : ActionController::Parameters\n"
@@ -173,21 +211,40 @@ module Railcar
             end
           end
 
+          # Relation stub for chainable queries
+          io << "  class Relation\n"
+          io << "    include Enumerable(#{name})\n"
+          io << "    def each(& : #{name} ->) : Nil\n"
+          io << "    end\n"
+          io << "    def order(**args) : Relation\n"
+          io << "      self\n"
+          io << "    end\n"
+          io << "    def where(**args) : Relation\n"
+          io << "      self\n"
+          io << "    end\n"
+          io << "    def includes(*args) : Relation\n"
+          io << "      self\n"
+          io << "    end\n"
+          io << "    def limit(n) : Relation\n"
+          io << "      self\n"
+          io << "    end\n"
+          io << "  end\n\n"
+
           # Class methods
           io << "  def self.find(id) : #{name}\n"
           io << "    #{name}.new\n"
           io << "  end\n"
-          io << "  def self.where(**conditions) : Array(#{name})\n"
-          io << "    [] of #{name}\n"
+          io << "  def self.where(**conditions) : Relation\n"
+          io << "    Relation.new\n"
           io << "  end\n"
-          io << "  def self.includes(*args) : Array(#{name})\n"
-          io << "    [] of #{name}\n"
+          io << "  def self.includes(*args) : Relation\n"
+          io << "    Relation.new\n"
           io << "  end\n"
-          io << "  def self.order(**args) : Array(#{name})\n"
-          io << "    [] of #{name}\n"
+          io << "  def self.order(**args) : Relation\n"
+          io << "    Relation.new\n"
           io << "  end\n"
-          io << "  def self.all : Array(#{name})\n"
-          io << "    [] of #{name}\n"
+          io << "  def self.all : Relation\n"
+          io << "    Relation.new\n"
           io << "  end\n"
           io << "  def self.new(params) : #{name}\n"
           io << "    #{name}.new\n"
@@ -264,30 +321,36 @@ module Railcar
     end
 
     # Run all methods together to accumulate ivar types on the class.
+    # Parses the full controller file and applies the filter chain
+    # (same filters AppGenerator uses) to produce valid Crystal.
     private def infer_all_methods(
       info : ControllerInfo,
       stub_source : String
     )
-      methods_with_bodies = info.actions.select(&.body)
-      return {} of String => String if methods_with_bodies.empty?
+      return {} of String => String if rails_dir.empty?
+
+      # Find and parse the controller source file
+      controller_name = Inflector.underscore(info.name).chomp("_controller")
+      source_path = File.join(rails_dir, "app/controllers/#{controller_name}_controller.rb")
+      return {} of String => String unless File.exists?(source_path)
+
+      ast = SourceParser.parse(source_path)
+
+      # Apply minimal filter chain to make the code valid Crystal.
+      # Skip InstanceVarToLocal — we want ivars preserved for type extraction.
+      # Skip controller-specific filters (Signature, Boilerplate, Namespace) —
+      # those restructure for the Crystal web framework, not needed for typing.
+      ast = ast.transform(RespondToHTML.new)
+      ast = ast.transform(StripTurboStream.new)
+      ast = ast.transform(StripCallbacks.new)
 
       stub_ast = Crystal::Parser.parse(stub_source)
 
-      crystal_defs = [] of Crystal::ASTNode
-      methods_with_bodies.each do |action|
-        body = action.body
-        next unless body
-        translated_body = PrismTranslator.new.translate(body)
-        crystal_defs << Crystal::Def.new(action.name, body: translated_body)
-      end
-
-      class_body = Crystal::Expressions.new(crystal_defs)
-      class_def = Crystal::ClassDef.new(
-        Crystal::Path.new(info.name),
-        body: class_body
-      )
-
-      call_sites = methods_with_bodies.map do |action|
+      # Only call private methods (set_article, article_params, etc.)
+      # which set ivars. Skip public actions which have complex
+      # bodies (respond_to, redirect_to) that may fail type checking.
+      private_methods = info.actions.select { |a| a.is_private && a.body }
+      call_sites = private_methods.map do |action|
         Crystal::Call.new(
           Crystal::Call.new(Crystal::Path.new(info.name), "new"),
           action.name
@@ -298,7 +361,7 @@ module Railcar
       full_ast = Crystal::Expressions.new([
         Crystal::Require.new("prelude"),
         stub_ast,
-        class_def,
+        ast,
       ] of Crystal::ASTNode + call_sites)
 
       normalized = program.normalize(full_ast)
@@ -418,6 +481,18 @@ module Railcar
 
     # Map Crystal inferred types to RBS type notation
     private def crystal_type_to_rbs(crystal_type : String) : String
+      # Handle nullable types: (Foo | Nil) → Foo?
+      if crystal_type.starts_with?("(") && crystal_type.ends_with?(")")
+        inner = crystal_type[1..-2]  # strip parens
+        parts = inner.split(" | ")
+        non_nil = parts.reject { |p| p == "Nil" }
+        if non_nil.size == 1 && parts.size > non_nil.size
+          return crystal_type_to_rbs(non_nil[0]) + "?"
+        elsif non_nil.size > 1
+          return non_nil.map { |p| crystal_type_to_rbs(p) }.join(" | ")
+        end
+      end
+
       case crystal_type
       when "Nil"             then "void"
       when "Bool"            then "bool"
@@ -431,9 +506,16 @@ module Railcar
       when "ActionController::Parameters"
         "ActionController::Parameters"
       else
-        # Model names pass through directly
+        # Model names and their inner types pass through
         if app.models.has_key?(crystal_type)
           crystal_type
+        elsif crystal_type.ends_with?("::Relation")
+          model = crystal_type.chomp("::Relation")
+          if app.models.has_key?(model)
+            "ActiveRecord::Relation[#{model}]"
+          else
+            "untyped"
+          end
         else
           "untyped"
         end

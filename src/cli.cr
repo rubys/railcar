@@ -18,7 +18,7 @@ end
 
 if rbs_mode
   app = Railcar::AppModel.extract(rails_dir)
-  Railcar::RbsGenerator.new(app).generate(output_dir)
+  Railcar::RbsGenerator.new(app, rails_dir).generate(output_dir)
 else
   generator = Railcar::AppGenerator.new(rails_dir, output_dir)
   generator.generate
