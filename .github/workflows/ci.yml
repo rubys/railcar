@@ -36,10 +36,10 @@ jobs:
         run: make build/demo/blog/Gemfile
 
       - name: Run tests
-        run: crystal spec
+        run: make test
 
       - name: Build binary
-        run: crystal build src/cli.cr -o build/railcar
+        run: make
 
       - name: Generate and compile demo blog
         run: |
