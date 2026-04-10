@@ -22,7 +22,7 @@ module Railcar
       Dir.mkdir_p(File.join(output_dir, "templates")) unless Dir.exists?(File.join(output_dir, "templates"))
       Dir.mkdir_p(File.join(output_dir, "static")) unless Dir.exists?(File.join(output_dir, "static"))
 
-      puts "Generating Python WSGI app from #{rails_dir}..."
+      puts "Generating Python app from #{rails_dir}..."
 
       generate_models(output_dir)
       generate_app(output_dir)
@@ -670,8 +670,8 @@ module Railcar
 
       err_io = IO::Memory.new
       result = Process.run(tailwind,
-        ["--input", File.join(output_dir, "input.css"),
-         "--output", File.join(output_dir, "static/app.css"),
+        ["--input", "input.css",
+         "--output", "static/app.css",
          "--minify"],
         chdir: output_dir,
         output: Process::Redirect::Close,
