@@ -27,12 +27,13 @@ module Railcar
 
       generate_models(output_dir)
       generate_app(output_dir)
+      generate_pyproject(output_dir)
       generate_templates(output_dir)
       generate_tailwind(output_dir)
       copy_turbo_js(output_dir)
 
       puts "Done! Output in #{output_dir}/"
-      puts "  python3 #{File.join(output_dir, "app.py")}"
+      puts "  cd #{output_dir} && uv run python3 app.py"
     end
 
     private def generate_models(output_dir : String)
@@ -193,18 +194,14 @@ module Railcar
 
     private def generate_app(output_dir : String)
       io = IO::Memory.new
-      io << "from http.server import HTTPServer, BaseHTTPRequestHandler\n"
-      io << "from socketserver import ThreadingMixIn\n"
+      io << "from aiohttp import web\n"
       io << "from urllib.parse import parse_qs\n"
-      io << "import mimetypes\n"
-      io << "import re\n"
+      io << "import aiohttp\n"
       io << "import os\n"
       io << "import json\n"
       io << "import base64\n"
       io << "import asyncio\n"
-      io << "import threading\n"
       io << "import time\n"
-      io << "import websockets\n"
       io << "from models import *\n\n"
 
       # Template helper
@@ -225,65 +222,27 @@ module Railcar
       io << "# ActionCable server for Turbo Streams\n"
       io << "class CableServer:\n"
       io << "    def __init__(self):\n"
-      io << "        self.lock = threading.Lock()\n"
-      io << "        self.channels = {}  # channel_name -> set of (ws, identifier)\n"
-      io << "        self.loop = None\n\n"
+      io << "        self.channels = {}  # channel_name -> set of (ws, identifier)\n\n"
 
       io << "    def subscribe(self, ws, channel, identifier):\n"
-      io << "        with self.lock:\n"
-      io << "            self.channels.setdefault(channel, set()).add((ws, identifier))\n\n"
+      io << "        self.channels.setdefault(channel, set()).add((ws, identifier))\n\n"
 
       io << "    def unsubscribe_all(self, ws):\n"
-      io << "        with self.lock:\n"
-      io << "            for channel in list(self.channels):\n"
-      io << "                self.channels[channel] = {(w, i) for w, i in self.channels[channel] if w is not ws}\n\n"
+      io << "        for channel in list(self.channels):\n"
+      io << "            self.channels[channel] = {(w, i) for w, i in self.channels[channel] if w is not ws}\n\n"
 
-      io << "    def broadcast(self, channel, html):\n"
-      io << "        with self.lock:\n"
-      io << "            subs = list(self.channels.get(channel, set()))\n"
-      io << "        for ws, identifier in subs:\n"
+      io << "    async def broadcast(self, channel, html):\n"
+      io << "        for ws, identifier in list(self.channels.get(channel, set())):\n"
       io << "            msg = json.dumps({'type': 'message', 'identifier': identifier, 'message': html})\n"
-      io << "            if self.loop:\n"
-      io << "                asyncio.run_coroutine_threadsafe(ws.send(msg), self.loop)\n\n"
+      io << "            try:\n"
+      io << "                await ws.send_str(msg)\n"
+      io << "            except Exception:\n"
+      io << "                pass\n\n"
 
       io << "cable = CableServer()\n\n"
 
-      io << "async def handle_cable(ws):\n"
-      io << "    cable.loop = asyncio.get_event_loop()\n"
-      io << "    await ws.send(json.dumps({'type': 'welcome'}))\n"
-      io << "    async def ping():\n"
-      io << "        try:\n"
-      io << "            while True:\n"
-      io << "                await asyncio.sleep(3)\n"
-      io << "                await ws.send(json.dumps({'type': 'ping', 'message': int(time.time())}))\n"
-      io << "        except websockets.exceptions.ConnectionClosed:\n"
-      io << "            pass\n"
-      io << "    ping_task = asyncio.create_task(ping())\n"
-      io << "    try:\n"
-      io << "        async for raw in ws:\n"
-      io << "            data = json.loads(raw)\n"
-      io << "            if data.get('command') == 'subscribe':\n"
-      io << "                identifier = data['identifier']\n"
-      io << "                id_data = json.loads(identifier)\n"
-      io << "                signed = id_data.get('signed_stream_name', '')\n"
-      io << "                channel = json.loads(base64.b64decode(signed.split('--')[0]))\n"
-      io << "                cable.subscribe(ws, channel, identifier)\n"
-      io << "                await ws.send(json.dumps({'type': 'confirm_subscription', 'identifier': identifier}))\n"
-      io << "    except websockets.exceptions.ConnectionClosed:\n"
-      io << "        pass\n"
-      io << "    finally:\n"
-      io << "        ping_task.cancel()\n"
-      io << "        cable.unsubscribe_all(ws)\n\n"
-
       io << "def signed_stream_name(channel):\n"
       io << "    return base64.b64encode(json.dumps(channel).encode()).decode()\n\n"
-
-      io << "def run_cable_server():\n"
-      io << "    async def serve():\n"
-      io << "        async with websockets.serve(handle_cable, '0.0.0.0', 3001,\n"
-      io << "                subprotocols=[websockets.Subprotocol('actioncable-v1-json')]):\n"
-      io << "            await asyncio.Future()\n"
-      io << "    asyncio.run(serve())\n\n"
 
       # Parse form data
       io << "def parse_form(body_bytes):\n"
@@ -316,128 +275,75 @@ module Railcar
       io << "    )\n\n"
 
       # Broadcast helpers
-      io << "def broadcast_article_append(article):\n"
+      io << "async def broadcast_article_append(article):\n"
       io << "    html = render_article_card(article)\n"
       io << "    stream = f'<turbo-stream action=\"prepend\" target=\"articles\"><template>{html}</template></turbo-stream>'\n"
-      io << "    cable.broadcast('articles', stream)\n\n"
+      io << "    await cable.broadcast('articles', stream)\n\n"
 
-      io << "def broadcast_article_replace(article):\n"
+      io << "async def broadcast_article_replace(article):\n"
       io << "    html = render_article_card(article)\n"
       io << "    stream = f'<turbo-stream action=\"replace\" target=\"article_{article.id}\"><template>{html}</template></turbo-stream>'\n"
-      io << "    cable.broadcast('articles', stream)\n\n"
+      io << "    await cable.broadcast('articles', stream)\n\n"
 
-      io << "def broadcast_article_remove(article_id):\n"
+      io << "async def broadcast_article_remove(article_id):\n"
       io << "    stream = f'<turbo-stream action=\"remove\" target=\"article_{article_id}\"></turbo-stream>'\n"
-      io << "    cable.broadcast('articles', stream)\n\n"
+      io << "    await cable.broadcast('articles', stream)\n\n"
 
-      io << "def broadcast_comment_append(comment, article_id):\n"
+      io << "async def broadcast_comment_append(comment, article_id):\n"
       io << "    html = render_comment_partial(comment, article_id)\n"
       io << "    stream = f'<turbo-stream action=\"append\" target=\"comments\"><template>{html}</template></turbo-stream>'\n"
-      io << "    cable.broadcast(f'article_{article_id}_comments', stream)\n"
+      io << "    await cable.broadcast(f'article_{article_id}_comments', stream)\n"
       io << "    # Also update article card on index (comment count changed)\n"
       io << "    article = Article.find(article_id)\n"
-      io << "    broadcast_article_replace(article)\n\n"
+      io << "    await broadcast_article_replace(article)\n\n"
 
-      io << "def broadcast_comment_remove(comment_id, article_id):\n"
+      io << "async def broadcast_comment_remove(comment_id, article_id):\n"
       io << "    stream = f'<turbo-stream action=\"remove\" target=\"comment_{comment_id}\"></turbo-stream>'\n"
-      io << "    cable.broadcast(f'article_{article_id}_comments', stream)\n"
+      io << "    await cable.broadcast(f'article_{article_id}_comments', stream)\n"
       io << "    article = Article.find(article_id)\n"
-      io << "    broadcast_article_replace(article)\n\n"
+      io << "    await broadcast_article_replace(article)\n\n"
 
-      # HTTP Handler
-      io << "class BlogHandler(BaseHTTPRequestHandler):\n"
-      io << "    def do_GET(self):\n"
-      io << "        path = self.path.split('?')[0]\n"
-      io << "\n"
-      io << "        # Static files\n"
-      io << "        if path.startswith('/static/'):\n"
-      io << "            return self.serve_static(path)\n"
-      io << "\n"
+      # WebSocket handler for /cable
+      io << "# ActionCable WebSocket handler\n"
+      io << "async def cable_handler(request):\n"
+      io << "    ws = web.WebSocketResponse(protocols=['actioncable-v1-json'])\n"
+      io << "    await ws.prepare(request)\n"
+      io << "    await ws.send_str(json.dumps({'type': 'welcome'}))\n"
+      io << "    async def ping():\n"
+      io << "        try:\n"
+      io << "            while not ws.closed:\n"
+      io << "                await asyncio.sleep(3)\n"
+      io << "                if not ws.closed:\n"
+      io << "                    await ws.send_str(json.dumps({'type': 'ping', 'message': int(time.time())}))\n"
+      io << "        except Exception:\n"
+      io << "            pass\n"
+      io << "    ping_task = asyncio.create_task(ping())\n"
+      io << "    try:\n"
+      io << "        async for msg in ws:\n"
+      io << "            if msg.type == aiohttp.WSMsgType.TEXT:\n"
+      io << "                data = json.loads(msg.data)\n"
+      io << "                if data.get('command') == 'subscribe':\n"
+      io << "                    identifier = data['identifier']\n"
+      io << "                    id_data = json.loads(identifier)\n"
+      io << "                    signed = id_data.get('signed_stream_name', '')\n"
+      io << "                    channel = json.loads(base64.b64decode(signed.split('--')[0]))\n"
+      io << "                    cable.subscribe(ws, channel, identifier)\n"
+      io << "                    await ws.send_str(json.dumps({'type': 'confirm_subscription', 'identifier': identifier}))\n"
+      io << "    finally:\n"
+      io << "        ping_task.cancel()\n"
+      io << "        cable.unsubscribe_all(ws)\n"
+      io << "    return ws\n\n"
 
-      # GET routes
-      io << "        match = re.match(r'^/articles/(\\d+)/edit$', path)\n"
-      io << "        if match:\n"
-      io << "            return self.articles_edit(int(match.group(1)))\n"
-      io << "\n"
-      io << "        match = re.match(r'^/articles/(\\d+)$', path)\n"
-      io << "        if match:\n"
-      io << "            return self.articles_show(int(match.group(1)))\n"
-      io << "\n"
-      io << "        if path == '/articles/new':\n"
-      io << "            return self.articles_new()\n"
-      io << "\n"
-      io << "        if path in ('/', '/articles'):\n"
-      io << "            return self.articles_index()\n"
-      io << "\n"
-      io << "        self.send_error(404)\n"
-      io << "\n"
-
-      io << "    def do_POST(self):\n"
-      io << "        path = self.path.split('?')[0]\n"
-      io << "        body = self.read_body()\n"
-      io << "        data = parse_form(body)\n"
-      io << "        method_override = form_value(data, '_method').upper()\n"
-      io << "\n"
-
-      # POST routes
-      io << "        match = re.match(r'^/articles/(\\d+)/comments/(\\d+)$', path)\n"
-      io << "        if match and method_override == 'DELETE':\n"
-      io << "            return self.comments_destroy(int(match.group(1)), int(match.group(2)))\n"
-      io << "\n"
-      io << "        match = re.match(r'^/articles/(\\d+)/comments$', path)\n"
-      io << "        if match:\n"
-      io << "            return self.comments_create(int(match.group(1)), data)\n"
-      io << "\n"
-      io << "        match = re.match(r'^/articles/(\\d+)$', path)\n"
-      io << "        if match:\n"
-      io << "            id = int(match.group(1))\n"
-      io << "            if method_override in ('PATCH', 'PUT'):\n"
-      io << "                return self.articles_update(id, data)\n"
-      io << "            elif method_override == 'DELETE':\n"
-      io << "                return self.articles_destroy(id)\n"
-      io << "\n"
-      io << "        if path == '/articles':\n"
-      io << "            return self.articles_create(data)\n"
-      io << "\n"
-      io << "        self.send_error(404)\n"
-      io << "\n"
-
-      # Helper methods
-      io << "    def read_body(self):\n"
-      io << "        length = int(self.headers.get('Content-Length', 0))\n"
-      io << "        return self.rfile.read(length)\n"
-      io << "\n"
-
-      io << "    def respond(self, status, content_type, body):\n"
-      io << "        self.send_response(status)\n"
-      io << "        self.send_header('Content-Type', content_type)\n"
-      io << "        self.end_headers()\n"
-      io << "        self.wfile.write(body.encode() if isinstance(body, str) else body)\n"
-      io << "\n"
-
-      io << "    def redirect(self, location, status=302):\n"
-      io << "        self.send_response(status)\n"
-      io << "        self.send_header('Location', location)\n"
-      io << "        self.end_headers()\n"
-      io << "\n"
-
-      io << "    def serve_static(self, path):\n"
-      io << "        static_path = os.path.join(os.path.dirname(__file__), path.lstrip('/'))\n"
-      io << "        if os.path.isfile(static_path):\n"
-      io << "            content_type = mimetypes.guess_type(static_path)[0] or 'application/octet-stream'\n"
-      io << "            with open(static_path, 'rb') as f:\n"
-      io << "                self.respond(200, content_type, f.read())\n"
-      io << "        else:\n"
-      io << "            self.send_error(404)\n"
-      io << "\n"
-
-      io << "    def log_message(self, format, *args):\n"
-      io << "        print(f'{self.command} {self.path} {args[1] if len(args) > 1 else \"\"}'.strip())\n"
-      io << "\n"
-
-      # Controller actions as handler methods
+      # Route handlers
       generate_articles_handlers(io)
       generate_comments_handlers(io)
+
+      # Logging middleware
+      io << "@web.middleware\n"
+      io << "async def log_middleware(request, handler):\n"
+      io << "    response = await handler(request)\n"
+      io << "    print(f'{request.method} {request.path} {response.status}')\n"
+      io << "    return response\n\n"
 
       # Seed data from db/seeds.rb if it exists
       seeds_path = File.join(rails_dir, "db/seeds.rb")
@@ -447,18 +353,24 @@ module Railcar
         io << PythonSeedExtractor.generate(seeds_path, first_model)
       end
 
-      # Threaded server
-      io << "class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):\n"
-      io << "    daemon_threads = True\n\n"
-
       # Main
       io << "if __name__ == '__main__':\n"
       io << "    init_db()\n"
       io << "    seed_db()\n" if has_seeds
-      io << "    threading.Thread(target=run_cable_server, daemon=True).start()\n"
+      io << "    app = web.Application(middlewares=[log_middleware])\n"
+      io << "    app.router.add_get('/cable', cable_handler)\n"
+      io << "    app.router.add_get('/articles/new', articles_new)\n"
+      io << "    app.router.add_get('/articles/{id}/edit', articles_edit)\n"
+      io << "    app.router.add_get('/articles/{id}', articles_show)\n"
+      io << "    app.router.add_get('/', articles_index)\n"
+      io << "    app.router.add_get('/articles', articles_index)\n"
+      io << "    app.router.add_post('/articles', articles_create)\n"
+      io << "    app.router.add_post('/articles/{id}', articles_update_or_destroy)\n"
+      io << "    app.router.add_post('/articles/{id}/comments', comments_create)\n"
+      io << "    app.router.add_post('/articles/{article_id}/comments/{id}', comments_destroy)\n"
+      io << "    app.router.add_static('/static', os.path.join(os.path.dirname(__file__), 'static'))\n"
       io << "    print('Blog running at http://localhost:3000')\n"
-      io << "    server = ThreadedHTTPServer(('0.0.0.0', 3000), BlogHandler)\n"
-      io << "    server.serve_forever()\n"
+      io << "    web.run_app(app, host='0.0.0.0', port=3000, print=lambda _: None)\n"
 
       File.write(File.join(output_dir, "app.py"), io.to_s)
       puts "  app.py"
@@ -466,94 +378,114 @@ module Railcar
 
     private def generate_articles_handlers(io : IO::Memory)
       # index
-      io << "    def articles_index(self):\n"
-      io << "        articles = Article.all(order_by='created_at DESC')\n"
-      io << "        article_list = '\\n'.join(render_article_card(a) for a in articles)\n"
-      io << "        article_list = article_list or '<p class=\"text-center my-10\">No articles found.</p>'\n"
-      io << "        content = render_template('articles_index.html',\n"
-      io << "            article_list=article_list,\n"
-      io << "            signed_articles=signed_stream_name('articles'))\n"
-      io << "        self.respond(200, 'text/html', layout(content))\n\n"
+      io << "async def articles_index(request):\n"
+      io << "    articles = Article.all(order_by='created_at DESC')\n"
+      io << "    article_list = '\\n'.join(render_article_card(a) for a in articles)\n"
+      io << "    article_list = article_list or '<p class=\"text-center my-10\">No articles found.</p>'\n"
+      io << "    content = render_template('articles_index.html',\n"
+      io << "        article_list=article_list,\n"
+      io << "        signed_articles=signed_stream_name('articles'))\n"
+      io << "    return web.Response(text=layout(content), content_type='text/html')\n\n"
 
       # show
-      io << "    def articles_show(self, id):\n"
-      io << "        article = Article.find(id)\n"
-      io << "        comments = article.comments()\n"
-      io << "        comments_html = '\\n'.join(render_comment_partial(c, id) for c in comments)\n"
-      io << "        comments_html = comments_html or '<p class=\"text-gray-500\">No comments yet.</p>'\n"
-      io << "        content = render_template('articles_show.html',\n"
-      io << "            id=article.id, title=article.title, body=article.body,\n"
-      io << "            comments_html=comments_html,\n"
-      io << "            signed_comments=signed_stream_name(f'article_{id}_comments'))\n"
-      io << "        self.respond(200, 'text/html', layout(content))\n\n"
+      io << "async def articles_show(request):\n"
+      io << "    id = int(request.match_info['id'])\n"
+      io << "    article = Article.find(id)\n"
+      io << "    comments = article.comments()\n"
+      io << "    comments_html = '\\n'.join(render_comment_partial(c, id) for c in comments)\n"
+      io << "    comments_html = comments_html or '<p class=\"text-gray-500\">No comments yet.</p>'\n"
+      io << "    content = render_template('articles_show.html',\n"
+      io << "        id=article.id, title=article.title, body=article.body,\n"
+      io << "        comments_html=comments_html,\n"
+      io << "        signed_comments=signed_stream_name(f'article_{id}_comments'))\n"
+      io << "    return web.Response(text=layout(content), content_type='text/html')\n\n"
 
       # new
-      io << "    def articles_new(self):\n"
-      io << "        content = render_template('articles_form.html',\n"
-      io << "            form_title='New Article', title='', body='',\n"
-      io << "            action='/articles', method_field='')\n"
-      io << "        self.respond(200, 'text/html', layout(content))\n\n"
+      io << "async def articles_new(request):\n"
+      io << "    content = render_template('articles_form.html',\n"
+      io << "        form_title='New Article', title='', body='',\n"
+      io << "        action='/articles', method_field='')\n"
+      io << "    return web.Response(text=layout(content), content_type='text/html')\n\n"
 
       # create
-      io << "    def articles_create(self, data):\n"
-      io << "        article = Article(title=form_value(data, 'article[title]'), body=form_value(data, 'article[body]'))\n"
-      io << "        if article.save():\n"
-      io << "            broadcast_article_append(article)\n"
-      io << "            self.redirect(f'/articles/{article.id}')\n"
-      io << "        else:\n"
-      io << "            content = render_template('articles_form.html',\n"
-      io << "                form_title='New Article', title=article.title, body=article.body,\n"
-      io << "                action='/articles', method_field='')\n"
-      io << "            self.respond(422, 'text/html', layout(content))\n\n"
+      io << "async def articles_create(request):\n"
+      io << "    data = parse_form(await request.read())\n"
+      io << "    article = Article(title=form_value(data, 'article[title]'), body=form_value(data, 'article[body]'))\n"
+      io << "    if article.save():\n"
+      io << "        await broadcast_article_append(article)\n"
+      io << "        raise web.HTTPFound(f'/articles/{article.id}')\n"
+      io << "    content = render_template('articles_form.html',\n"
+      io << "        form_title='New Article', title=article.title, body=article.body,\n"
+      io << "        action='/articles', method_field='')\n"
+      io << "    return web.Response(text=layout(content), content_type='text/html', status=422)\n\n"
 
-      # edit
-      io << "    def articles_edit(self, id):\n"
-      io << "        article = Article.find(id)\n"
-      io << "        content = render_template('articles_form.html',\n"
-      io << "            form_title='Edit Article', title=article.title, body=article.body,\n"
-      io << "            action=f'/articles/{id}',\n"
-      io << "            method_field='<input type=\"hidden\" name=\"_method\" value=\"patch\">')\n"
-      io << "        self.respond(200, 'text/html', layout(content))\n\n"
-
-      # update
-      io << "    def articles_update(self, id, data):\n"
-      io << "        article = Article.find(id)\n"
-      io << "        article.title = form_value(data, 'article[title]')\n"
-      io << "        article.body = form_value(data, 'article[body]')\n"
-      io << "        if article.save():\n"
-      io << "            broadcast_article_replace(article)\n"
-      io << "            self.redirect(f'/articles/{article.id}', 303)\n"
-      io << "        else:\n"
-      io << "            content = render_template('articles_form.html',\n"
-      io << "                form_title='Edit Article', title=article.title, body=article.body,\n"
-      io << "                action=f'/articles/{id}',\n"
-      io << "                method_field='<input type=\"hidden\" name=\"_method\" value=\"patch\">')\n"
-      io << "            self.respond(422, 'text/html', layout(content))\n\n"
-
-      # destroy
-      io << "    def articles_destroy(self, id):\n"
+      # update or destroy (POST with _method override)
+      io << "async def articles_update_or_destroy(request):\n"
+      io << "    id = int(request.match_info['id'])\n"
+      io << "    data = parse_form(await request.read())\n"
+      io << "    method = form_value(data, '_method').upper()\n"
+      io << "    if method == 'DELETE':\n"
       io << "        article = Article.find(id)\n"
       io << "        article.destroy_comments()\n"
       io << "        article.destroy()\n"
-      io << "        broadcast_article_remove(id)\n"
-      io << "        self.redirect('/articles', 303)\n\n"
+      io << "        await broadcast_article_remove(id)\n"
+      io << "        raise web.HTTPSeeOther('/articles')\n"
+      io << "    article = Article.find(id)\n"
+      io << "    article.title = form_value(data, 'article[title]')\n"
+      io << "    article.body = form_value(data, 'article[body]')\n"
+      io << "    if article.save():\n"
+      io << "        await broadcast_article_replace(article)\n"
+      io << "        raise web.HTTPSeeOther(f'/articles/{article.id}')\n"
+      io << "    content = render_template('articles_form.html',\n"
+      io << "        form_title='Edit Article', title=article.title, body=article.body,\n"
+      io << "        action=f'/articles/{id}',\n"
+      io << "        method_field='<input type=\"hidden\" name=\"_method\" value=\"patch\">')\n"
+      io << "    return web.Response(text=layout(content), content_type='text/html', status=422)\n\n"
+
+      # edit
+      io << "async def articles_edit(request):\n"
+      io << "    id = int(request.match_info['id'])\n"
+      io << "    article = Article.find(id)\n"
+      io << "    content = render_template('articles_form.html',\n"
+      io << "        form_title='Edit Article', title=article.title, body=article.body,\n"
+      io << "        action=f'/articles/{id}',\n"
+      io << "        method_field='<input type=\"hidden\" name=\"_method\" value=\"patch\">')\n"
+      io << "    return web.Response(text=layout(content), content_type='text/html')\n\n"
     end
 
     private def generate_comments_handlers(io : IO::Memory)
       # create
-      io << "    def comments_create(self, article_id, data):\n"
-      io << "        article = Article.find(article_id)\n"
-      io << "        comment = Comment(article_id=article.id, commenter=form_value(data, 'comment[commenter]'), body=form_value(data, 'comment[body]'))\n"
-      io << "        comment.save()\n"
-      io << "        broadcast_comment_append(comment, article_id)\n"
-      io << "        self.redirect(f'/articles/{article_id}')\n\n"
+      io << "async def comments_create(request):\n"
+      io << "    article_id = int(request.match_info['id'])\n"
+      io << "    data = parse_form(await request.read())\n"
+      io << "    article = Article.find(article_id)\n"
+      io << "    comment = Comment(article_id=article.id, commenter=form_value(data, 'comment[commenter]'), body=form_value(data, 'comment[body]'))\n"
+      io << "    comment.save()\n"
+      io << "    await broadcast_comment_append(comment, article_id)\n"
+      io << "    raise web.HTTPFound(f'/articles/{article_id}')\n\n"
 
       # destroy
-      io << "    def comments_destroy(self, article_id, id):\n"
+      io << "async def comments_destroy(request):\n"
+      io << "    article_id = int(request.match_info['article_id'])\n"
+      io << "    id = int(request.match_info['id'])\n"
+      io << "    data = parse_form(await request.read())\n"
+      io << "    method = form_value(data, '_method').upper()\n"
+      io << "    if method == 'DELETE':\n"
       io << "        comment = Comment.find(id)\n"
       io << "        comment.destroy()\n"
-      io << "        broadcast_comment_remove(id, article_id)\n"
-      io << "        self.redirect(f'/articles/{article_id}', 303)\n\n"
+      io << "        await broadcast_comment_remove(id, article_id)\n"
+      io << "    raise web.HTTPSeeOther(f'/articles/{article_id}')\n\n"
+    end
+
+    private def generate_pyproject(output_dir : String)
+      project_name = File.basename(File.expand_path(output_dir))
+      File.write(File.join(output_dir, "pyproject.toml"),
+        "[project]\n" \
+        "name = \"#{project_name}\"\n" \
+        "version = \"0.1.0\"\n" \
+        "requires-python = \">=3.10\"\n" \
+        "dependencies = [\"aiohttp\"]\n")
+      puts "  pyproject.toml"
     end
 
     private def generate_templates(output_dir : String)
@@ -566,7 +498,7 @@ module Railcar
       <head>
         <title>{{title}}</title>
         <meta name="viewport" content="width=device-width,initial-scale=1">
-        <meta name="action-cable-url" content="ws://localhost:3001/cable">
+        <meta name="action-cable-url" content="/cable">
         <link rel="stylesheet" href="/static/app.css">
         <script type="module" src="/static/turbo.min.js"></script>
       </head>
