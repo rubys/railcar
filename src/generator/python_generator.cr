@@ -1,12 +1,13 @@
-# Generates a Python WSGI application from a Rails app.
+# Generates a Python application from a Rails app.
 #
 # Produces:
-#   app.py        — WSGI application with route dispatch
+#   app.py        — HTTP application with route dispatch
 #   models.py     — SQLite-backed model classes
 #   templates/    — HTML templates (simple string formatting)
 
 require "./app_model"
 require "./schema_extractor"
+require "./python_seed_extractor"
 require "./inflector"
 
 module Railcar
@@ -31,7 +32,7 @@ module Railcar
       copy_turbo_js(output_dir)
 
       puts "Done! Output in #{output_dir}/"
-      puts "  python #{File.join(output_dir, "app.py")}"
+      puts "  python3 #{File.join(output_dir, "app.py")}"
     end
 
     private def generate_models(output_dir : String)
@@ -426,6 +427,14 @@ module Railcar
       generate_articles_handlers(io)
       generate_comments_handlers(io)
 
+      # Seed data from db/seeds.rb if it exists
+      seeds_path = File.join(rails_dir, "db/seeds.rb")
+      has_seeds = File.exists?(seeds_path)
+      if has_seeds
+        first_model = app.models.keys.first? || "Article"
+        io << PythonSeedExtractor.generate(seeds_path, first_model)
+      end
+
       # Threaded server
       io << "class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):\n"
       io << "    daemon_threads = True\n\n"
@@ -433,6 +442,7 @@ module Railcar
       # Main
       io << "if __name__ == '__main__':\n"
       io << "    init_db()\n"
+      io << "    seed_db()\n" if has_seeds
       io << "    print('Blog running at http://localhost:3000')\n"
       io << "    server = ThreadedHTTPServer(('0.0.0.0', 3000), BlogHandler)\n"
       io << "    server.serve_forever()\n"
@@ -540,6 +550,7 @@ module Railcar
       <head>
         <title>{{title}}</title>
         <meta name="viewport" content="width=device-width,initial-scale=1">
+        <meta name="action-cable-url" content="">
         <link rel="stylesheet" href="/static/app.css">
         <script type="module" src="/static/turbo.min.js"></script>
       </head>
