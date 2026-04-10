@@ -15,11 +15,13 @@ $(BUILD_DIR)/demo/blog/Gemfile:
 	@mkdir -p $(BUILD_DIR)/demo
 	curl -sL $(BLOG_URL) | tar xz -C $(BUILD_DIR)/demo
 
+CRYSTAL_STDLIB := $(shell crystal env CRYSTAL_PATH | tr ':' '\n' | grep -v '^lib$$' | head -1)
+
 $(BUILD_DIR)/railcar: $(LIB_DIR)/libprism.a $(shell find src -name '*.cr' 2>/dev/null)
-	crystal build src/cli.cr -o $(BUILD_DIR)/railcar
+	CRYSTAL_CONFIG_PATH="lib:$(CRYSTAL_STDLIB)" crystal build src/cli.cr -o $(BUILD_DIR)/railcar
 
 test: $(LIB_DIR)/libprism.a $(BUILD_DIR)/demo/blog/Gemfile
-	crystal spec
+	CRYSTAL_CONFIG_PATH="lib:$(CRYSTAL_STDLIB)" crystal spec
 
 clean:
 	rm -rf $(BUILD_DIR)
