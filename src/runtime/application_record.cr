@@ -305,15 +305,15 @@ module Railcar
     # ----- Callback macros -----
 
     macro after_save(&block)
-      {% CALLBACK_COUNTER = (CALLBACK_COUNTER || 0) + 1 %}
-      def _after_save_{{CALLBACK_COUNTER}}
+      {% name = "_after_save_#{block.body.stringify.gsub(/[^a-zA-Z0-9_]/, "_").id}" %}
+      def {{name.id}}
         {{block.body}}
       end
     end
 
     macro after_destroy(&block)
-      {% CALLBACK_COUNTER = (CALLBACK_COUNTER || 0) + 1 %}
-      def _after_destroy_{{CALLBACK_COUNTER}}
+      {% name = "_after_destroy_#{block.body.stringify.gsub(/[^a-zA-Z0-9_]/, "_").id}" %}
+      def {{name.id}}
         {{block.body}}
       end
     end

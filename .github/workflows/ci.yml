@@ -40,3 +40,10 @@ jobs:
 
       - name: Build binary
         run: crystal build src/cli.cr -o build/railcar
+
+      - name: Generate and compile demo blog
+        run: |
+          build/railcar build/demo/blog build/crystal-blog
+          cd build/crystal-blog
+          shards install
+          crystal build src/app.cr -o blog
