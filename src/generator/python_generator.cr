@@ -20,12 +20,14 @@ module Railcar
     def generate(output_dir : String)
       Dir.mkdir_p(output_dir) unless Dir.exists?(output_dir)
       Dir.mkdir_p(File.join(output_dir, "templates")) unless Dir.exists?(File.join(output_dir, "templates"))
+      Dir.mkdir_p(File.join(output_dir, "static")) unless Dir.exists?(File.join(output_dir, "static"))
 
       puts "Generating Python WSGI app from #{rails_dir}..."
 
       generate_models(output_dir)
       generate_app(output_dir)
       generate_templates(output_dir)
+      generate_tailwind(output_dir)
 
       puts "Done! Output in #{output_dir}/"
       puts "  python #{File.join(output_dir, "app.py")}"
@@ -235,11 +237,12 @@ module Railcar
       io << "\n"
 
       # Static files
-      io << "    # Serve static files\n"
       io << "    if path.startswith('/static/'):\n"
+      io << "        import mimetypes\n"
       io << "        static_path = os.path.join(os.path.dirname(__file__), path.lstrip('/'))\n"
       io << "        if os.path.isfile(static_path):\n"
-      io << "            start_response('200 OK', [('Content-Type', 'text/css')])\n"
+      io << "            content_type = mimetypes.guess_type(static_path)[0] or 'application/octet-stream'\n"
+      io << "            start_response('200 OK', [('Content-Type', content_type)])\n"
       io << "            with open(static_path, 'rb') as f:\n"
       io << "                return [f.read()]\n"
       io << "\n"
@@ -266,10 +269,16 @@ module Railcar
       io << "def articles_index(environ, start_response):\n"
       io << "    articles = Article.all(order_by='created_at DESC')\n"
       io << "    article_list = '\\n'.join(\n"
-      io << "        f'<div class=\"article\"><h2><a href=\"/articles/{a.id}\">{a.title}</a></h2>'\n"
-      io << "        f'<p>{(a.body or \"\")[:200]}</p></div>'\n"
+      io << "        f'<div class=\"flex flex-col sm:flex-row justify-between items-center pb-5 sm:pb-0\">'\n"
+      io << "        f'<div class=\"p-4 border rounded mb-4 flex-grow\">'\n"
+      io << "        f'<h2 class=\"text-xl font-bold\"><a href=\"/articles/{a.id}\" class=\"text-blue-600 hover:underline\">{a.title}</a></h2>'\n"
+      io << "        f'<p class=\"text-gray-700 mt-2\">{(a.body or \"\")[:100]}</p></div>'\n"
+      io << "        f'<div class=\"w-full sm:w-auto flex flex-col sm:flex-row space-x-2 space-y-2\">'\n"
+      io << "        f'<a href=\"/articles/{a.id}\" class=\"w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium\">Show</a>'\n"
+      io << "        f'<a href=\"/articles/{a.id}/edit\" class=\"w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium\">Edit</a>'\n"
+      io << "        f'</div></div>'\n"
       io << "        for a in articles\n"
-      io << "    ) or '<p>No articles yet.</p>'\n"
+      io << "    ) or '<p class=\"text-center my-10\">No articles found.</p>'\n"
       io << "    content = render_template('articles_index.html', article_list=article_list)\n"
       io << "    start_response('200 OK', [('Content-Type', 'text/html')])\n"
       io << "    return [layout(content).encode()]\n\n"
@@ -279,12 +288,14 @@ module Railcar
       io << "    article = Article.find(id)\n"
       io << "    comments = article.comments()\n"
       io << "    comments_html = '\\n'.join(\n"
-      io << "        f'<div class=\"comment\"><p><strong>{c.commenter}</strong>: {c.body}</p>'\n"
-      io << "        f'<form method=\"post\" action=\"/articles/{id}/comments/{c.id}\" style=\"display:inline\">'\n"
+      io << "        f'<div class=\"p-4 bg-gray-50 rounded\">'\n"
+      io << "        f'<p class=\"font-semibold\">{c.commenter}</p>'\n"
+      io << "        f'<p class=\"text-gray-700\">{c.body}</p>'\n"
+      io << "        f'<form method=\"post\" action=\"/articles/{id}/comments/{c.id}\" class=\"inline\">'\n"
       io << "        f'<input type=\"hidden\" name=\"_method\" value=\"delete\">'\n"
-      io << "        f'<button type=\"submit\">Delete Comment</button></form></div>'\n"
+      io << "        f'<button type=\"submit\" class=\"text-red-600 text-sm mt-2\">Delete</button></form></div>'\n"
       io << "        for c in comments\n"
-      io << "    ) or '<p>No comments yet.</p>'\n"
+      io << "    ) or '<p class=\"text-gray-500\">No comments yet.</p>'\n"
       io << "    content = render_template('articles_show.html',\n"
       io << "        id=article.id, title=article.title, body=article.body,\n"
       io << "        comments_html=comments_html)\n"
@@ -400,74 +411,144 @@ module Railcar
     private def generate_templates(output_dir : String)
       templates_dir = File.join(output_dir, "templates")
 
-      # Layout
+      # Layout (matches Rails app/views/layouts/application.html.erb)
       File.write(File.join(templates_dir, "layout.html"), <<-HTML)
       <!DOCTYPE html>
       <html>
       <head>
         <title>{{title}}</title>
-        <style>
-          body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2em auto; padding: 0 1em; }
-          a { color: #0066cc; }
-          .actions { margin: 1em 0; }
-          .actions a, .actions button { margin-right: 1em; }
-          textarea { width: 100%; height: 200px; }
-          input[type=text] { width: 100%; padding: 0.5em; }
-          form { margin: 1em 0; }
-          .comment { border-top: 1px solid #ddd; padding: 1em 0; }
-          button { cursor: pointer; }
-        </style>
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <link rel="stylesheet" href="/static/app.css">
       </head>
       <body>
-        {{content}}
+        <main class="container mx-auto mt-28 px-5 flex flex-col">
+          {{content}}
+        </main>
       </body>
       </html>
       HTML
       puts "  templates/layout.html"
 
-      # Articles index
+      # Articles index (matches Rails index.html.erb + _article.html.erb)
       File.write(File.join(templates_dir, "articles_index.html"), <<-'HTML')
-      <h1>Articles</h1>
-      <p><a href="/articles/new">New Article</a></p>
-      {{article_list}}
+      <div class="w-full">
+        <div class="flex justify-between items-center">
+          <h1 class="font-bold text-4xl">Articles</h1>
+          <a href="/articles/new" class="rounded-md px-3.5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white block font-medium">New article</a>
+        </div>
+        <div id="articles" class="min-w-full divide-y divide-gray-200 space-y-5">
+          {{article_list}}
+        </div>
+      </div>
       HTML
       puts "  templates/articles_index.html"
 
-      # Articles show
+      # Articles show (matches Rails show.html.erb + _comment.html.erb)
       File.write(File.join(templates_dir, "articles_show.html"), <<-'HTML')
-      <h1>{{title}}</h1>
-      <p>{{body}}</p>
-      <div class="actions">
-        <a href="/articles/{{id}}/edit">Edit</a>
-        <form method="post" action="/articles/{{id}}" style="display:inline">
+      <div class="md:w-2/3 w-full">
+        <h1 class="font-bold text-4xl">{{title}}</h1>
+        <div class="my-4">
+          <p class="text-gray-700">{{body}}</p>
+        </div>
+        <a href="/articles/{{id}}/edit" class="w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium">Edit this article</a>
+        <a href="/articles" class="w-full sm:w-auto text-center mt-2 sm:mt-0 sm:ml-2 rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium">Back to articles</a>
+        <form method="post" action="/articles/{{id}}" class="sm:inline-block mt-2 sm:mt-0 sm:ml-2">
           <input type="hidden" name="_method" value="delete">
-          <button type="submit">Delete</button>
+          <button type="submit" class="w-full rounded-md px-3.5 py-2.5 text-white bg-red-600 hover:bg-red-500 font-medium cursor-pointer">Destroy this article</button>
         </form>
-        <a href="/articles">Back</a>
       </div>
-      <h2>Comments</h2>
-      {{comments_html}}
-      <h3>Add a comment</h3>
-      <form method="post" action="/articles/{{id}}/comments">
-        <p><input type="text" name="comment[commenter]" placeholder="Your name"></p>
-        <p><textarea name="comment[body]" placeholder="Your comment"></textarea></p>
-        <button type="submit">Post Comment</button>
+      <hr class="my-8">
+      <h2 class="text-xl font-bold mb-4">Comments</h2>
+      <div id="comments" class="space-y-4 mb-8">
+        {{comments_html}}
+      </div>
+      <h3 class="text-lg font-semibold mb-2">Add a Comment</h3>
+      <form method="post" action="/articles/{{id}}/comments" class="space-y-4">
+        <div>
+          <label class="block font-medium">Commenter</label>
+          <input type="text" name="comment[commenter]" class="block w-full border rounded p-2">
+        </div>
+        <div>
+          <label class="block font-medium">Body</label>
+          <textarea name="comment[body]" rows="3" class="block w-full border rounded p-2"></textarea>
+        </div>
+        <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded">Add Comment</button>
       </form>
       HTML
       puts "  templates/articles_show.html"
 
-      # Article form (new/edit)
+      # Article form (matches Rails _form.html.erb)
       File.write(File.join(templates_dir, "articles_form.html"), <<-'HTML')
-      <h1>{{form_title}}</h1>
-      <form method="post" action="{{action}}">
-        {{method_field}}
-        <p><label>Title<br><input type="text" name="article[title]" value="{{title}}"></label></p>
-        <p><label>Body<br><textarea name="article[body]">{{body}}</textarea></label></p>
-        <button type="submit">Save Article</button>
-      </form>
-      <a href="/articles">Back</a>
+      <div class="md:w-2/3 w-full">
+        <h1 class="font-bold text-4xl">{{form_title}}</h1>
+        <form method="post" action="{{action}}" class="contents">
+          {{method_field}}
+          <div class="my-5">
+            <label>Title</label>
+            <input type="text" name="article[title]" value="{{title}}" class="block shadow-sm rounded-md border border-gray-400 focus:outline-blue-600 px-3 py-2 mt-2 w-full">
+          </div>
+          <div class="my-5">
+            <label>Body</label>
+            <textarea name="article[body]" rows="4" class="block shadow-sm rounded-md border border-gray-400 focus:outline-blue-600 px-3 py-2 mt-2 w-full">{{body}}</textarea>
+          </div>
+          <div class="inline">
+            <button type="submit" class="w-full sm:w-auto rounded-md px-3.5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white inline-block font-medium cursor-pointer">Save Article</button>
+          </div>
+        </form>
+        <a href="/articles" class="w-full sm:w-auto text-center mt-2 sm:mt-0 sm:ml-2 rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium">Back to articles</a>
+      </div>
       HTML
       puts "  templates/articles_form.html"
+    end
+
+    private def generate_tailwind(output_dir : String)
+      # Write input CSS for Tailwind
+      File.write(File.join(output_dir, "input.css"), "@import \"tailwindcss\";\n")
+
+      tailwind = find_tailwind
+      unless tailwind
+        puts "  tailwind: not found (skipping CSS generation)"
+        puts "  Install: gem install tailwindcss-rails"
+        return
+      end
+
+      err_io = IO::Memory.new
+      result = Process.run(tailwind,
+        ["--input", File.join(output_dir, "input.css"),
+         "--output", File.join(output_dir, "static/app.css"),
+         "--minify"],
+        chdir: output_dir,
+        output: Process::Redirect::Close,
+        error: err_io
+      )
+
+      if result.success?
+        size = File.size(File.join(output_dir, "static/app.css"))
+        puts "  static/app.css (#{size} bytes)"
+      else
+        puts "  tailwind: build failed"
+        err_msg = err_io.to_s.strip
+        puts "  #{err_msg}" unless err_msg.empty?
+      end
+    end
+
+    private def find_tailwind : String?
+      path = Process.find_executable("tailwindcss")
+      return path if path
+
+      begin
+        output = IO::Memory.new
+        result = Process.run("ruby",
+          ["-e", "puts Gem::Specification.find_by_name('tailwindcss-rails').bin_dir + '/tailwindcss'"],
+          output: output, error: Process::Redirect::Close)
+        if result.success?
+          bin = output.to_s.strip
+          return bin if File.exists?(bin)
+        end
+      rescue
+      end
+
+      nil
     end
 
     private def python_sql_type(rails_type : String) : String
