@@ -174,6 +174,13 @@ module Railcar
       named = node.named_args
       block = node.block
 
+      # raise is a statement, not a function
+      if name == "raise" && obj.nil? && args.size == 1
+        io << "raise "
+        emit(args[0], io)
+        return
+      end
+
       # Operators
       if is_operator?(name) && args.size == 1 && obj
         emit(obj, io)
