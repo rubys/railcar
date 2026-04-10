@@ -35,6 +35,7 @@ Crystal source output (via Crystal.format)
 - [Crystal](https://crystal-lang.org/install/) >= 1.10.0
 - Ruby with the [prism](https://rubygems.org/gems/prism) gem installed (`gem install prism`)
 - SQLite3 development headers
+- Optional: [tailwindcss](https://tailwindcss.com/docs/installation) or `gem install tailwindcss-rails` for styled output
 
 ## Build
 

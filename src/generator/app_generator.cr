@@ -444,13 +444,14 @@ module Railcar
       end
 
       # Run tailwindcss to generate CSS from the templates
+      err_io = IO::Memory.new
       result = Process.run(tailwind,
         ["--input", File.join(output_dir, "input.css"),
          "--output", File.join(public_dir, "app.css"),
          "--minify"],
         chdir: output_dir,
         output: Process::Redirect::Close,
-        error: Process::Redirect::Close
+        error: err_io
       )
 
       if result.success?
@@ -458,6 +459,8 @@ module Railcar
         puts "  public/app.css (#{size} bytes)"
       else
         puts "  tailwind: build failed"
+        err_msg = err_io.to_s.strip
+        puts "  #{err_msg}" unless err_msg.empty?
       end
     end
 
