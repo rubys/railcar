@@ -28,6 +28,7 @@ module Railcar
       generate_app(output_dir)
       generate_templates(output_dir)
       generate_tailwind(output_dir)
+      copy_turbo_js(output_dir)
 
       puts "Done! Output in #{output_dir}/"
       puts "  python #{File.join(output_dir, "app.py")}"
@@ -276,6 +277,9 @@ module Railcar
       io << "        f'<div class=\"w-full sm:w-auto flex flex-col sm:flex-row space-x-2 space-y-2\">'\n"
       io << "        f'<a href=\"/articles/{a.id}\" class=\"w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium\">Show</a>'\n"
       io << "        f'<a href=\"/articles/{a.id}/edit\" class=\"w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium\">Edit</a>'\n"
+      io << "        f'<form method=\"post\" action=\"/articles/{a.id}\" data-turbo-confirm=\"Are you sure?\">'\n"
+      io << "        f'<input type=\"hidden\" name=\"_method\" value=\"delete\">'\n"
+      io << "        f'<button type=\"submit\" class=\"w-full sm:w-auto rounded-md px-3.5 py-2.5 text-white bg-red-600 hover:bg-red-500 font-medium cursor-pointer\">Destroy</button></form>'\n"
       io << "        f'</div></div>'\n"
       io << "        for a in articles\n"
       io << "    ) or '<p class=\"text-center my-10\">No articles found.</p>'\n"
@@ -291,7 +295,7 @@ module Railcar
       io << "        f'<div class=\"p-4 bg-gray-50 rounded\">'\n"
       io << "        f'<p class=\"font-semibold\">{c.commenter}</p>'\n"
       io << "        f'<p class=\"text-gray-700\">{c.body}</p>'\n"
-      io << "        f'<form method=\"post\" action=\"/articles/{id}/comments/{c.id}\" class=\"inline\">'\n"
+      io << "        f'<form method=\"post\" action=\"/articles/{id}/comments/{c.id}\" class=\"inline\" data-turbo-confirm=\"Are you sure?\">'\n"
       io << "        f'<input type=\"hidden\" name=\"_method\" value=\"delete\">'\n"
       io << "        f'<button type=\"submit\" class=\"text-red-600 text-sm mt-2\">Delete</button></form></div>'\n"
       io << "        for c in comments\n"
@@ -419,6 +423,7 @@ module Railcar
         <title>{{title}}</title>
         <meta name="viewport" content="width=device-width,initial-scale=1">
         <link rel="stylesheet" href="/static/app.css">
+        <script type="module" src="/static/turbo.min.js"></script>
       </head>
       <body>
         <main class="container mx-auto mt-28 px-5 flex flex-col">
@@ -452,7 +457,7 @@ module Railcar
         </div>
         <a href="/articles/{{id}}/edit" class="w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium">Edit this article</a>
         <a href="/articles" class="w-full sm:w-auto text-center mt-2 sm:mt-0 sm:ml-2 rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium">Back to articles</a>
-        <form method="post" action="/articles/{{id}}" class="sm:inline-block mt-2 sm:mt-0 sm:ml-2">
+        <form method="post" action="/articles/{{id}}" class="sm:inline-block mt-2 sm:mt-0 sm:ml-2" data-turbo-confirm="Are you sure?">
           <input type="hidden" name="_method" value="delete">
           <button type="submit" class="w-full rounded-md px-3.5 py-2.5 text-white bg-red-600 hover:bg-red-500 font-medium cursor-pointer">Destroy this article</button>
         </form>
@@ -499,6 +504,37 @@ module Railcar
       </div>
       HTML
       puts "  templates/articles_form.html"
+    end
+
+    private def copy_turbo_js(output_dir : String)
+      static_dir = File.join(output_dir, "static")
+
+      turbo_js = find_turbo_js
+      unless turbo_js
+        puts "  turbo.min.js: not found (skipping)"
+        puts "  Install: gem install turbo-rails"
+        return
+      end
+
+      dst = File.join(static_dir, "turbo.min.js")
+      File.write(dst, File.read(turbo_js))
+      size = File.size(dst)
+      puts "  static/turbo.min.js (#{size} bytes)"
+    end
+
+    private def find_turbo_js : String?
+      begin
+        output = IO::Memory.new
+        result = Process.run("ruby",
+          ["-e", "puts Gem::Specification.find_by_name('turbo-rails').gem_dir + '/app/assets/javascripts/turbo.min.js'"],
+          output: output, error: Process::Redirect::Close)
+        if result.success?
+          path = output.to_s.strip
+          return path if File.exists?(path)
+        end
+      rescue
+      end
+      nil
     end
 
     private def generate_tailwind(output_dir : String)
