@@ -192,10 +192,15 @@ module Railcar
 
     private def generate_app(output_dir : String)
       io = IO::Memory.new
-      io << "from wsgiref.simple_server import make_server\n"
+      io << "from http.server import HTTPServer, BaseHTTPRequestHandler\n"
+      io << "from socketserver import ThreadingMixIn\n"
       io << "from urllib.parse import parse_qs\n"
+      io << "import mimetypes\n"
       io << "import re\n"
       io << "import os\n"
+      io << "import threading\n"
+      io << "import queue\n"
+      io << "import time\n"
       io << "from models import *\n\n"
 
       # Template helper
@@ -212,204 +217,317 @@ module Railcar
       io << "def layout(content, title='Blog'):\n"
       io << "    return render_template('layout.html', content=content, title=title)\n\n"
 
-      # Flash helper
-      io << "flash_store = {}\n\n"
+      # Broadcast hub for SSE
+      io << "# Turbo Streams broadcast hub\n"
+      io << "class BroadcastHub:\n"
+      io << "    def __init__(self):\n"
+      io << "        self.lock = threading.Lock()\n"
+      io << "        self.channels = {}  # channel_name -> [queue.Queue]\n\n"
+
+      io << "    def subscribe(self, channel):\n"
+      io << "        q = queue.Queue()\n"
+      io << "        with self.lock:\n"
+      io << "            self.channels.setdefault(channel, []).append(q)\n"
+      io << "        return q\n\n"
+
+      io << "    def unsubscribe(self, channel, q):\n"
+      io << "        with self.lock:\n"
+      io << "            if channel in self.channels:\n"
+      io << "                self.channels[channel] = [x for x in self.channels[channel] if x is not q]\n\n"
+
+      io << "    def broadcast(self, channel, html):\n"
+      io << "        with self.lock:\n"
+      io << "            for q in self.channels.get(channel, []):\n"
+      io << "                q.put(html)\n\n"
+
+      io << "hub = BroadcastHub()\n\n"
 
       # Parse form data
-      io << "def parse_form(environ):\n"
-      io << "    try:\n"
-      io << "        size = int(environ.get('CONTENT_LENGTH', 0))\n"
-      io << "    except ValueError:\n"
-      io << "        size = 0\n"
-      io << "    body = environ['wsgi.input'].read(size).decode('utf-8')\n"
-      io << "    return parse_qs(body)\n\n"
+      io << "def parse_form(body_bytes):\n"
+      io << "    return parse_qs(body_bytes.decode('utf-8'))\n\n"
 
       io << "def form_value(data, key):\n"
       io << "    return data.get(key, [''])[0]\n\n"
 
-      # Controller actions
-      generate_articles_actions(io)
-      generate_comments_actions(io)
-
-      # Route dispatch
-      io << "def application(environ, start_response):\n"
-      io << "    path = environ['PATH_INFO']\n"
-      io << "    method = environ['REQUEST_METHOD']\n"
-      io << "\n"
-
-      # Static files
-      io << "    if path.startswith('/static/'):\n"
-      io << "        import mimetypes\n"
-      io << "        static_path = os.path.join(os.path.dirname(__file__), path.lstrip('/'))\n"
-      io << "        if os.path.isfile(static_path):\n"
-      io << "            content_type = mimetypes.guess_type(static_path)[0] or 'application/octet-stream'\n"
-      io << "            start_response('200 OK', [('Content-Type', content_type)])\n"
-      io << "            with open(static_path, 'rb') as f:\n"
-      io << "                return [f.read()]\n"
-      io << "\n"
-
-      # Route matching
-      generate_routes(io)
-
-      io << "    start_response('404 Not Found', [('Content-Type', 'text/html')])\n"
-      io << "    return [b'Not Found']\n\n"
-
-      # Main
-      io << "if __name__ == '__main__':\n"
-      io << "    init_db()\n"
-      io << "    print('Blog running at http://localhost:3000')\n"
-      io << "    server = make_server('0.0.0.0', 3000, application)\n"
-      io << "    server.serve_forever()\n"
-
-      File.write(File.join(output_dir, "app.py"), io.to_s)
-      puts "  app.py"
-    end
-
-    private def generate_articles_actions(io : IO::Memory)
-      # index
-      io << "def articles_index(environ, start_response):\n"
-      io << "    articles = Article.all(order_by='created_at DESC')\n"
-      io << "    article_list = '\\n'.join(\n"
-      io << "        f'<div class=\"flex flex-col sm:flex-row justify-between items-center pb-5 sm:pb-0\">'\n"
+      # Render article partial for broadcasts
+      io << "def render_article_card(a):\n"
+      io << "    return (\n"
+      io << "        f'<div id=\"article_{a.id}\" class=\"flex flex-col sm:flex-row justify-between items-center pb-5 sm:pb-0\">'\n"
       io << "        f'<div class=\"p-4 border rounded mb-4 flex-grow\">'\n"
       io << "        f'<h2 class=\"text-xl font-bold\"><a href=\"/articles/{a.id}\" class=\"text-blue-600 hover:underline\">{a.title}</a></h2>'\n"
       io << "        f'<p class=\"text-gray-700 mt-2\">{(a.body or \"\")[:100]}</p></div>'\n"
       io << "        f'<div class=\"w-full sm:w-auto flex flex-col sm:flex-row space-x-2 space-y-2\">'\n"
       io << "        f'<a href=\"/articles/{a.id}\" class=\"w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium\">Show</a>'\n"
       io << "        f'<a href=\"/articles/{a.id}/edit\" class=\"w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium\">Edit</a>'\n"
-      io << "        f'<form method=\"post\" action=\"/articles/{a.id}\" data-turbo-confirm=\"Are you sure?\">'\n"
-      io << "        f'<input type=\"hidden\" name=\"_method\" value=\"delete\">'\n"
-      io << "        f'<button type=\"submit\" class=\"w-full sm:w-auto rounded-md px-3.5 py-2.5 text-white bg-red-600 hover:bg-red-500 font-medium cursor-pointer\">Destroy</button></form>'\n"
       io << "        f'</div></div>'\n"
-      io << "        for a in articles\n"
-      io << "    ) or '<p class=\"text-center my-10\">No articles found.</p>'\n"
-      io << "    content = render_template('articles_index.html', article_list=article_list)\n"
-      io << "    start_response('200 OK', [('Content-Type', 'text/html')])\n"
-      io << "    return [layout(content).encode()]\n\n"
+      io << "    )\n\n"
 
-      # show
-      io << "def articles_show(environ, start_response, id):\n"
-      io << "    article = Article.find(id)\n"
-      io << "    comments = article.comments()\n"
-      io << "    comments_html = '\\n'.join(\n"
-      io << "        f'<div class=\"p-4 bg-gray-50 rounded\">'\n"
+      io << "def render_comment_partial(c, article_id):\n"
+      io << "    return (\n"
+      io << "        f'<div id=\"comment_{c.id}\" class=\"p-4 bg-gray-50 rounded\">'\n"
       io << "        f'<p class=\"font-semibold\">{c.commenter}</p>'\n"
       io << "        f'<p class=\"text-gray-700\">{c.body}</p>'\n"
-      io << "        f'<form method=\"post\" action=\"/articles/{id}/comments/{c.id}\" class=\"inline\" data-turbo-confirm=\"Are you sure?\">'\n"
+      io << "        f'<form method=\"post\" action=\"/articles/{article_id}/comments/{c.id}\" class=\"inline\" data-turbo-confirm=\"Are you sure?\">'\n"
       io << "        f'<input type=\"hidden\" name=\"_method\" value=\"delete\">'\n"
       io << "        f'<button type=\"submit\" class=\"text-red-600 text-sm mt-2\">Delete</button></form></div>'\n"
-      io << "        for c in comments\n"
-      io << "    ) or '<p class=\"text-gray-500\">No comments yet.</p>'\n"
-      io << "    content = render_template('articles_show.html',\n"
-      io << "        id=article.id, title=article.title, body=article.body,\n"
-      io << "        comments_html=comments_html)\n"
-      io << "    start_response('200 OK', [('Content-Type', 'text/html')])\n"
-      io << "    return [layout(content).encode()]\n\n"
+      io << "    )\n\n"
+
+      # Broadcast helpers
+      io << "def broadcast_article_append(article):\n"
+      io << "    html = render_article_card(article)\n"
+      io << "    stream = f'<turbo-stream action=\"prepend\" target=\"articles\"><template>{html}</template></turbo-stream>'\n"
+      io << "    hub.broadcast('articles', stream)\n\n"
+
+      io << "def broadcast_article_replace(article):\n"
+      io << "    html = render_article_card(article)\n"
+      io << "    stream = f'<turbo-stream action=\"replace\" target=\"article_{article.id}\"><template>{html}</template></turbo-stream>'\n"
+      io << "    hub.broadcast('articles', stream)\n\n"
+
+      io << "def broadcast_article_remove(article_id):\n"
+      io << "    stream = f'<turbo-stream action=\"remove\" target=\"article_{article_id}\"></turbo-stream>'\n"
+      io << "    hub.broadcast('articles', stream)\n\n"
+
+      io << "def broadcast_comment_append(comment, article_id):\n"
+      io << "    html = render_comment_partial(comment, article_id)\n"
+      io << "    stream = f'<turbo-stream action=\"append\" target=\"comments\"><template>{html}</template></turbo-stream>'\n"
+      io << "    hub.broadcast(f'article_{article_id}_comments', stream)\n"
+      io << "    # Also update article card on index (comment count changed)\n"
+      io << "    article = Article.find(article_id)\n"
+      io << "    broadcast_article_replace(article)\n\n"
+
+      io << "def broadcast_comment_remove(comment_id, article_id):\n"
+      io << "    stream = f'<turbo-stream action=\"remove\" target=\"comment_{comment_id}\"></turbo-stream>'\n"
+      io << "    hub.broadcast(f'article_{article_id}_comments', stream)\n"
+      io << "    article = Article.find(article_id)\n"
+      io << "    broadcast_article_replace(article)\n\n"
+
+      # HTTP Handler
+      io << "class BlogHandler(BaseHTTPRequestHandler):\n"
+      io << "    def do_GET(self):\n"
+      io << "        path = self.path.split('?')[0]\n"
+      io << "\n"
+      io << "        # SSE streams\n"
+      io << "        match = re.match(r'^/streams/(.+)$', path)\n"
+      io << "        if match:\n"
+      io << "            return self.handle_sse(match.group(1))\n"
+      io << "\n"
+      io << "        # Static files\n"
+      io << "        if path.startswith('/static/'):\n"
+      io << "            return self.serve_static(path)\n"
+      io << "\n"
+
+      # GET routes
+      io << "        match = re.match(r'^/articles/(\\d+)/edit$', path)\n"
+      io << "        if match:\n"
+      io << "            return self.articles_edit(int(match.group(1)))\n"
+      io << "\n"
+      io << "        match = re.match(r'^/articles/(\\d+)$', path)\n"
+      io << "        if match:\n"
+      io << "            return self.articles_show(int(match.group(1)))\n"
+      io << "\n"
+      io << "        if path == '/articles/new':\n"
+      io << "            return self.articles_new()\n"
+      io << "\n"
+      io << "        if path in ('/', '/articles'):\n"
+      io << "            return self.articles_index()\n"
+      io << "\n"
+      io << "        self.send_error(404)\n"
+      io << "\n"
+
+      io << "    def do_POST(self):\n"
+      io << "        path = self.path.split('?')[0]\n"
+      io << "        body = self.read_body()\n"
+      io << "        data = parse_form(body)\n"
+      io << "        method_override = form_value(data, '_method').upper()\n"
+      io << "\n"
+
+      # POST routes
+      io << "        match = re.match(r'^/articles/(\\d+)/comments/(\\d+)$', path)\n"
+      io << "        if match and method_override == 'DELETE':\n"
+      io << "            return self.comments_destroy(int(match.group(1)), int(match.group(2)))\n"
+      io << "\n"
+      io << "        match = re.match(r'^/articles/(\\d+)/comments$', path)\n"
+      io << "        if match:\n"
+      io << "            return self.comments_create(int(match.group(1)), data)\n"
+      io << "\n"
+      io << "        match = re.match(r'^/articles/(\\d+)$', path)\n"
+      io << "        if match:\n"
+      io << "            id = int(match.group(1))\n"
+      io << "            if method_override in ('PATCH', 'PUT'):\n"
+      io << "                return self.articles_update(id, data)\n"
+      io << "            elif method_override == 'DELETE':\n"
+      io << "                return self.articles_destroy(id)\n"
+      io << "\n"
+      io << "        if path == '/articles':\n"
+      io << "            return self.articles_create(data)\n"
+      io << "\n"
+      io << "        self.send_error(404)\n"
+      io << "\n"
+
+      # Helper methods
+      io << "    def read_body(self):\n"
+      io << "        length = int(self.headers.get('Content-Length', 0))\n"
+      io << "        return self.rfile.read(length)\n"
+      io << "\n"
+
+      io << "    def respond(self, status, content_type, body):\n"
+      io << "        self.send_response(status)\n"
+      io << "        self.send_header('Content-Type', content_type)\n"
+      io << "        self.end_headers()\n"
+      io << "        self.wfile.write(body.encode() if isinstance(body, str) else body)\n"
+      io << "\n"
+
+      io << "    def redirect(self, location, status=302):\n"
+      io << "        self.send_response(status)\n"
+      io << "        self.send_header('Location', location)\n"
+      io << "        self.end_headers()\n"
+      io << "\n"
+
+      io << "    def serve_static(self, path):\n"
+      io << "        static_path = os.path.join(os.path.dirname(__file__), path.lstrip('/'))\n"
+      io << "        if os.path.isfile(static_path):\n"
+      io << "            content_type = mimetypes.guess_type(static_path)[0] or 'application/octet-stream'\n"
+      io << "            with open(static_path, 'rb') as f:\n"
+      io << "                self.respond(200, content_type, f.read())\n"
+      io << "        else:\n"
+      io << "            self.send_error(404)\n"
+      io << "\n"
+
+      # SSE handler
+      io << "    def handle_sse(self, channel):\n"
+      io << "        self.send_response(200)\n"
+      io << "        self.send_header('Content-Type', 'text/event-stream')\n"
+      io << "        self.send_header('Cache-Control', 'no-cache')\n"
+      io << "        self.send_header('Connection', 'keep-alive')\n"
+      io << "        self.send_header('X-Accel-Buffering', 'no')\n"
+      io << "        self.end_headers()\n"
+      io << "        q = hub.subscribe(channel)\n"
+      io << "        try:\n"
+      io << "            while True:\n"
+      io << "                try:\n"
+      io << "                    message = q.get(timeout=30)\n"
+      io << "                    self.wfile.write(f'data: {message}\\n\\n'.encode())\n"
+      io << "                    self.wfile.flush()\n"
+      io << "                except queue.Empty:\n"
+      io << "                    # Send keepalive\n"
+      io << "                    self.wfile.write(b':\\n\\n')\n"
+      io << "                    self.wfile.flush()\n"
+      io << "        except (BrokenPipeError, ConnectionResetError):\n"
+      io << "            pass\n"
+      io << "        finally:\n"
+      io << "            hub.unsubscribe(channel, q)\n"
+      io << "\n"
+
+      io << "    def log_message(self, format, *args):\n"
+      io << "        print(f'{self.command} {self.path} {args[1] if len(args) > 1 else \"\"}'.strip())\n"
+      io << "\n"
+
+      # Controller actions as handler methods
+      generate_articles_handlers(io)
+      generate_comments_handlers(io)
+
+      # Threaded server
+      io << "class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):\n"
+      io << "    daemon_threads = True\n\n"
+
+      # Main
+      io << "if __name__ == '__main__':\n"
+      io << "    init_db()\n"
+      io << "    print('Blog running at http://localhost:3000')\n"
+      io << "    server = ThreadedHTTPServer(('0.0.0.0', 3000), BlogHandler)\n"
+      io << "    server.serve_forever()\n"
+
+      File.write(File.join(output_dir, "app.py"), io.to_s)
+      puts "  app.py"
+    end
+
+    private def generate_articles_handlers(io : IO::Memory)
+      # index
+      io << "    def articles_index(self):\n"
+      io << "        articles = Article.all(order_by='created_at DESC')\n"
+      io << "        article_list = '\\n'.join(render_article_card(a) for a in articles)\n"
+      io << "        article_list = article_list or '<p class=\"text-center my-10\">No articles found.</p>'\n"
+      io << "        content = render_template('articles_index.html', article_list=article_list)\n"
+      io << "        self.respond(200, 'text/html', layout(content))\n\n"
+
+      # show
+      io << "    def articles_show(self, id):\n"
+      io << "        article = Article.find(id)\n"
+      io << "        comments = article.comments()\n"
+      io << "        comments_html = '\\n'.join(render_comment_partial(c, id) for c in comments)\n"
+      io << "        comments_html = comments_html or '<p class=\"text-gray-500\">No comments yet.</p>'\n"
+      io << "        content = render_template('articles_show.html',\n"
+      io << "            id=article.id, title=article.title, body=article.body,\n"
+      io << "            comments_html=comments_html)\n"
+      io << "        self.respond(200, 'text/html', layout(content))\n\n"
 
       # new
-      io << "def articles_new(environ, start_response):\n"
-      io << "    content = render_template('articles_form.html',\n"
-      io << "        form_title='New Article', title='', body='',\n"
-      io << "        action='/articles', method_field='')\n"
-      io << "    start_response('200 OK', [('Content-Type', 'text/html')])\n"
-      io << "    return [layout(content).encode()]\n\n"
+      io << "    def articles_new(self):\n"
+      io << "        content = render_template('articles_form.html',\n"
+      io << "            form_title='New Article', title='', body='',\n"
+      io << "            action='/articles', method_field='')\n"
+      io << "        self.respond(200, 'text/html', layout(content))\n\n"
 
       # create
-      io << "def articles_create(environ, start_response):\n"
-      io << "    data = parse_form(environ)\n"
-      io << "    article = Article(title=form_value(data, 'article[title]'), body=form_value(data, 'article[body]'))\n"
-      io << "    if article.save():\n"
-      io << "        start_response('302 Found', [('Location', f'/articles/{article.id}')])\n"
-      io << "        return [b'']\n"
-      io << "    content = render_template('articles_form.html', article=article, action='/articles', method='POST')\n"
-      io << "    start_response('422 Unprocessable Entity', [('Content-Type', 'text/html')])\n"
-      io << "    return [layout(content).encode()]\n\n"
+      io << "    def articles_create(self, data):\n"
+      io << "        article = Article(title=form_value(data, 'article[title]'), body=form_value(data, 'article[body]'))\n"
+      io << "        if article.save():\n"
+      io << "            broadcast_article_append(article)\n"
+      io << "            self.redirect(f'/articles/{article.id}')\n"
+      io << "        else:\n"
+      io << "            content = render_template('articles_form.html',\n"
+      io << "                form_title='New Article', title=article.title, body=article.body,\n"
+      io << "                action='/articles', method_field='')\n"
+      io << "            self.respond(422, 'text/html', layout(content))\n\n"
 
       # edit
-      io << "def articles_edit(environ, start_response, id):\n"
-      io << "    article = Article.find(id)\n"
-      io << "    content = render_template('articles_form.html',\n"
-      io << "        form_title='Edit Article', title=article.title, body=article.body,\n"
-      io << "        action=f'/articles/{id}',\n"
-      io << "        method_field='<input type=\"hidden\" name=\"_method\" value=\"patch\">')\n"
-      io << "    start_response('200 OK', [('Content-Type', 'text/html')])\n"
-      io << "    return [layout(content).encode()]\n\n"
+      io << "    def articles_edit(self, id):\n"
+      io << "        article = Article.find(id)\n"
+      io << "        content = render_template('articles_form.html',\n"
+      io << "            form_title='Edit Article', title=article.title, body=article.body,\n"
+      io << "            action=f'/articles/{id}',\n"
+      io << "            method_field='<input type=\"hidden\" name=\"_method\" value=\"patch\">')\n"
+      io << "        self.respond(200, 'text/html', layout(content))\n\n"
 
       # update
-      io << "def articles_update(environ, start_response, id):\n"
-      io << "    article = Article.find(id)\n"
-      io << "    data = parse_form(environ)\n"
-      io << "    article.title = form_value(data, 'article[title]')\n"
-      io << "    article.body = form_value(data, 'article[body]')\n"
-      io << "    if article.save():\n"
-      io << "        start_response('303 See Other', [('Location', f'/articles/{article.id}')])\n"
-      io << "        return [b'']\n"
-      io << "    content = render_template('articles_form.html', article=article, action=f'/articles/{id}', method='PATCH')\n"
-      io << "    start_response('422 Unprocessable Entity', [('Content-Type', 'text/html')])\n"
-      io << "    return [layout(content).encode()]\n\n"
+      io << "    def articles_update(self, id, data):\n"
+      io << "        article = Article.find(id)\n"
+      io << "        article.title = form_value(data, 'article[title]')\n"
+      io << "        article.body = form_value(data, 'article[body]')\n"
+      io << "        if article.save():\n"
+      io << "            broadcast_article_replace(article)\n"
+      io << "            self.redirect(f'/articles/{article.id}', 303)\n"
+      io << "        else:\n"
+      io << "            content = render_template('articles_form.html',\n"
+      io << "                form_title='Edit Article', title=article.title, body=article.body,\n"
+      io << "                action=f'/articles/{id}',\n"
+      io << "                method_field='<input type=\"hidden\" name=\"_method\" value=\"patch\">')\n"
+      io << "            self.respond(422, 'text/html', layout(content))\n\n"
 
       # destroy
-      io << "def articles_destroy(environ, start_response, id):\n"
-      io << "    article = Article.find(id)\n"
-      io << "    article.destroy_comments()\n"
-      io << "    article.destroy()\n"
-      io << "    start_response('303 See Other', [('Location', '/articles')])\n"
-      io << "    return [b'']\n\n"
+      io << "    def articles_destroy(self, id):\n"
+      io << "        article = Article.find(id)\n"
+      io << "        article.destroy_comments()\n"
+      io << "        article.destroy()\n"
+      io << "        broadcast_article_remove(id)\n"
+      io << "        self.redirect('/articles', 303)\n\n"
     end
 
-    private def generate_comments_actions(io : IO::Memory)
+    private def generate_comments_handlers(io : IO::Memory)
       # create
-      io << "def comments_create(environ, start_response, article_id):\n"
-      io << "    article = Article.find(article_id)\n"
-      io << "    data = parse_form(environ)\n"
-      io << "    comment = Comment(article_id=article.id, commenter=form_value(data, 'comment[commenter]'), body=form_value(data, 'comment[body]'))\n"
-      io << "    comment.save()\n"
-      io << "    start_response('302 Found', [('Location', f'/articles/{article_id}')])\n"
-      io << "    return [b'']\n\n"
+      io << "    def comments_create(self, article_id, data):\n"
+      io << "        article = Article.find(article_id)\n"
+      io << "        comment = Comment(article_id=article.id, commenter=form_value(data, 'comment[commenter]'), body=form_value(data, 'comment[body]'))\n"
+      io << "        comment.save()\n"
+      io << "        broadcast_comment_append(comment, article_id)\n"
+      io << "        self.redirect(f'/articles/{article_id}')\n\n"
 
       # destroy
-      io << "def comments_destroy(environ, start_response, article_id, id):\n"
-      io << "    comment = Comment.find(id)\n"
-      io << "    comment.destroy()\n"
-      io << "    start_response('303 See Other', [('Location', f'/articles/{article_id}')])\n"
-      io << "    return [b'']\n\n"
-    end
-
-    private def generate_routes(io : IO::Memory)
-      io << "    # Route matching\n"
-      io << "    match = re.match(r'^/articles/(\\d+)/comments/(\\d+)$', path)\n"
-      io << "    if match and method == 'POST' and '_method' in parse_qs(environ.get('QUERY_STRING', '')):\n"
-      io << "        return comments_destroy(environ, start_response, int(match.group(1)), int(match.group(2)))\n"
-      io << "\n"
-      io << "    match = re.match(r'^/articles/(\\d+)/comments$', path)\n"
-      io << "    if match and method == 'POST':\n"
-      io << "        return comments_create(environ, start_response, int(match.group(1)))\n"
-      io << "\n"
-      io << "    match = re.match(r'^/articles/(\\d+)/edit$', path)\n"
-      io << "    if match and method == 'GET':\n"
-      io << "        return articles_edit(environ, start_response, int(match.group(1)))\n"
-      io << "\n"
-      io << "    match = re.match(r'^/articles/(\\d+)$', path)\n"
-      io << "    if match:\n"
-      io << "        id = int(match.group(1))\n"
-      io << "        if method == 'GET':\n"
-      io << "            return articles_show(environ, start_response, id)\n"
-      io << "        elif method == 'POST':\n"
-      io << "            data = parse_form(environ)\n"
-      io << "            if form_value(data, '_method') in ('patch', 'PATCH', 'put', 'PUT'):\n"
-      io << "                return articles_update(environ, start_response, id)\n"
-      io << "            elif form_value(data, '_method') in ('delete', 'DELETE'):\n"
-      io << "                return articles_destroy(environ, start_response, id)\n"
-      io << "\n"
-      io << "    if path == '/articles/new' and method == 'GET':\n"
-      io << "        return articles_new(environ, start_response)\n"
-      io << "\n"
-      io << "    if path in ('/', '/articles') and method == 'GET':\n"
-      io << "        return articles_index(environ, start_response)\n"
-      io << "\n"
-      io << "    if path == '/articles' and method == 'POST':\n"
-      io << "        return articles_create(environ, start_response)\n"
-      io << "\n"
+      io << "    def comments_destroy(self, article_id, id):\n"
+      io << "        comment = Comment.find(id)\n"
+      io << "        comment.destroy()\n"
+      io << "        broadcast_comment_remove(id, article_id)\n"
+      io << "        self.redirect(f'/articles/{article_id}', 303)\n\n"
     end
 
     private def generate_templates(output_dir : String)
@@ -436,6 +554,7 @@ module Railcar
 
       # Articles index (matches Rails index.html.erb + _article.html.erb)
       File.write(File.join(templates_dir, "articles_index.html"), <<-'HTML')
+      <turbo-stream-source src="/streams/articles"></turbo-stream-source>
       <div class="w-full">
         <div class="flex justify-between items-center">
           <h1 class="font-bold text-4xl">Articles</h1>
@@ -464,6 +583,7 @@ module Railcar
       </div>
       <hr class="my-8">
       <h2 class="text-xl font-bold mb-4">Comments</h2>
+      <turbo-stream-source src="/streams/article_{{id}}_comments"></turbo-stream-source>
       <div id="comments" class="space-y-4 mb-8">
         {{comments_html}}
       </div>
