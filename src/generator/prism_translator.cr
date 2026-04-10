@@ -7,6 +7,10 @@
 # The translation is mechanical: Prism::CallNode → Crystal::Call,
 # Prism::DefNode → Crystal::Def, etc. Where Ruby and Crystal syntax
 # diverge, this translator produces the closest Crystal equivalent.
+#
+# Source locations from Prism nodes are mapped onto Crystal AST nodes,
+# enabling source maps, better error messages, and Crystal's
+# TypeGuessVisitor (which requires locations on instance variables).
 
 require "compiler/crystal/syntax"
 require "../prism/bindings"
@@ -14,10 +18,49 @@ require "../prism/deserializer"
 
 module Railcar
   class PrismTranslator
+    @source : String
+    @filename : String
+    @line_offsets : Array(Int32)
+
+    def initialize(@source = "", @filename = "")
+      @line_offsets = build_line_offsets(@source)
+    end
+
     # Translate a Ruby source string to a Crystal AST
-    def self.translate(source : String) : Crystal::ASTNode
+    def self.translate(source : String, filename : String = "") : Crystal::ASTNode
       prism_ast = Prism.parse(source)
-      new.translate(prism_ast)
+      new(source, filename).translate(prism_ast)
+    end
+
+    # Build a table mapping line numbers to byte offsets.
+    # Line 1 starts at offset 0; each subsequent line starts
+    # after a newline character.
+    private def build_line_offsets(source : String) : Array(Int32)
+      offsets = [0]
+      source.each_byte.with_index do |byte, index|
+        offsets << (index + 1) if byte == '\n'.ord
+      end
+      offsets
+    end
+
+    # Convert a byte offset to a Crystal::Location (line, column).
+    private def location_for(node : Prism::Node) : Crystal::Location
+      offset = node.location_start.to_i32
+      line = 1
+      @line_offsets.each_with_index do |line_offset, i|
+        if offset < line_offset
+          break
+        end
+        line = i + 1
+      end
+      column = offset - @line_offsets[line - 1] + 1
+      Crystal::Location.new(@filename, line, column)
+    end
+
+    # Set location on a Crystal node from a Prism node and return it.
+    private def locate(crystal_node : Crystal::ASTNode, prism_node : Prism::Node) : Crystal::ASTNode
+      crystal_node.location = location_for(prism_node)
+      crystal_node
     end
 
     def translate(node : Prism::Node) : Crystal::ASTNode
@@ -30,23 +73,25 @@ module Railcar
         if node.body.size == 1
           translate(node.body[0])
         else
-          Crystal::Expressions.new(node.body.map { |s| translate(s) })
+          locate(Crystal::Expressions.new(node.body.map { |s| translate(s) }), node)
         end
 
       # --- Classes and methods ---
       when Prism::ClassNode
         superclass = node.superclass ? translate(node.superclass.not_nil!) : nil
         body = node.body ? translate(node.body.not_nil!) : Crystal::Nop.new
-        Crystal::ClassDef.new(
+        locate(Crystal::ClassDef.new(
           translate_path(node),
           body: body,
           superclass: superclass.as?(Crystal::ASTNode)
-        )
+        ), node)
 
       when Prism::DefNode
         args = translate_def_params(node)
         body = node.body ? translate(node.body.not_nil!) : Crystal::Nop.new
-        Crystal::Def.new(node.name, args, body: body)
+        receiver = node.receiver ? translate(node.receiver.not_nil!) : nil
+        crystal_def = Crystal::Def.new(node.name, args, body: body, receiver: receiver)
+        locate(crystal_def, node)
 
       # --- Method calls ---
       when Prism::CallNode
@@ -57,14 +102,14 @@ module Railcar
         if node.arguments.size == 1
           translate(node.arguments[0])
         else
-          Crystal::Expressions.new(node.arguments.map { |a| translate(a) })
+          locate(Crystal::Expressions.new(node.arguments.map { |a| translate(a) }), node)
         end
 
       # --- Blocks ---
       when Prism::BlockNode
         params = translate_block_params(node)
         body = node.body ? translate(node.body.not_nil!) : Crystal::Nop.new
-        Crystal::Block.new(args: params, body: body)
+        locate(Crystal::Block.new(args: params, body: body), node)
 
       # --- Lambdas ---
       when Prism::LambdaNode
@@ -72,17 +117,17 @@ module Railcar
         body = node.body ? translate(node.body.not_nil!) : Crystal::Nop.new
         # Crystal doesn't have -> syntax for procs in the same way
         # Translate as a block-like construct (ProcLiteral)
-        Crystal::ProcLiteral.new(Crystal::Def.new("->", node.locals.map { |n| Crystal::Arg.new(n) }, body: body))
+        locate(Crystal::ProcLiteral.new(Crystal::Def.new("->", node.locals.map { |n| Crystal::Arg.new(n) }, body: body)), node)
 
       # --- Literals ---
       when Prism::StringNode
-        Crystal::StringLiteral.new(node.value)
+        locate(Crystal::StringLiteral.new(node.value), node)
 
       when Prism::InterpolatedStringNode
         parts = node.parts.map do |part|
           case part
           when Prism::StringNode
-            Crystal::StringLiteral.new(part.value).as(Crystal::ASTNode)
+            locate(Crystal::StringLiteral.new(part.value), part).as(Crystal::ASTNode)
           when Prism::EmbeddedStatementsNode
             if stmts = part.statements
               case stmts
@@ -102,72 +147,72 @@ module Railcar
             translate(part)
           end
         end
-        Crystal::StringInterpolation.new(parts)
+        locate(Crystal::StringInterpolation.new(parts), node)
 
       when Prism::SymbolNode
-        Crystal::SymbolLiteral.new(node.value)
+        locate(Crystal::SymbolLiteral.new(node.value), node)
 
       when Prism::IntegerNode
-        Crystal::NumberLiteral.new(node.value.to_s)
+        locate(Crystal::NumberLiteral.new(node.value.to_s), node)
 
       when Prism::TrueNode
-        Crystal::BoolLiteral.new(true)
+        locate(Crystal::BoolLiteral.new(true), node)
 
       when Prism::FalseNode
-        Crystal::BoolLiteral.new(false)
+        locate(Crystal::BoolLiteral.new(false), node)
 
       when Prism::NilNode
-        Crystal::NilLiteral.new
+        locate(Crystal::NilLiteral.new, node)
 
       when Prism::SelfNode
-        Crystal::Var.new("self")
+        locate(Crystal::Var.new("self"), node)
 
       # --- Variables ---
       when Prism::LocalVariableReadNode
-        Crystal::Var.new(node.name)
+        locate(Crystal::Var.new(node.name), node)
 
       when Prism::LocalVariableWriteNode
-        Crystal::Assign.new(
-          Crystal::Var.new(node.name),
+        locate(Crystal::Assign.new(
+          locate(Crystal::Var.new(node.name), node),
           translate(node.value)
-        )
+        ), node)
 
       when Prism::LocalVariableOperatorWriteNode
-        Crystal::OpAssign.new(
-          Crystal::Var.new(node.name),
+        locate(Crystal::OpAssign.new(
+          locate(Crystal::Var.new(node.name), node),
           node.operator,
           translate(node.value)
-        )
+        ), node)
 
       when Prism::InstanceVariableReadNode
-        Crystal::InstanceVar.new(node.name)
+        locate(Crystal::InstanceVar.new(node.name), node)
 
       when Prism::InstanceVariableWriteNode
-        Crystal::Assign.new(
-          Crystal::InstanceVar.new(node.name),
+        locate(Crystal::Assign.new(
+          locate(Crystal::InstanceVar.new(node.name), node),
           translate(node.value)
-        )
+        ), node)
 
       # --- Constants ---
       when Prism::ConstantReadNode
-        Crystal::Path.new(node.name)
+        locate(Crystal::Path.new(node.name), node)
 
       when Prism::ConstantPathNode
-        Crystal::Path.new(node.full_path.split("::"))
+        locate(Crystal::Path.new(node.full_path.split("::")), node)
 
       # --- Collections ---
       when Prism::ArrayNode
-        Crystal::ArrayLiteral.new(node.elements.map { |e| translate(e) })
+        locate(Crystal::ArrayLiteral.new(node.elements.map { |e| translate(e) }), node)
 
       when Prism::HashNode
-        translate_hash(node.elements)
+        locate(translate_hash(node.elements), node)
 
       when Prism::KeywordHashNode
-        translate_hash(node.elements)
+        locate(translate_hash(node.elements), node)
 
       when Prism::AssocNode
         # Standalone AssocNode shouldn't appear, but handle gracefully
-        Crystal::Expressions.new([translate(node.key), translate(node.value_node)])
+        locate(Crystal::Expressions.new([translate(node.key), translate(node.value_node)]), node)
 
       # --- Control flow ---
       when Prism::IfNode
@@ -183,7 +228,7 @@ module Railcar
                     else
                       nil
                     end
-        Crystal::If.new(cond, then_body, else_body)
+        locate(Crystal::If.new(cond, then_body, else_body), node)
 
       when Prism::ElseNode
         node.body ? translate(node.body.not_nil!) : Crystal::Nop.new
@@ -193,7 +238,7 @@ module Railcar
         if body = node.body
           expr = Crystal::Expressions.new([translate(body)] of Crystal::ASTNode)
           expr.keyword = Crystal::Expressions::Keyword::Paren
-          expr
+          locate(expr, node)
         else
           Crystal::Nop.new
         end
@@ -207,7 +252,7 @@ module Railcar
         elsif children.size == 1
           translate(children[0])
         else
-          Crystal::Expressions.new(children.map { |c| translate(c) })
+          locate(Crystal::Expressions.new(children.map { |c| translate(c) }), node)
         end
 
       else
@@ -251,13 +296,13 @@ module Railcar
                 nil
               end
 
-      Crystal::Call.new(
+      locate(Crystal::Call.new(
         receiver,
         node.name,
         positional,
         block: block,
         named_args: named.empty? ? nil : named
-      )
+      ), node)
     end
 
     # Check if the last argument is a keyword hash (common Rails pattern)

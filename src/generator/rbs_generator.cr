@@ -77,12 +77,22 @@ module Railcar
       inferred_types = infer_controller_types
 
       app.controllers.each do |info|
+        ct = inferred_types[info.name]? || ControllerTypes.new
+
         rbs = String.build do |io|
           io << "class #{info.name} < #{info.superclass}\n"
 
+          # Instance variable type declarations
+          unless ct.ivars.empty?
+            ct.ivars.each do |name, type|
+              io << "  #{name}: #{type}\n"
+            end
+            io << "\n"
+          end
+
           info.actions.each do |action|
             next if action.is_private
-            ret = inferred_types.dig?(info.name, action.name) || "void"
+            ret = ct.methods[action.name]? || "void"
             io << "  def #{action.name}: #{ret}\n"
           end
 
@@ -92,7 +102,7 @@ module Railcar
             io << "\n  private\n\n"
             info.actions.each do |action|
               next unless action.is_private
-              ret = inferred_types.dig?(info.name, action.name) || "void"
+              ret = ct.methods[action.name]? || "void"
               io << "  def #{action.name}: #{ret}\n"
             end
           end
@@ -106,10 +116,10 @@ module Railcar
       end
     end
 
-    # Run Crystal's semantic analysis to infer controller method return types.
-    # Returns Hash: controller_name => { method_name => rbs_type_string }
-    private def infer_controller_types : Hash(String, Hash(String, String))
-      result = {} of String => Hash(String, String)
+    # Run Crystal's semantic analysis to infer controller types.
+    # Returns Hash: controller_name => ControllerTypes (methods + ivars)
+    private def infer_controller_types : Hash(String, ControllerTypes)
+      result = {} of String => ControllerTypes
 
       # Build schema map for stub generation
       schema_map = {} of String => TableSchema
@@ -120,13 +130,13 @@ module Railcar
 
       # For each controller, translate method bodies and run semantic analysis
       app.controllers.each do |info|
-        method_types = infer_methods_for_controller(info, stub_source)
-        result[info.name] = method_types unless method_types.empty?
+        ct = infer_methods_for_controller(info, stub_source)
+        result[info.name] = ct unless ct.methods.empty? && ct.ivars.empty?
       end
 
       result
     rescue
-      result || {} of String => Hash(String, String)
+      result || {} of String => ControllerTypes
     end
 
     # Generate Crystal stub classes from schema/model metadata.
@@ -223,21 +233,80 @@ module Railcar
     # Translate a controller's Ruby method bodies via Prism,
     # combine with model stubs, run semantic analysis per method,
     # and return inferred return types.
+    class ControllerTypes
+      property methods : Hash(String, String)
+      property ivars : Hash(String, String)
+
+      def initialize(@methods = {} of String => String, @ivars = {} of String => String)
+      end
+    end
+
     private def infer_methods_for_controller(
       info : ControllerInfo,
       stub_source : String
-    ) : Hash(String, String)
-      method_types = {} of String => String
+    ) : ControllerTypes
+      # First try all methods together to get ivar types
+      ivar_types = infer_all_methods(info, stub_source)
+      result = ControllerTypes.new(ivars: ivar_types || {} of String => String)
 
+      # Then infer return types per method (more resilient to failures)
       info.actions.each do |action|
         body = action.body
         next unless body
 
         inferred = infer_single_method(info.name, action.name, body, stub_source)
-        method_types[action.name] = inferred if inferred
+        if inferred
+          result.methods[action.name] = inferred
+        end
       end
 
-      method_types
+      result
+    end
+
+    # Run all methods together to accumulate ivar types on the class.
+    private def infer_all_methods(
+      info : ControllerInfo,
+      stub_source : String
+    )
+      methods_with_bodies = info.actions.select(&.body)
+      return {} of String => String if methods_with_bodies.empty?
+
+      stub_ast = Crystal::Parser.parse(stub_source)
+
+      crystal_defs = [] of Crystal::ASTNode
+      methods_with_bodies.each do |action|
+        body = action.body
+        next unless body
+        translated_body = PrismTranslator.new.translate(body)
+        crystal_defs << Crystal::Def.new(action.name, body: translated_body)
+      end
+
+      class_body = Crystal::Expressions.new(crystal_defs)
+      class_def = Crystal::ClassDef.new(
+        Crystal::Path.new(info.name),
+        body: class_body
+      )
+
+      call_sites = methods_with_bodies.map do |action|
+        Crystal::Call.new(
+          Crystal::Call.new(Crystal::Path.new(info.name), "new"),
+          action.name
+        ).as(Crystal::ASTNode)
+      end
+
+      program = Crystal::Program.new
+      full_ast = Crystal::Expressions.new([
+        Crystal::Require.new("prelude"),
+        stub_ast,
+        class_def,
+      ] of Crystal::ASTNode + call_sites)
+
+      normalized = program.normalize(full_ast)
+      program.semantic(normalized)
+
+      extract_ivar_types(program, info.name)
+    rescue
+      {} of String => String
     end
 
     # Run semantic analysis on a single controller method.
@@ -295,10 +364,27 @@ module Railcar
       nil
     end
 
-    # Replace @var references with local vars in the AST.
-    # Crystal's TypeGuessVisitor requires location info on instance
-    # variables that PrismTranslator doesn't set. Since we only need
-    # return types (not ivar tracking), locals work identically.
+    # Extract instance variable types from a controller type
+    # after semantic analysis has been run.
+    private def extract_ivar_types(
+      program : Crystal::Program,
+      controller_name : String
+    )
+      ivar_types = {} of String => String
+      controller_type = program.types[controller_name]?
+
+      if controller_type
+        controller_type.instance_vars.each do |name, ivar|
+          if type = ivar.type?
+            rbs_type = crystal_type_to_rbs(type.to_s)
+            ivar_types[name] = rbs_type unless rbs_type == "untyped"
+          end
+        end
+      end
+
+      ivar_types
+    end
+
     private def strip_ivars(node : Crystal::ASTNode) : Crystal::ASTNode
       case node
       when Crystal::InstanceVar
