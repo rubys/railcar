@@ -1,10 +1,12 @@
 require "./generator/app_generator"
 require "./generator/rbs_generator"
+require "./generator/python_generator"
 
 rbs_mode = ARGV.delete("--rbs")
+python_mode = ARGV.delete("--python")
 
 if ARGV.size < 2
-  STDERR.puts "Usage: railcar [--rbs] <rails-app-dir> <output-dir>"
+  STDERR.puts "Usage: railcar [--rbs|--python] <rails-app-dir> <output-dir>"
   exit 1
 end
 
@@ -19,6 +21,9 @@ end
 if rbs_mode
   app = Railcar::AppModel.extract(rails_dir)
   Railcar::RbsGenerator.new(app, rails_dir).generate(output_dir)
+elsif python_mode
+  app = Railcar::AppModel.extract(rails_dir)
+  Railcar::PythonGenerator.new(app, rails_dir).generate(output_dir)
 else
   generator = Railcar::AppGenerator.new(rails_dir, output_dir)
   generator.generate
