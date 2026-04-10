@@ -199,9 +199,12 @@ module Railcar
       io << "import mimetypes\n"
       io << "import re\n"
       io << "import os\n"
+      io << "import json\n"
+      io << "import base64\n"
+      io << "import asyncio\n"
       io << "import threading\n"
-      io << "import queue\n"
       io << "import time\n"
+      io << "import websockets\n"
       io << "from models import *\n\n"
 
       # Template helper
@@ -218,30 +221,69 @@ module Railcar
       io << "def layout(content, title='Blog'):\n"
       io << "    return render_template('layout.html', content=content, title=title)\n\n"
 
-      # Broadcast hub for SSE
-      io << "# Turbo Streams broadcast hub\n"
-      io << "class BroadcastHub:\n"
+      # ActionCable WebSocket server
+      io << "# ActionCable server for Turbo Streams\n"
+      io << "class CableServer:\n"
       io << "    def __init__(self):\n"
       io << "        self.lock = threading.Lock()\n"
-      io << "        self.channels = {}  # channel_name -> [queue.Queue]\n\n"
+      io << "        self.channels = {}  # channel_name -> set of (ws, identifier)\n"
+      io << "        self.loop = None\n\n"
 
-      io << "    def subscribe(self, channel):\n"
-      io << "        q = queue.Queue()\n"
+      io << "    def subscribe(self, ws, channel, identifier):\n"
       io << "        with self.lock:\n"
-      io << "            self.channels.setdefault(channel, []).append(q)\n"
-      io << "        return q\n\n"
+      io << "            self.channels.setdefault(channel, set()).add((ws, identifier))\n\n"
 
-      io << "    def unsubscribe(self, channel, q):\n"
+      io << "    def unsubscribe_all(self, ws):\n"
       io << "        with self.lock:\n"
-      io << "            if channel in self.channels:\n"
-      io << "                self.channels[channel] = [x for x in self.channels[channel] if x is not q]\n\n"
+      io << "            for channel in list(self.channels):\n"
+      io << "                self.channels[channel] = {(w, i) for w, i in self.channels[channel] if w is not ws}\n\n"
 
       io << "    def broadcast(self, channel, html):\n"
       io << "        with self.lock:\n"
-      io << "            for q in self.channels.get(channel, []):\n"
-      io << "                q.put(html)\n\n"
+      io << "            subs = list(self.channels.get(channel, set()))\n"
+      io << "        for ws, identifier in subs:\n"
+      io << "            msg = json.dumps({'type': 'message', 'identifier': identifier, 'message': html})\n"
+      io << "            if self.loop:\n"
+      io << "                asyncio.run_coroutine_threadsafe(ws.send(msg), self.loop)\n\n"
 
-      io << "hub = BroadcastHub()\n\n"
+      io << "cable = CableServer()\n\n"
+
+      io << "async def handle_cable(ws):\n"
+      io << "    cable.loop = asyncio.get_event_loop()\n"
+      io << "    await ws.send(json.dumps({'type': 'welcome'}))\n"
+      io << "    async def ping():\n"
+      io << "        try:\n"
+      io << "            while True:\n"
+      io << "                await asyncio.sleep(3)\n"
+      io << "                await ws.send(json.dumps({'type': 'ping', 'message': int(time.time())}))\n"
+      io << "        except websockets.exceptions.ConnectionClosed:\n"
+      io << "            pass\n"
+      io << "    ping_task = asyncio.create_task(ping())\n"
+      io << "    try:\n"
+      io << "        async for raw in ws:\n"
+      io << "            data = json.loads(raw)\n"
+      io << "            if data.get('command') == 'subscribe':\n"
+      io << "                identifier = data['identifier']\n"
+      io << "                id_data = json.loads(identifier)\n"
+      io << "                signed = id_data.get('signed_stream_name', '')\n"
+      io << "                channel = json.loads(base64.b64decode(signed.split('--')[0]))\n"
+      io << "                cable.subscribe(ws, channel, identifier)\n"
+      io << "                await ws.send(json.dumps({'type': 'confirm_subscription', 'identifier': identifier}))\n"
+      io << "    except websockets.exceptions.ConnectionClosed:\n"
+      io << "        pass\n"
+      io << "    finally:\n"
+      io << "        ping_task.cancel()\n"
+      io << "        cable.unsubscribe_all(ws)\n\n"
+
+      io << "def signed_stream_name(channel):\n"
+      io << "    return base64.b64encode(json.dumps(channel).encode()).decode()\n\n"
+
+      io << "def run_cable_server():\n"
+      io << "    async def serve():\n"
+      io << "        async with websockets.serve(handle_cable, '0.0.0.0', 3001,\n"
+      io << "                subprotocols=[websockets.Subprotocol('actioncable-v1-json')]):\n"
+      io << "            await asyncio.Future()\n"
+      io << "    asyncio.run(serve())\n\n"
 
       # Parse form data
       io << "def parse_form(body_bytes):\n"
@@ -277,28 +319,28 @@ module Railcar
       io << "def broadcast_article_append(article):\n"
       io << "    html = render_article_card(article)\n"
       io << "    stream = f'<turbo-stream action=\"prepend\" target=\"articles\"><template>{html}</template></turbo-stream>'\n"
-      io << "    hub.broadcast('articles', stream)\n\n"
+      io << "    cable.broadcast('articles', stream)\n\n"
 
       io << "def broadcast_article_replace(article):\n"
       io << "    html = render_article_card(article)\n"
       io << "    stream = f'<turbo-stream action=\"replace\" target=\"article_{article.id}\"><template>{html}</template></turbo-stream>'\n"
-      io << "    hub.broadcast('articles', stream)\n\n"
+      io << "    cable.broadcast('articles', stream)\n\n"
 
       io << "def broadcast_article_remove(article_id):\n"
       io << "    stream = f'<turbo-stream action=\"remove\" target=\"article_{article_id}\"></turbo-stream>'\n"
-      io << "    hub.broadcast('articles', stream)\n\n"
+      io << "    cable.broadcast('articles', stream)\n\n"
 
       io << "def broadcast_comment_append(comment, article_id):\n"
       io << "    html = render_comment_partial(comment, article_id)\n"
       io << "    stream = f'<turbo-stream action=\"append\" target=\"comments\"><template>{html}</template></turbo-stream>'\n"
-      io << "    hub.broadcast(f'article_{article_id}_comments', stream)\n"
+      io << "    cable.broadcast(f'article_{article_id}_comments', stream)\n"
       io << "    # Also update article card on index (comment count changed)\n"
       io << "    article = Article.find(article_id)\n"
       io << "    broadcast_article_replace(article)\n\n"
 
       io << "def broadcast_comment_remove(comment_id, article_id):\n"
       io << "    stream = f'<turbo-stream action=\"remove\" target=\"comment_{comment_id}\"></turbo-stream>'\n"
-      io << "    hub.broadcast(f'article_{article_id}_comments', stream)\n"
+      io << "    cable.broadcast(f'article_{article_id}_comments', stream)\n"
       io << "    article = Article.find(article_id)\n"
       io << "    broadcast_article_replace(article)\n\n"
 
@@ -306,11 +348,6 @@ module Railcar
       io << "class BlogHandler(BaseHTTPRequestHandler):\n"
       io << "    def do_GET(self):\n"
       io << "        path = self.path.split('?')[0]\n"
-      io << "\n"
-      io << "        # SSE streams\n"
-      io << "        match = re.match(r'^/streams/(.+)$', path)\n"
-      io << "        if match:\n"
-      io << "            return self.handle_sse(match.group(1))\n"
       io << "\n"
       io << "        # Static files\n"
       io << "        if path.startswith('/static/'):\n"
@@ -394,31 +431,6 @@ module Railcar
       io << "            self.send_error(404)\n"
       io << "\n"
 
-      # SSE handler
-      io << "    def handle_sse(self, channel):\n"
-      io << "        self.send_response(200)\n"
-      io << "        self.send_header('Content-Type', 'text/event-stream')\n"
-      io << "        self.send_header('Cache-Control', 'no-cache')\n"
-      io << "        self.send_header('Connection', 'keep-alive')\n"
-      io << "        self.send_header('X-Accel-Buffering', 'no')\n"
-      io << "        self.end_headers()\n"
-      io << "        q = hub.subscribe(channel)\n"
-      io << "        try:\n"
-      io << "            while True:\n"
-      io << "                try:\n"
-      io << "                    message = q.get(timeout=30)\n"
-      io << "                    self.wfile.write(f'data: {message}\\n\\n'.encode())\n"
-      io << "                    self.wfile.flush()\n"
-      io << "                except queue.Empty:\n"
-      io << "                    # Send keepalive\n"
-      io << "                    self.wfile.write(b':\\n\\n')\n"
-      io << "                    self.wfile.flush()\n"
-      io << "        except (BrokenPipeError, ConnectionResetError):\n"
-      io << "            pass\n"
-      io << "        finally:\n"
-      io << "            hub.unsubscribe(channel, q)\n"
-      io << "\n"
-
       io << "    def log_message(self, format, *args):\n"
       io << "        print(f'{self.command} {self.path} {args[1] if len(args) > 1 else \"\"}'.strip())\n"
       io << "\n"
@@ -443,6 +455,7 @@ module Railcar
       io << "if __name__ == '__main__':\n"
       io << "    init_db()\n"
       io << "    seed_db()\n" if has_seeds
+      io << "    threading.Thread(target=run_cable_server, daemon=True).start()\n"
       io << "    print('Blog running at http://localhost:3000')\n"
       io << "    server = ThreadedHTTPServer(('0.0.0.0', 3000), BlogHandler)\n"
       io << "    server.serve_forever()\n"
@@ -457,7 +470,9 @@ module Railcar
       io << "        articles = Article.all(order_by='created_at DESC')\n"
       io << "        article_list = '\\n'.join(render_article_card(a) for a in articles)\n"
       io << "        article_list = article_list or '<p class=\"text-center my-10\">No articles found.</p>'\n"
-      io << "        content = render_template('articles_index.html', article_list=article_list)\n"
+      io << "        content = render_template('articles_index.html',\n"
+      io << "            article_list=article_list,\n"
+      io << "            signed_articles=signed_stream_name('articles'))\n"
       io << "        self.respond(200, 'text/html', layout(content))\n\n"
 
       # show
@@ -468,7 +483,8 @@ module Railcar
       io << "        comments_html = comments_html or '<p class=\"text-gray-500\">No comments yet.</p>'\n"
       io << "        content = render_template('articles_show.html',\n"
       io << "            id=article.id, title=article.title, body=article.body,\n"
-      io << "            comments_html=comments_html)\n"
+      io << "            comments_html=comments_html,\n"
+      io << "            signed_comments=signed_stream_name(f'article_{id}_comments'))\n"
       io << "        self.respond(200, 'text/html', layout(content))\n\n"
 
       # new
@@ -550,7 +566,7 @@ module Railcar
       <head>
         <title>{{title}}</title>
         <meta name="viewport" content="width=device-width,initial-scale=1">
-        <meta name="action-cable-url" content="">
+        <meta name="action-cable-url" content="ws://localhost:3001/cable">
         <link rel="stylesheet" href="/static/app.css">
         <script type="module" src="/static/turbo.min.js"></script>
       </head>
@@ -565,7 +581,7 @@ module Railcar
 
       # Articles index (matches Rails index.html.erb + _article.html.erb)
       File.write(File.join(templates_dir, "articles_index.html"), <<-'HTML')
-      <turbo-stream-source src="/streams/articles"></turbo-stream-source>
+      <turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="{{signed_articles}}"></turbo-cable-stream-source>
       <div class="w-full">
         <div class="flex justify-between items-center">
           <h1 class="font-bold text-4xl">Articles</h1>
@@ -594,7 +610,7 @@ module Railcar
       </div>
       <hr class="my-8">
       <h2 class="text-xl font-bold mb-4">Comments</h2>
-      <turbo-stream-source src="/streams/article_{{id}}_comments"></turbo-stream-source>
+      <turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="{{signed_comments}}"></turbo-cable-stream-source>
       <div id="comments" class="space-y-4 mb-8">
         {{comments_html}}
       </div>
