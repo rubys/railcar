@@ -1,10 +1,15 @@
 # Generates RBS type signature files from extracted Rails metadata.
 #
-# Uses the same extractors as the Crystal code generator, but outputs
-# .rbs files instead of .cr files.
+# Uses Crystal's semantic analysis to infer method return types:
+# 1. Generates Crystal stub classes from schema/model metadata
+# 2. Translates Ruby method bodies to Crystal AST via PrismTranslator
+# 3. Runs Crystal's type inference on the combined AST
+# 4. Maps inferred Crystal types back to RBS type signatures
 
 require "./app_model"
 require "./schema_extractor"
+require "./prism_translator"
+require "../semantic"
 
 module Railcar
   class RbsGenerator
@@ -68,13 +73,17 @@ module Railcar
     end
 
     private def generate_controllers(output_dir : String)
+      # Infer return types for all controller methods via semantic analysis
+      inferred_types = infer_controller_types
+
       app.controllers.each do |info|
         rbs = String.build do |io|
           io << "class #{info.name} < #{info.superclass}\n"
 
           info.actions.each do |action|
             next if action.is_private
-            io << "  def #{action.name}: void\n"
+            ret = inferred_types.dig?(info.name, action.name) || "void"
+            io << "  def #{action.name}: #{ret}\n"
           end
 
           # Private methods
@@ -83,7 +92,8 @@ module Railcar
             io << "\n  private\n\n"
             info.actions.each do |action|
               next unless action.is_private
-              io << "  def #{action.name}: void\n"
+              ret = inferred_types.dig?(info.name, action.name) || "void"
+              io << "  def #{action.name}: #{ret}\n"
             end
           end
 
@@ -93,6 +103,254 @@ module Railcar
         basename = Inflector.underscore(info.name)
         File.write(File.join(output_dir, "#{basename}.rbs"), rbs)
         puts "  #{basename}.rbs"
+      end
+    end
+
+    # Run Crystal's semantic analysis to infer controller method return types.
+    # Returns Hash: controller_name => { method_name => rbs_type_string }
+    private def infer_controller_types : Hash(String, Hash(String, String))
+      result = {} of String => Hash(String, String)
+
+      # Build schema map for stub generation
+      schema_map = {} of String => TableSchema
+      app.schemas.each { |s| schema_map[s.name] = s }
+
+      # Generate Crystal stub source for models
+      stub_source = generate_model_stubs(schema_map)
+
+      # For each controller, translate method bodies and run semantic analysis
+      app.controllers.each do |info|
+        method_types = infer_methods_for_controller(info, stub_source)
+        result[info.name] = method_types unless method_types.empty?
+      end
+
+      result
+    rescue
+      result || {} of String => Hash(String, String)
+    end
+
+    # Generate Crystal stub classes from schema/model metadata.
+    # These stubs provide typed signatures so Crystal can infer
+    # return types in controller method bodies.
+    private def generate_model_stubs(schema_map : Hash(String, TableSchema)) : String
+      String.build do |io|
+        # Stub for params
+        io << "class ActionController::Parameters\n"
+        io << "  def expect(**args) : ActionController::Parameters\n"
+        io << "    ActionController::Parameters.new\n"
+        io << "  end\n"
+        io << "  def expect(arg) : ActionController::Parameters\n"
+        io << "    ActionController::Parameters.new\n"
+        io << "  end\n"
+        io << "end\n\n"
+
+        io << "def params : ActionController::Parameters\n"
+        io << "  ActionController::Parameters.new\n"
+        io << "end\n\n"
+
+        app.models.each do |name, model|
+          table_name = Inflector.pluralize(Inflector.underscore(name))
+          schema = schema_map[table_name]?
+
+          io << "class #{name}\n"
+
+          # Properties from schema
+          if schema
+            schema.columns.each do |col|
+              next if col.name == "id"
+              crystal_type = SchemaExtractor.crystal_type(col.type)
+              io << "  property #{col.name} : #{crystal_type} = #{default_for(crystal_type)}\n"
+            end
+          end
+
+          # Class methods
+          io << "  def self.find(id) : #{name}\n"
+          io << "    #{name}.new\n"
+          io << "  end\n"
+          io << "  def self.where(**conditions) : Array(#{name})\n"
+          io << "    [] of #{name}\n"
+          io << "  end\n"
+          io << "  def self.includes(*args) : Array(#{name})\n"
+          io << "    [] of #{name}\n"
+          io << "  end\n"
+          io << "  def self.order(**args) : Array(#{name})\n"
+          io << "    [] of #{name}\n"
+          io << "  end\n"
+          io << "  def self.all : Array(#{name})\n"
+          io << "    [] of #{name}\n"
+          io << "  end\n"
+          io << "  def self.new(params) : #{name}\n"
+          io << "    #{name}.new\n"
+          io << "  end\n"
+
+          # Association methods
+          model.associations.each do |assoc|
+            case assoc.kind
+            when :has_many
+              target = Inflector.classify(Inflector.singularize(assoc.name))
+              io << "  def #{assoc.name} : Array(#{target})\n"
+              io << "    [] of #{target}\n"
+              io << "  end\n"
+            when :belongs_to
+              target = Inflector.classify(assoc.name)
+              io << "  def #{assoc.name} : #{target}\n"
+              io << "    #{target}.new\n"
+              io << "  end\n"
+            when :has_one
+              target = Inflector.classify(assoc.name)
+              io << "  def #{assoc.name} : #{target}?\n"
+              io << "    nil\n"
+              io << "  end\n"
+            end
+          end
+
+          # Instance methods used in controllers
+          io << "  def save : Bool\n"
+          io << "    true\n"
+          io << "  end\n"
+          io << "  def update(params) : Bool\n"
+          io << "    true\n"
+          io << "  end\n"
+          io << "  def destroy! : #{name}\n"
+          io << "    self\n"
+          io << "  end\n"
+
+          io << "end\n\n"
+        end
+      end
+    end
+
+    # Translate a controller's Ruby method bodies via Prism,
+    # combine with model stubs, run semantic analysis per method,
+    # and return inferred return types.
+    private def infer_methods_for_controller(
+      info : ControllerInfo,
+      stub_source : String
+    ) : Hash(String, String)
+      method_types = {} of String => String
+
+      info.actions.each do |action|
+        body = action.body
+        next unless body
+
+        inferred = infer_single_method(info.name, action.name, body, stub_source)
+        method_types[action.name] = inferred if inferred
+      end
+
+      method_types
+    end
+
+    # Run semantic analysis on a single controller method.
+    # Returns the inferred RBS type string, or nil on failure.
+    private def infer_single_method(
+      controller_name : String,
+      method_name : String,
+      body : Prism::Node,
+      stub_source : String
+    ) : String?
+      # Parse fresh stubs for each method — semantic analysis mutates
+      # AST nodes in place, so they can't be reused across Programs.
+      stub_ast = Crystal::Parser.parse(stub_source)
+      translated_body = PrismTranslator.new.translate(body)
+      translated_body = strip_ivars(translated_body)
+
+      method_def = Crystal::Def.new(method_name, body: translated_body)
+      class_def = Crystal::ClassDef.new(
+        Crystal::Path.new(controller_name),
+        body: method_def
+      )
+
+      call_site = Crystal::Assign.new(
+        Crystal::Var.new("__rbs_result"),
+        Crystal::Call.new(
+          Crystal::Call.new(Crystal::Path.new(controller_name), "new"),
+          method_name
+        )
+      )
+
+      program = Crystal::Program.new
+      full_ast = Crystal::Expressions.new([
+        Crystal::Require.new("prelude"),
+        stub_ast,
+        class_def,
+        call_site,
+      ] of Crystal::ASTNode)
+
+      normalized = program.normalize(full_ast)
+      typed = program.semantic(normalized)
+
+      # Find the call-site assignment and read its type
+      if typed.is_a?(Crystal::Expressions)
+        typed.expressions.each do |expr|
+          if expr.is_a?(Crystal::Assign) && expr.target.to_s == "__rbs_result"
+            if type = expr.value.type?
+              return crystal_type_to_rbs(type.to_s)
+            end
+          end
+        end
+      end
+
+      nil
+    rescue
+      nil
+    end
+
+    # Replace @var references with local vars in the AST.
+    # Crystal's TypeGuessVisitor requires location info on instance
+    # variables that PrismTranslator doesn't set. Since we only need
+    # return types (not ivar tracking), locals work identically.
+    private def strip_ivars(node : Crystal::ASTNode) : Crystal::ASTNode
+      case node
+      when Crystal::InstanceVar
+        Crystal::Var.new(node.name.lchop("@"))
+      when Crystal::Assign
+        target = node.target
+        value = strip_ivars(node.value)
+        if target.is_a?(Crystal::InstanceVar)
+          Crystal::Assign.new(Crystal::Var.new(target.name.lchop("@")), value)
+        else
+          Crystal::Assign.new(target, value)
+        end
+      when Crystal::Expressions
+        Crystal::Expressions.new(node.expressions.map { |e| strip_ivars(e) })
+      when Crystal::If
+        Crystal::If.new(
+          strip_ivars(node.cond),
+          strip_ivars(node.then),
+          node.else.try { |e| strip_ivars(e) }
+        )
+      when Crystal::Call
+        obj = node.obj.try { |o| strip_ivars(o) }
+        args = node.args.map { |a| strip_ivars(a) }
+        call = Crystal::Call.new(obj, node.name, args)
+        call.block = node.block
+        call
+      else
+        node
+      end
+    end
+
+    # Map Crystal inferred types to RBS type notation
+    private def crystal_type_to_rbs(crystal_type : String) : String
+      case crystal_type
+      when "Nil"             then "void"
+      when "Bool"            then "bool"
+      when "Int32", "Int64"  then "Integer"
+      when "Float32", "Float64" then "Float"
+      when "String"          then "String"
+      when "Time"            then "Time"
+      when /^Array\((.+)\)$/
+        inner = crystal_type_to_rbs($1)
+        "ActiveRecord::Relation[#{inner}]"
+      when "ActionController::Parameters"
+        "ActionController::Parameters"
+      else
+        # Model names pass through directly
+        if app.models.has_key?(crystal_type)
+          crystal_type
+        else
+          "untyped"
+        end
       end
     end
 
@@ -107,6 +365,17 @@ module Railcar
       when "uuid"                    then "String"
       when "binary"                  then "String"
       else                                "untyped"
+      end
+    end
+
+    private def default_for(crystal_type : String) : String
+      case crystal_type
+      when "String" then "\"\""
+      when "Int64"  then "0_i64"
+      when "Float64" then "0.0"
+      when "Bool"   then "false"
+      when "Time"   then "Time.utc"
+      else          "\"\""
       end
     end
 
