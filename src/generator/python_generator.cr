@@ -3,11 +3,12 @@
 # Produces:
 #   app.py        — HTTP application with route dispatch
 #   models.py     — SQLite-backed model classes
-#   templates/    — HTML templates (simple string formatting)
+#   templates/    — Jinja2 templates (converted from ERB)
 
 require "./app_model"
 require "./schema_extractor"
 require "./python_seed_extractor"
+require "./python_erb_converter"
 require "./inflector"
 
 module Railcar
@@ -28,7 +29,7 @@ module Railcar
       generate_models(output_dir)
       generate_app(output_dir)
       generate_pyproject(output_dir)
-      generate_templates(output_dir)
+      convert_templates(output_dir)
       generate_tailwind(output_dir)
       copy_turbo_js(output_dir)
 
@@ -197,6 +198,7 @@ module Railcar
       io << "from aiohttp import web\n"
       io << "from urllib.parse import parse_qs\n"
       io << "import aiohttp\n"
+      io << "import jinja2\n"
       io << "import os\n"
       io << "import json\n"
       io << "import base64\n"
@@ -204,19 +206,82 @@ module Railcar
       io << "import time\n"
       io << "from models import *\n\n"
 
-      # Template helper
-      io << "TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), 'templates')\n\n"
+      # Jinja2 setup
+      io << "TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), 'templates')\n"
+      io << "env = jinja2.Environment(loader=jinja2.FileSystemLoader(TEMPLATE_DIR))\n\n"
 
-      io << "def render_template(name, **context):\n"
-      io << "    path = os.path.join(TEMPLATE_DIR, name)\n"
-      io << "    with open(path) as f:\n"
-      io << "        template = f.read()\n"
-      io << "    for key, value in context.items():\n"
-      io << "        template = template.replace('{{' + key + '}}', str(value))\n"
-      io << "    return template\n\n"
+      # Template helper functions
+      io << "def link_to(text, url, **kwargs):\n"
+      io << "    attrs = ''.join(f' {k.replace(\"_\", \"-\")}=\"{v}\"' for k, v in kwargs.items())\n"
+      io << "    return f'<a href=\"{url}\"{attrs}>{text}</a>'\n\n"
 
-      io << "def layout(content, title='Blog'):\n"
-      io << "    return render_template('layout.html', content=content, title=title)\n\n"
+      io << "def button_to(text, url, **kwargs):\n"
+      io << "    method = kwargs.pop('method', 'post')\n"
+      io << "    btn_class = kwargs.pop('class', '')\n"
+      io << "    confirm = kwargs.pop('data_turbo_confirm', '')\n"
+      io << "    form_class = kwargs.pop('form_class', '')\n"
+      io << "    form_attrs = f' class=\"{form_class}\"' if form_class else ''\n"
+      io << "    confirm_attr = f' data-turbo-confirm=\"{confirm}\"' if confirm else ''\n"
+      io << "    cls_attr = f' class=\"{btn_class}\"' if btn_class else ''\n"
+      io << "    return (\n"
+      io << "        f'<form method=\"post\" action=\"{url}\"{form_attrs}{confirm_attr}>'\n"
+      io << "        f'<input type=\"hidden\" name=\"_method\" value=\"{method}\">'\n"
+      io << "        f'<button type=\"submit\"{cls_attr}>{text}</button>'\n"
+      io << "        f'</form>'\n"
+      io << "    )\n\n"
+
+      io << "def dom_id(obj, prefix=None):\n"
+      io << "    name = type(obj).__name__.lower()\n"
+      io << "    if prefix:\n"
+      io << "        return f'{prefix}_{name}_{obj.id}'\n"
+      io << "    return f'{name}_{obj.id}'\n\n"
+
+      io << "def pluralize(count, singular, plural=None):\n"
+      io << "    if plural is None:\n"
+      io << "        plural = singular + 's'\n"
+      io << "    return f'{count} {singular if count == 1 else plural}'\n\n"
+
+      io << "def turbo_stream_from(channel):\n"
+      io << "    signed = base64.b64encode(json.dumps(channel).encode()).decode()\n"
+      io << "    return f'<turbo-cable-stream-source channel=\"Turbo::StreamsChannel\" signed-stream-name=\"{signed}\"></turbo-cable-stream-source>'\n\n"
+
+      # Path helpers
+      io << "def article_path(article):\n"
+      io << "    return f'/articles/{article.id}'\n\n"
+
+      io << "def edit_article_path(article):\n"
+      io << "    return f'/articles/{article.id}/edit'\n\n"
+
+      io << "def articles_path():\n"
+      io << "    return '/articles'\n\n"
+
+      io << "def new_article_path():\n"
+      io << "    return '/articles/new'\n\n"
+
+      io << "def article_comments_path(article):\n"
+      io << "    return f'/articles/{article.id}/comments'\n\n"
+
+      io << "def article_comment_path(article_id, comment):\n"
+      io << "    return f'/articles/{article_id}/comments/{comment.id}'\n\n"
+
+      # Register Jinja2 globals
+      io << "env.globals.update(\n"
+      io << "    link_to=link_to, button_to=button_to, dom_id=dom_id,\n"
+      io << "    pluralize=pluralize, turbo_stream_from=turbo_stream_from,\n"
+      io << "    article_path=article_path, edit_article_path=edit_article_path,\n"
+      io << "    articles_path=articles_path, new_article_path=new_article_path,\n"
+      io << "    article_comments_path=article_comments_path, article_comment_path=article_comment_path,\n"
+      io << ")\n\n"
+
+      io << "def render(template_name, **context):\n"
+      io << "    return env.get_template(template_name).render(**context)\n\n"
+
+      # Parse form data
+      io << "def parse_form(body_bytes):\n"
+      io << "    return parse_qs(body_bytes.decode('utf-8'))\n\n"
+
+      io << "def form_value(data, key):\n"
+      io << "    return data.get(key, [''])[0]\n\n"
 
       # ActionCable WebSocket server
       io << "# ActionCable server for Turbo Streams\n"
@@ -241,47 +306,14 @@ module Railcar
 
       io << "cable = CableServer()\n\n"
 
-      io << "def signed_stream_name(channel):\n"
-      io << "    return base64.b64encode(json.dumps(channel).encode()).decode()\n\n"
-
-      # Parse form data
-      io << "def parse_form(body_bytes):\n"
-      io << "    return parse_qs(body_bytes.decode('utf-8'))\n\n"
-
-      io << "def form_value(data, key):\n"
-      io << "    return data.get(key, [''])[0]\n\n"
-
-      # Render article partial for broadcasts
-      io << "def render_article_card(a):\n"
-      io << "    return (\n"
-      io << "        f'<div id=\"article_{a.id}\" class=\"flex flex-col sm:flex-row justify-between items-center pb-5 sm:pb-0\">'\n"
-      io << "        f'<div class=\"p-4 border rounded mb-4 flex-grow\">'\n"
-      io << "        f'<h2 class=\"text-xl font-bold\"><a href=\"/articles/{a.id}\" class=\"text-blue-600 hover:underline\">{a.title}</a></h2>'\n"
-      io << "        f'<p class=\"text-gray-700 mt-2\">{(a.body or \"\")[:100]}</p></div>'\n"
-      io << "        f'<div class=\"w-full sm:w-auto flex flex-col sm:flex-row space-x-2 space-y-2\">'\n"
-      io << "        f'<a href=\"/articles/{a.id}\" class=\"w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium\">Show</a>'\n"
-      io << "        f'<a href=\"/articles/{a.id}/edit\" class=\"w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium\">Edit</a>'\n"
-      io << "        f'</div></div>'\n"
-      io << "    )\n\n"
-
-      io << "def render_comment_partial(c, article_id):\n"
-      io << "    return (\n"
-      io << "        f'<div id=\"comment_{c.id}\" class=\"p-4 bg-gray-50 rounded\">'\n"
-      io << "        f'<p class=\"font-semibold\">{c.commenter}</p>'\n"
-      io << "        f'<p class=\"text-gray-700\">{c.body}</p>'\n"
-      io << "        f'<form method=\"post\" action=\"/articles/{article_id}/comments/{c.id}\" class=\"inline\" data-turbo-confirm=\"Are you sure?\">'\n"
-      io << "        f'<input type=\"hidden\" name=\"_method\" value=\"delete\">'\n"
-      io << "        f'<button type=\"submit\" class=\"text-red-600 text-sm mt-2\">Delete</button></form></div>'\n"
-      io << "    )\n\n"
-
       # Broadcast helpers
       io << "async def broadcast_article_append(article):\n"
-      io << "    html = render_article_card(article)\n"
+      io << "    html = render('articles/_article.html', article=article)\n"
       io << "    stream = f'<turbo-stream action=\"prepend\" target=\"articles\"><template>{html}</template></turbo-stream>'\n"
       io << "    await cable.broadcast('articles', stream)\n\n"
 
       io << "async def broadcast_article_replace(article):\n"
-      io << "    html = render_article_card(article)\n"
+      io << "    html = render('articles/_article.html', article=article)\n"
       io << "    stream = f'<turbo-stream action=\"replace\" target=\"article_{article.id}\"><template>{html}</template></turbo-stream>'\n"
       io << "    await cable.broadcast('articles', stream)\n\n"
 
@@ -290,10 +322,9 @@ module Railcar
       io << "    await cable.broadcast('articles', stream)\n\n"
 
       io << "async def broadcast_comment_append(comment, article_id):\n"
-      io << "    html = render_comment_partial(comment, article_id)\n"
+      io << "    html = render('comments/_comment.html', comment=comment)\n"
       io << "    stream = f'<turbo-stream action=\"append\" target=\"comments\"><template>{html}</template></turbo-stream>'\n"
       io << "    await cable.broadcast(f'article_{article_id}_comments', stream)\n"
-      io << "    # Also update article card on index (comment count changed)\n"
       io << "    article = Article.find(article_id)\n"
       io << "    await broadcast_article_replace(article)\n\n"
 
@@ -335,8 +366,70 @@ module Railcar
       io << "    return ws\n\n"
 
       # Route handlers
-      generate_articles_handlers(io)
-      generate_comments_handlers(io)
+      io << "# Route handlers\n"
+      io << "async def articles_index(request):\n"
+      io << "    articles = Article.all(order_by='created_at DESC')\n"
+      io << "    return web.Response(text=render('articles/index.html', articles=articles), content_type='text/html')\n\n"
+
+      io << "async def articles_show(request):\n"
+      io << "    id = int(request.match_info['id'])\n"
+      io << "    article = Article.find(id)\n"
+      io << "    return web.Response(text=render('articles/show.html', article=article), content_type='text/html')\n\n"
+
+      io << "async def articles_new(request):\n"
+      io << "    article = Article()\n"
+      io << "    return web.Response(text=render('articles/new.html', article=article), content_type='text/html')\n\n"
+
+      io << "async def articles_create(request):\n"
+      io << "    data = parse_form(await request.read())\n"
+      io << "    article = Article(title=form_value(data, 'article[title]'), body=form_value(data, 'article[body]'))\n"
+      io << "    if article.save():\n"
+      io << "        await broadcast_article_append(article)\n"
+      io << "        raise web.HTTPFound(f'/articles/{article.id}')\n"
+      io << "    return web.Response(text=render('articles/new.html', article=article), content_type='text/html', status=422)\n\n"
+
+      io << "async def articles_edit(request):\n"
+      io << "    id = int(request.match_info['id'])\n"
+      io << "    article = Article.find(id)\n"
+      io << "    return web.Response(text=render('articles/edit.html', article=article), content_type='text/html')\n\n"
+
+      io << "async def articles_update_or_destroy(request):\n"
+      io << "    id = int(request.match_info['id'])\n"
+      io << "    data = parse_form(await request.read())\n"
+      io << "    method = form_value(data, '_method').upper()\n"
+      io << "    if method == 'DELETE':\n"
+      io << "        article = Article.find(id)\n"
+      io << "        article.destroy_comments()\n"
+      io << "        article.destroy()\n"
+      io << "        await broadcast_article_remove(id)\n"
+      io << "        raise web.HTTPSeeOther('/articles')\n"
+      io << "    article = Article.find(id)\n"
+      io << "    article.title = form_value(data, 'article[title]')\n"
+      io << "    article.body = form_value(data, 'article[body]')\n"
+      io << "    if article.save():\n"
+      io << "        await broadcast_article_replace(article)\n"
+      io << "        raise web.HTTPSeeOther(f'/articles/{article.id}')\n"
+      io << "    return web.Response(text=render('articles/edit.html', article=article), content_type='text/html', status=422)\n\n"
+
+      io << "async def comments_create(request):\n"
+      io << "    article_id = int(request.match_info['id'])\n"
+      io << "    data = parse_form(await request.read())\n"
+      io << "    article = Article.find(article_id)\n"
+      io << "    comment = Comment(article_id=article.id, commenter=form_value(data, 'comment[commenter]'), body=form_value(data, 'comment[body]'))\n"
+      io << "    comment.save()\n"
+      io << "    await broadcast_comment_append(comment, article_id)\n"
+      io << "    raise web.HTTPFound(f'/articles/{article_id}')\n\n"
+
+      io << "async def comments_destroy(request):\n"
+      io << "    article_id = int(request.match_info['article_id'])\n"
+      io << "    id = int(request.match_info['id'])\n"
+      io << "    data = parse_form(await request.read())\n"
+      io << "    method = form_value(data, '_method').upper()\n"
+      io << "    if method == 'DELETE':\n"
+      io << "        comment = Comment.find(id)\n"
+      io << "        comment.destroy()\n"
+      io << "        await broadcast_comment_remove(id, article_id)\n"
+      io << "    raise web.HTTPSeeOther(f'/articles/{article_id}')\n\n"
 
       # Logging middleware
       io << "@web.middleware\n"
@@ -376,107 +469,6 @@ module Railcar
       puts "  app.py"
     end
 
-    private def generate_articles_handlers(io : IO::Memory)
-      # index
-      io << "async def articles_index(request):\n"
-      io << "    articles = Article.all(order_by='created_at DESC')\n"
-      io << "    article_list = '\\n'.join(render_article_card(a) for a in articles)\n"
-      io << "    article_list = article_list or '<p class=\"text-center my-10\">No articles found.</p>'\n"
-      io << "    content = render_template('articles_index.html',\n"
-      io << "        article_list=article_list,\n"
-      io << "        signed_articles=signed_stream_name('articles'))\n"
-      io << "    return web.Response(text=layout(content), content_type='text/html')\n\n"
-
-      # show
-      io << "async def articles_show(request):\n"
-      io << "    id = int(request.match_info['id'])\n"
-      io << "    article = Article.find(id)\n"
-      io << "    comments = article.comments()\n"
-      io << "    comments_html = '\\n'.join(render_comment_partial(c, id) for c in comments)\n"
-      io << "    comments_html = comments_html or '<p class=\"text-gray-500\">No comments yet.</p>'\n"
-      io << "    content = render_template('articles_show.html',\n"
-      io << "        id=article.id, title=article.title, body=article.body,\n"
-      io << "        comments_html=comments_html,\n"
-      io << "        signed_comments=signed_stream_name(f'article_{id}_comments'))\n"
-      io << "    return web.Response(text=layout(content), content_type='text/html')\n\n"
-
-      # new
-      io << "async def articles_new(request):\n"
-      io << "    content = render_template('articles_form.html',\n"
-      io << "        form_title='New Article', title='', body='',\n"
-      io << "        action='/articles', method_field='')\n"
-      io << "    return web.Response(text=layout(content), content_type='text/html')\n\n"
-
-      # create
-      io << "async def articles_create(request):\n"
-      io << "    data = parse_form(await request.read())\n"
-      io << "    article = Article(title=form_value(data, 'article[title]'), body=form_value(data, 'article[body]'))\n"
-      io << "    if article.save():\n"
-      io << "        await broadcast_article_append(article)\n"
-      io << "        raise web.HTTPFound(f'/articles/{article.id}')\n"
-      io << "    content = render_template('articles_form.html',\n"
-      io << "        form_title='New Article', title=article.title, body=article.body,\n"
-      io << "        action='/articles', method_field='')\n"
-      io << "    return web.Response(text=layout(content), content_type='text/html', status=422)\n\n"
-
-      # update or destroy (POST with _method override)
-      io << "async def articles_update_or_destroy(request):\n"
-      io << "    id = int(request.match_info['id'])\n"
-      io << "    data = parse_form(await request.read())\n"
-      io << "    method = form_value(data, '_method').upper()\n"
-      io << "    if method == 'DELETE':\n"
-      io << "        article = Article.find(id)\n"
-      io << "        article.destroy_comments()\n"
-      io << "        article.destroy()\n"
-      io << "        await broadcast_article_remove(id)\n"
-      io << "        raise web.HTTPSeeOther('/articles')\n"
-      io << "    article = Article.find(id)\n"
-      io << "    article.title = form_value(data, 'article[title]')\n"
-      io << "    article.body = form_value(data, 'article[body]')\n"
-      io << "    if article.save():\n"
-      io << "        await broadcast_article_replace(article)\n"
-      io << "        raise web.HTTPSeeOther(f'/articles/{article.id}')\n"
-      io << "    content = render_template('articles_form.html',\n"
-      io << "        form_title='Edit Article', title=article.title, body=article.body,\n"
-      io << "        action=f'/articles/{id}',\n"
-      io << "        method_field='<input type=\"hidden\" name=\"_method\" value=\"patch\">')\n"
-      io << "    return web.Response(text=layout(content), content_type='text/html', status=422)\n\n"
-
-      # edit
-      io << "async def articles_edit(request):\n"
-      io << "    id = int(request.match_info['id'])\n"
-      io << "    article = Article.find(id)\n"
-      io << "    content = render_template('articles_form.html',\n"
-      io << "        form_title='Edit Article', title=article.title, body=article.body,\n"
-      io << "        action=f'/articles/{id}',\n"
-      io << "        method_field='<input type=\"hidden\" name=\"_method\" value=\"patch\">')\n"
-      io << "    return web.Response(text=layout(content), content_type='text/html')\n\n"
-    end
-
-    private def generate_comments_handlers(io : IO::Memory)
-      # create
-      io << "async def comments_create(request):\n"
-      io << "    article_id = int(request.match_info['id'])\n"
-      io << "    data = parse_form(await request.read())\n"
-      io << "    article = Article.find(article_id)\n"
-      io << "    comment = Comment(article_id=article.id, commenter=form_value(data, 'comment[commenter]'), body=form_value(data, 'comment[body]'))\n"
-      io << "    comment.save()\n"
-      io << "    await broadcast_comment_append(comment, article_id)\n"
-      io << "    raise web.HTTPFound(f'/articles/{article_id}')\n\n"
-
-      # destroy
-      io << "async def comments_destroy(request):\n"
-      io << "    article_id = int(request.match_info['article_id'])\n"
-      io << "    id = int(request.match_info['id'])\n"
-      io << "    data = parse_form(await request.read())\n"
-      io << "    method = form_value(data, '_method').upper()\n"
-      io << "    if method == 'DELETE':\n"
-      io << "        comment = Comment.find(id)\n"
-      io << "        comment.destroy()\n"
-      io << "        await broadcast_comment_remove(id, article_id)\n"
-      io << "    raise web.HTTPSeeOther(f'/articles/{article_id}')\n\n"
-    end
-
     private def generate_pyproject(output_dir : String)
       project_name = File.basename(File.expand_path(output_dir))
       File.write(File.join(output_dir, "pyproject.toml"),
@@ -484,19 +476,20 @@ module Railcar
         "name = \"#{project_name}\"\n" \
         "version = \"0.1.0\"\n" \
         "requires-python = \">=3.10\"\n" \
-        "dependencies = [\"aiohttp\"]\n")
+        "dependencies = [\"aiohttp\", \"jinja2\"]\n")
       puts "  pyproject.toml"
     end
 
-    private def generate_templates(output_dir : String)
+    private def convert_templates(output_dir : String)
       templates_dir = File.join(output_dir, "templates")
+      views_dir = File.join(rails_dir, "app/views")
 
-      # Layout (matches Rails app/views/layouts/application.html.erb)
+      # Generate layout (not from ERB — too Rails-specific)
       File.write(File.join(templates_dir, "layout.html"), <<-HTML)
       <!DOCTYPE html>
       <html>
       <head>
-        <title>{{title}}</title>
+        <title>{{ title|default("Blog") }}</title>
         <meta name="viewport" content="width=device-width,initial-scale=1">
         <meta name="action-cable-url" content="/cable">
         <link rel="stylesheet" href="/static/app.css">
@@ -504,85 +497,56 @@ module Railcar
       </head>
       <body>
         <main class="container mx-auto mt-28 px-5 flex flex-col">
-          {{content}}
+          {% block content %}{% endblock %}
         </main>
       </body>
       </html>
       HTML
       puts "  templates/layout.html"
 
-      # Articles index (matches Rails index.html.erb + _article.html.erb)
-      File.write(File.join(templates_dir, "articles_index.html"), <<-'HTML')
-      <turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="{{signed_articles}}"></turbo-cable-stream-source>
-      <div class="w-full">
-        <div class="flex justify-between items-center">
-          <h1 class="font-bold text-4xl">Articles</h1>
-          <a href="/articles/new" class="rounded-md px-3.5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white block font-medium">New article</a>
-        </div>
-        <div id="articles" class="min-w-full divide-y divide-gray-200 space-y-5">
-          {{article_list}}
-        </div>
-      </div>
-      HTML
-      puts "  templates/articles_index.html"
+      # Convert ERB templates
+      converter = PythonErbConverter.new("articles")
+      convert_view(converter, views_dir, templates_dir, "articles", "index")
+      convert_view(converter, views_dir, templates_dir, "articles", "show")
+      convert_view(converter, views_dir, templates_dir, "articles", "new")
+      convert_view(converter, views_dir, templates_dir, "articles", "edit")
+      convert_partial(converter, views_dir, templates_dir, "articles", "_article")
+      convert_partial(converter, views_dir, templates_dir, "articles", "_form")
 
-      # Articles show (matches Rails show.html.erb + _comment.html.erb)
-      File.write(File.join(templates_dir, "articles_show.html"), <<-'HTML')
-      <div class="md:w-2/3 w-full">
-        <h1 class="font-bold text-4xl">{{title}}</h1>
-        <div class="my-4">
-          <p class="text-gray-700">{{body}}</p>
-        </div>
-        <a href="/articles/{{id}}/edit" class="w-full sm:w-auto text-center rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium">Edit this article</a>
-        <a href="/articles" class="w-full sm:w-auto text-center mt-2 sm:mt-0 sm:ml-2 rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium">Back to articles</a>
-        <form method="post" action="/articles/{{id}}" class="sm:inline-block mt-2 sm:mt-0 sm:ml-2" data-turbo-confirm="Are you sure?">
-          <input type="hidden" name="_method" value="delete">
-          <button type="submit" class="w-full rounded-md px-3.5 py-2.5 text-white bg-red-600 hover:bg-red-500 font-medium cursor-pointer">Destroy this article</button>
-        </form>
-      </div>
-      <hr class="my-8">
-      <h2 class="text-xl font-bold mb-4">Comments</h2>
-      <turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="{{signed_comments}}"></turbo-cable-stream-source>
-      <div id="comments" class="space-y-4 mb-8">
-        {{comments_html}}
-      </div>
-      <h3 class="text-lg font-semibold mb-2">Add a Comment</h3>
-      <form method="post" action="/articles/{{id}}/comments" class="space-y-4">
-        <div>
-          <label class="block font-medium">Commenter</label>
-          <input type="text" name="comment[commenter]" class="block w-full border rounded p-2">
-        </div>
-        <div>
-          <label class="block font-medium">Body</label>
-          <textarea name="comment[body]" rows="3" class="block w-full border rounded p-2"></textarea>
-        </div>
-        <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded">Add Comment</button>
-      </form>
-      HTML
-      puts "  templates/articles_show.html"
+      comment_converter = PythonErbConverter.new("comments")
+      convert_partial(comment_converter, views_dir, templates_dir, "comments", "_comment")
+    end
 
-      # Article form (matches Rails _form.html.erb)
-      File.write(File.join(templates_dir, "articles_form.html"), <<-'HTML')
-      <div class="md:w-2/3 w-full">
-        <h1 class="font-bold text-4xl">{{form_title}}</h1>
-        <form method="post" action="{{action}}" class="contents">
-          {{method_field}}
-          <div class="my-5">
-            <label>Title</label>
-            <input type="text" name="article[title]" value="{{title}}" class="block shadow-sm rounded-md border border-gray-400 focus:outline-blue-600 px-3 py-2 mt-2 w-full">
-          </div>
-          <div class="my-5">
-            <label>Body</label>
-            <textarea name="article[body]" rows="4" class="block shadow-sm rounded-md border border-gray-400 focus:outline-blue-600 px-3 py-2 mt-2 w-full">{{body}}</textarea>
-          </div>
-          <div class="inline">
-            <button type="submit" class="w-full sm:w-auto rounded-md px-3.5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white inline-block font-medium cursor-pointer">Save Article</button>
-          </div>
-        </form>
-        <a href="/articles" class="w-full sm:w-auto text-center mt-2 sm:mt-0 sm:ml-2 rounded-md px-3.5 py-2.5 bg-gray-100 hover:bg-gray-50 inline-block font-medium">Back to articles</a>
-      </div>
-      HTML
-      puts "  templates/articles_form.html"
+    private def convert_view(converter : PythonErbConverter, views_dir : String,
+                              templates_dir : String, controller : String, view : String)
+      erb_path = File.join(views_dir, controller, "#{view}.html.erb")
+      return unless File.exists?(erb_path)
+
+      out_dir = File.join(templates_dir, controller)
+      Dir.mkdir_p(out_dir) unless Dir.exists?(out_dir)
+
+      source = File.read(erb_path)
+      jinja = "{% extends \"layout.html\" %}\n{% block content %}\n"
+      jinja += converter.convert(source)
+      jinja += "\n{% endblock %}\n"
+
+      File.write(File.join(out_dir, "#{view}.html"), jinja)
+      puts "  templates/#{controller}/#{view}.html"
+    end
+
+    private def convert_partial(converter : PythonErbConverter, views_dir : String,
+                                 templates_dir : String, controller : String, partial : String)
+      erb_path = File.join(views_dir, controller, "#{partial}.html.erb")
+      return unless File.exists?(erb_path)
+
+      out_dir = File.join(templates_dir, controller)
+      Dir.mkdir_p(out_dir) unless Dir.exists?(out_dir)
+
+      source = File.read(erb_path)
+      jinja = converter.convert(source, is_partial: true)
+
+      File.write(File.join(out_dir, "#{partial}.html"), jinja)
+      puts "  templates/#{controller}/#{partial}.html"
     end
 
     private def copy_turbo_js(output_dir : String)
