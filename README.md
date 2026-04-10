@@ -4,7 +4,7 @@ Three things in one:
 
 1. **Transpiler** -- converts a Ruby on Rails application into a Crystal web application
 2. **Framework** -- a Rails-compatible runtime for Crystal, currently covering ActiveRecord and Hotwire, with more to come
-3. **RBS generator** -- produces RBS type signatures for existing Rails apps (prototype; planned to leverage Crystal's semantic type inference alongside Rails conventions for comprehensive coverage)
+3. **RBS generator** -- produces RBS type signatures for existing Rails apps, using Crystal's semantic type inference to determine method return types and instance variable types
 
 These mix and match. Both Ruby and Crystal input files are supported in the same project, so you can start with a Rails app, generate the Crystal version, then gradually rewrite individual files in Crystal. The pipeline handles both seamlessly.
 
@@ -58,6 +58,20 @@ crystal build src/app.cr
 
 # Generate RBS type signatures
 build/railcar --rbs /path/to/rails/app /path/to/output
+```
+
+The RBS generator uses Crystal's type inference engine to produce accurate type signatures. For a blog app's controller, it infers:
+
+```rbs
+class ArticlesController < ApplicationController
+  @articles: ActiveRecord::Relation[Article]?
+  @article: Article?
+
+  def index: ActiveRecord::Relation[Article]
+  def new: Article
+  def set_article: Article
+  def article_params: ActionController::Parameters
+end
 ```
 
 ## Test

@@ -30,6 +30,35 @@ Source file (.rb or .cr)
 
 Crystal AST (`Crystal::ASTNode`) is the canonical intermediate representation. All filters operate on it, regardless of whether the source was Ruby or Crystal.
 
+### Semantic analysis
+
+Railcar can optionally run Crystal's type inference engine on the translated AST. This is used by the RBS generator to determine method return types and instance variable types without executing the code.
+
+The semantic phase requires Crystal's standard library (prelude) but **not** LLVM. Railcar provides LLVM stubs (`stubs/llvm/`) that shadow the standard library's LLVM bindings, allowing semantic analysis to run with no LLVM dependency. This reduces binary size from ~100MB+ to ~28MB.
+
+The pipeline for semantic analysis:
+
+```
+Ruby source
+    |
+    v
+PrismTranslator → Crystal AST (with source locations)
+    |
+    v
+Filter chain (RespondToHTML, etc.) → valid Crystal AST
+    |
+    v
+Combine: prelude + model stubs + controller AST
+    |
+    v
+Crystal semantic analysis → typed AST
+    |
+    v
+Read inferred types (method returns, instance variables)
+```
+
+Model stubs are generated from AppModel metadata (schemas, associations) and provide typed signatures so Crystal can infer types through method calls like `Article.find(id)` → `Article`.
+
 ## Key components
 
 ### PrismTranslator (`src/generator/prism_translator.cr`)
@@ -100,6 +129,19 @@ A Crystal ORM that mirrors ActiveRecord, used by the generated application:
 - **Relation** -- chainable query builder (where, order, limit, includes)
 - **CollectionProxy** -- has_many association proxy (build, create, destroy_all)
 - **Helpers** -- route path helpers, view helpers (link_to, form tags), parameter parsing
+
+### RBS Generator (`src/generator/rbs_generator.cr`)
+
+Generates RBS type signature files for Rails apps. Uses Crystal's semantic analysis to infer:
+- Method return types (e.g., `def set_article: Article`)
+- Instance variable types (e.g., `@article: Article?`)
+- Nullable types from union inference (e.g., `Article | Nil` → `Article?`)
+
+Generates Crystal stub classes from AppModel metadata (schema column types, model associations, controller methods) and feeds them alongside Prism-translated controller bodies to Crystal's type inference engine.
+
+### LLVM Stubs (`stubs/llvm/`)
+
+A local shard that shadows Crystal's standard library LLVM bindings. Provides type declarations for `LLVM::CallConvention`, `LLVM::TargetMachine`, and other types that Crystal's semantic phase references at compile time but never exercises at runtime. Installed via `shards install` as a path dependency.
 
 ### Extractors (`src/generator/*_extractor.cr`)
 
@@ -189,5 +231,7 @@ Tests are organized by component:
 | `route_spec.cr` | Route extraction |
 | `models_spec.cr` | Runtime model CRUD and validations |
 | `prism_spec.cr` | Prism FFI bindings |
+| `semantic_spec.cr` | LLVM stub + Crystal type inference |
+| `semantic_prism_spec.cr` | Full pipeline: Ruby → Prism → Crystal AST → semantic → inferred types |
 
 The `make test` target downloads a sample Rails blog app to `build/demo/blog/` for integration testing.
