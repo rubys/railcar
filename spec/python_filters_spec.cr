@@ -192,6 +192,14 @@ describe "FormToHTML" do
     result = erb_to_python(erb, [Railcar::FormToHTML.new] of Crystal::Transformer)
     result.should contain "input type"
     result.should contain "article[title]"
+    result.should contain "border"
+  end
+
+  it "extracts default classes from conditional class array" do
+    erb = %(<%= form_with(model: article) do |form| %>\n<%= form.text_field :title, class: ["base-class", {"border-gray": article.errors[:title].none?, "border-red": article.errors[:title].any?}] %>\n<% end %>)
+    result = erb_to_python(erb, [Railcar::FormToHTML.new] of Crystal::Transformer)
+    result.should contain "base-class"
+    result.should contain "border-gray"
   end
 
   it "expands form.textarea to HTML textarea tag" do

@@ -279,12 +279,23 @@ module Railcar
       when Crystal::StringLiteral then v.value
       when Crystal::NumberLiteral then v.value
       when Crystal::ArrayLiteral
-        # Conditional class arrays — extract first string
-        if v.elements.size > 0 && v.elements[0].is_a?(Crystal::StringLiteral)
-          v.elements[0].as(Crystal::StringLiteral).value
-        else
-          nil
+        # Conditional class arrays: ["base", {"normal": cond, "error": cond}]
+        # Extract base string + first hash key (the "no error" default classes)
+        parts = [] of String
+        v.elements.each do |el|
+          case el
+          when Crystal::StringLiteral
+            parts << el.value
+          when Crystal::HashLiteral
+            # First entry is the default (no-error) style
+            if el.entries.size > 0
+              key = el.entries[0].key
+              parts << key.as(Crystal::StringLiteral).value if key.is_a?(Crystal::StringLiteral)
+              parts << key.as(Crystal::SymbolLiteral).value if key.is_a?(Crystal::SymbolLiteral)
+            end
+          end
         end
+        parts.empty? ? nil : parts.join(" ")
       else nil
       end
     end
