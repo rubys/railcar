@@ -153,10 +153,7 @@ describe "Python semantic type inference" do
 
     # Find the method body and check types — use a module to allow recursion
     types_found = TypeCollector.collect(typed)
-    puts "  calls:"
-    TypeCollector.collect_calls(typed).each { |c| puts "    #{c}" }
 
-    puts "index types: #{types_found}"
     # The return type of index() is captured as __r
     types_found["__r"].should contain "Article::Relation"
 
@@ -183,7 +180,6 @@ describe "Python semantic type inference" do
     typed2 = program2.semantic(normalized2)
 
     types_found2 = TypeCollector.collect(typed2)
-    puts "new types: #{types_found2}"
     types_found2["__r2"].should eq "Article"
   end
 end
