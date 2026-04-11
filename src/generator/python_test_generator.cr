@@ -464,13 +464,35 @@ module Railcar
         end
       end
 
-      # Association .create(kwargs) and .build(kwargs) → Model(fk=parent.id, kwargs)
-      if (method == "create" || method == "build") && receiver && args.size == 1 && args[0].is_a?(Prism::KeywordHashNode)
-        kwargs = build_kwargs(args[0].as(Prism::KeywordHashNode))
-        recv = py_expr(receiver)
-        # For article.comments.create → Comment(article_id=article.id, kwargs)
-        # This is complex; for now emit as a method call
-        return "#{recv}.#{method}(#{kwargs})"
+      # Association .create(kwargs) and .build(kwargs)
+      # article.comments.create(commenter: "x") → Comment(article_id=article.id, commenter="x")
+      # article.comments.build(body: "x") → Comment(article_id=article.id, body="x")
+      if (method == "create" || method == "build") && receiver.is_a?(Prism::CallNode)
+        assoc_call = receiver
+        if assoc_call.receiver && assoc_call.arg_nodes.empty?
+          parent_expr = py_expr(assoc_call.receiver.not_nil!)
+          assoc_name = assoc_call.name
+          # Find the model for this association
+          child_model = Inflector.classify(Inflector.singularize(assoc_name))
+          parent_model = Inflector.classify(parent_expr.split(".").first.split("(").first)
+          fk = Inflector.underscore(parent_model) + "_id"
+
+          kwargs = if args.size == 1 && args[0].is_a?(Prism::KeywordHashNode)
+                     build_kwargs(args[0].as(Prism::KeywordHashNode))
+                   else
+                     ""
+                   end
+          fk_kwarg = "#{fk}=#{parent_expr}.id"
+          all_kwargs = kwargs.empty? ? fk_kwarg : "#{fk_kwarg}, #{kwargs}"
+
+          if method == "create"
+            # create saves immediately
+            return "#{child_model}._create(#{all_kwargs})"
+          else
+            # build doesn't save
+            return "#{child_model}(#{all_kwargs})"
+          end
+        end
       end
 
       if receiver

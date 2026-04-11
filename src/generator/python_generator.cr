@@ -158,6 +158,13 @@ module Railcar
         io << "        db.close()\n"
         io << "        return [cls.from_row(r) for r in rows]\n\n"
 
+        # _create (shorthand for new + save, returns the instance)
+        io << "    @classmethod\n"
+        io << "    def _create(cls, **kwargs):\n"
+        io << "        obj = cls(**kwargs)\n"
+        io << "        obj.save()\n"
+        io << "        return obj\n\n"
+
         # count
         io << "    @classmethod\n"
         io << "    def count(cls):\n"
@@ -169,8 +176,43 @@ module Railcar
         io << "        records = cls.all()\n"
         io << "        return records[-1] if records else None\n\n"
 
+        # validate
+        if model.validations.any? || model.associations.any? { |a| a.kind == :belongs_to }
+          io << "    def is_valid(self):\n"
+          model.validations.each do |v|
+            case v.kind
+            when "presence"
+              io << "        if not self.#{v.field}:\n"
+              io << "            return False\n"
+            when "length"
+              if min = v.options["minimum"]?
+                io << "        if self.#{v.field} is not None and len(self.#{v.field}) < #{min}:\n"
+                io << "            return False\n"
+              end
+            end
+          end
+          # belongs_to FK validation
+          model.associations.each do |assoc|
+            if assoc.kind == :belongs_to
+              fk = assoc.name + "_id"
+              target_class = Inflector.classify(assoc.name)
+              io << "        if self.#{fk} is not None:\n"
+              io << "            try:\n"
+              io << "                from .#{Inflector.underscore(target_class)} import #{target_class}\n"
+              io << "                #{target_class}.find(self.#{fk})\n"
+              io << "            except (ValueError, Exception):\n"
+              io << "                return False\n"
+            end
+          end
+          io << "        return True\n\n"
+        end
+
         # save
         io << "    def save(self):\n"
+        if model.validations.any? || model.associations.any? { |a| a.kind == :belongs_to }
+          io << "        if not self.is_valid():\n"
+          io << "            return False\n"
+        end
         io << "        db = get_db()\n"
         io << "        now = datetime.now().isoformat()\n"
         io << "        if self.id is None:\n"
@@ -195,8 +237,15 @@ module Railcar
         io << "        db.close()\n"
         io << "        return True\n\n"
 
-        # destroy
+        # destroy (with dependent: :destroy cascading)
         io << "    def destroy(self):\n"
+        # Auto-cascade dependent: :destroy associations
+        model.associations.each do |assoc|
+          if assoc.kind == :has_many && assoc.options["dependent"]? == "destroy"
+            io << "        for item in self.#{assoc.name}():\n"
+            io << "            item.destroy()\n"
+          end
+        end
         io << "        db = get_db()\n"
         io << "        db.execute(f'DELETE FROM {self.TABLE} WHERE id = ?', (self.id,))\n"
         io << "        db.commit()\n"
