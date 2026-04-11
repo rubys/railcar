@@ -53,14 +53,20 @@ module Railcar
         model_name = Inflector.classify(Inflector.singularize(controller_name))
         singular = Inflector.underscore(model_name).downcase
 
-        controller_views_dir = File.join(views_dir, controller_name)
-        Dir.mkdir_p(controller_views_dir) unless Dir.exists?(controller_views_dir)
+        # Don't create subdirectories — view file goes directly in views/
 
         rails_controller_views = File.join(rails_views, controller_name)
         next unless Dir.exists?(rails_controller_views)
 
         io = IO::Memory.new
-        io << "from helpers import *\n\n"
+        io << "from helpers import *\n"
+        # Import other view modules for cross-controller partials
+        app.controllers.each do |other_info|
+          other_name = Inflector.underscore(other_info.name).chomp("_controller")
+          next if other_name == controller_name
+          io << "from views.#{other_name} import *\n"
+        end
+        io << "\n"
 
         # Process each ERB file
         Dir.glob(File.join(rails_controller_views, "*.html.erb")).sort.each do |erb_path|
@@ -100,8 +106,7 @@ module Railcar
           io << "\n"
         end
 
-        # Write __init__.py to make it a package
-        File.write(File.join(controller_views_dir, "__init__.py"), "")
+        # views/ is a package
 
         filename = "#{controller_name}.py"
         File.write(File.join(views_dir, filename), io.to_s)

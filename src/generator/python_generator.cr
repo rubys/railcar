@@ -26,11 +26,8 @@ module Railcar
       %w[models controllers views static].each do |dir|
         Dir.mkdir_p(File.join(output_dir, dir)) unless Dir.exists?(File.join(output_dir, dir))
       end
-      # Create view subdirectories for each controller
-      app.controllers.each do |info|
-        controller_name = Inflector.underscore(info.name).chomp("_controller")
-        Dir.mkdir_p(File.join(output_dir, "views", controller_name))
-      end
+      # views/ is a package
+
 
       puts "Generating Python app from #{rails_dir}..."
 
@@ -316,13 +313,15 @@ module Railcar
 
       # link_to
       io << "def link_to(text, url, **kwargs):\n"
-      io << "    attrs = ''.join(f' {k.replace(\"_\", \"-\")}=\"{v}\"' for k, v in kwargs.items())\n"
+      io << "    if 'class_' in kwargs:\n"
+      io << "        kwargs['class'] = kwargs.pop('class_')\n"
+      io << "    attrs = ''.join(f' {k}=\"{v}\"' for k, v in kwargs.items())\n"
       io << "    return f'<a href=\"{url}\"{attrs}>{text}</a>'\n\n"
 
       # button_to
       io << "def button_to(text, url, **kwargs):\n"
       io << "    method = kwargs.pop('method', 'post')\n"
-      io << "    btn_class = kwargs.pop('class', '')\n"
+      io << "    btn_class = kwargs.pop('class_', kwargs.pop('class', ''))\n"
       io << "    confirm = kwargs.pop('data_turbo_confirm', '')\n"
       io << "    form_class = kwargs.pop('form_class', '')\n"
       io << "    form_attrs = f' class=\"{form_class}\"' if form_class else ''\n"
@@ -360,6 +359,31 @@ module Railcar
       io << "def turbo_stream_from(channel):\n"
       io << "    signed = base64.b64encode(json.dumps(channel).encode()).decode()\n"
       io << "    return f'<turbo-cable-stream-source channel=\"Turbo::StreamsChannel\" signed-stream-name=\"{signed}\"></turbo-cable-stream-source>'\n\n"
+
+      # form_with — generates form HTML (simplified)
+      io << "def form_with(**kwargs):\n"
+      io << "    model = kwargs.get('model')\n"
+      io << "    css = kwargs.get('class_', kwargs.get('class', ''))\n"
+      io << "    cls_attr = f' class=\"{css}\"' if css else ''\n"
+      io << "    if isinstance(model, list) and len(model) == 2:\n"
+      io << "        parent, child = model\n"
+      io << "        parent_name = type(parent).__name__.lower()\n"
+      io << "        child_name = type(child).__name__.lower()\n"
+      io << "        from helpers import globals as _g\n"
+      io << "        path_func = f'{parent_name}_{child_name}s_path'\n"
+      io << "        import sys\n"
+      io << "        mod = sys.modules[__name__]\n"
+      io << "        action = getattr(mod, path_func)(parent)\n"
+      io << "        return f'<form action=\"{action}\" method=\"post\"{cls_attr}>'\n"
+      io << "    elif model is not None:\n"
+      io << "        name = type(model).__name__.lower()\n"
+      io << "        plural = name + 's'\n"
+      io << "        if model.id:\n"
+      io << "            return (f'<form action=\"/{plural}/{model.id}\" method=\"post\"{cls_attr}>'\n"
+      io << "                    f'<input type=\"hidden\" name=\"_method\" value=\"patch\">')\n"
+      io << "        else:\n"
+      io << "            return f'<form action=\"/{plural}\" method=\"post\"{cls_attr}>'\n"
+      io << "    return f'<form method=\"post\"{cls_attr}>'\n\n"
 
       # Path helpers
       app.models.each_key do |name|
@@ -572,7 +596,10 @@ module Railcar
         "dependencies = [\"aiohttp\"]\n" \
         "\n" \
         "[project.optional-dependencies]\n" \
-        "test = [\"pytest\", \"pytest-aiohttp\"]\n")
+        "test = [\"pytest\", \"pytest-aiohttp\", \"pytest-asyncio\"]\n" \
+        "\n" \
+        "[tool.pytest.ini_options]\n" \
+        "asyncio_mode = \"auto\"\n")
       puts "  pyproject.toml"
     end
 

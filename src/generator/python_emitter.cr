@@ -347,7 +347,9 @@ module Railcar
       if named
         named.each_with_index do |na, i|
           io << ", " if i > 0 || !args.empty?
-          io << na.name << "="
+          # Rename Python reserved words used as keyword args
+          kwarg_name = na.name == "class" ? "class_" : na.name
+          io << kwarg_name << "="
           emit(na.value, io)
         end
       end

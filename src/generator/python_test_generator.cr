@@ -177,7 +177,8 @@ module Railcar
       io << "from tests.conftest import *\n\n"
 
       io << "# Import app for test client\n"
-      io << "import app as app_module\n\n"
+      io << "import app as app_module\n"
+      io << "from aiohttp.test_utils import TestClient, TestServer\n\n"
 
       each_test_block(klass) do |call|
         test_name = call.arg_nodes[0]?.is_a?(Prism::StringNode) ? call.arg_nodes[0].as(Prism::StringNode).value : "unnamed"
@@ -257,18 +258,18 @@ module Railcar
         url = py_expr(call.arg_nodes[0])
         params = extract_form_params_py(call)
         if params
-          io << indent << "response = await client.post(#{url}, data=#{params})\n"
+          io << indent << "response = await client.post(#{url}, data=#{params}, allow_redirects=False)\n"
         else
-          io << indent << "response = await client.post(#{url})\n"
+          io << indent << "response = await client.post(#{url}, allow_redirects=False)\n"
         end
       when "patch"
         url = py_expr(call.arg_nodes[0])
         params = extract_form_params_py(call)
         base = params ? "{'_method': 'patch', **#{params}}" : "{'_method': 'patch'}"
-        io << indent << "response = await client.post(#{url}, data=#{base})\n"
+        io << indent << "response = await client.post(#{url}, data=#{base}, allow_redirects=False)\n"
       when "delete"
         url = py_expr(call.arg_nodes[0])
-        io << indent << "response = await client.post(#{url}, data={'_method': 'delete'})\n"
+        io << indent << "response = await client.post(#{url}, data={'_method': 'delete'}, allow_redirects=False)\n"
       when "assert_response"
         status = call.arg_nodes[0]?
         code = case status
@@ -293,13 +294,19 @@ module Railcar
           io << indent << "body = await response.text()\n"
           io << indent << "assert #{expected.inspect} in body\n"
         else
-          check = if selector.starts_with?("#")
-                    "id=\\\"#{selector.lchop("#")}\\\""
-                  else
-                    "<#{selector}"
-                  end
-          io << indent << "body = await response.text()\n"
-          io << indent << "assert #{check.inspect} in body\n"
+          if selector.starts_with?("#")
+            id_val = selector.lchop("#").split(" ").first.split(".").first
+            io << indent << "body = await response.text()\n"
+            io << indent << "assert 'id=\"#{id_val}\"' in body\n"
+          elsif selector.includes?(" ") || selector.includes?(".")
+            # Complex selector — check for first element
+            tag = selector.split(/[\s#.]/).reject(&.empty?).first
+            io << indent << "body = await response.text()\n"
+            io << indent << "assert '<#{tag}' in body\n"
+          else
+            io << indent << "body = await response.text()\n"
+            io << indent << "assert '<#{selector}' in body\n"
+          end
         end
         # Handle nested assert_select blocks
         if block = call.block
