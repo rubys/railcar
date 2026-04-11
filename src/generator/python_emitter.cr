@@ -42,6 +42,12 @@ module Railcar
       io.to_s
     end
 
+    def emit_body(node : Crystal::ASTNode) : String
+      io = IO::Memory.new
+      emit_body(node, io)
+      io.to_s
+    end
+
     def emit(node : Crystal::ASTNode, io : IO) : Nil
       case node
       when Crystal::Expressions
@@ -111,7 +117,9 @@ module Railcar
     end
 
     # Emit a node as a block body (handles both Expressions and single nodes)
-    private def emit_body(node : Crystal::ASTNode, io : IO)
+    # Emit a node as a block body (handles both Expressions and single nodes)
+    # Public so controller generator can use it for action bodies.
+    def emit_body(node : Crystal::ASTNode, io : IO)
       case node
       when Crystal::Nop
         write_indent(io)

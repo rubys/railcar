@@ -8,7 +8,7 @@
 require "./app_model"
 require "./schema_extractor"
 require "./python_seed_extractor"
-require "./python_erb_converter"
+require "./python_controller_generator"
 require "./inflector"
 
 module Railcar
@@ -34,6 +34,7 @@ module Railcar
 
       generate_models(output_dir)
       generate_helpers(output_dir)
+      PythonControllerGenerator.new(app, rails_dir).generate(output_dir)
       generate_app(output_dir)
       generate_pyproject(output_dir)
       generate_tailwind(output_dir)
