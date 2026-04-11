@@ -20,16 +20,22 @@ module Railcar
     end
 
     def generate(output_dir : String)
-      Dir.mkdir_p(output_dir) unless Dir.exists?(output_dir)
-      Dir.mkdir_p(File.join(output_dir, "templates")) unless Dir.exists?(File.join(output_dir, "templates"))
-      Dir.mkdir_p(File.join(output_dir, "static")) unless Dir.exists?(File.join(output_dir, "static"))
+      # Create directory tree
+      %w[models controllers views static].each do |dir|
+        Dir.mkdir_p(File.join(output_dir, dir)) unless Dir.exists?(File.join(output_dir, dir))
+      end
+      # Create view subdirectories for each controller
+      app.controllers.each do |info|
+        controller_name = Inflector.underscore(info.name).chomp("_controller")
+        Dir.mkdir_p(File.join(output_dir, "views", controller_name))
+      end
 
       puts "Generating Python app from #{rails_dir}..."
 
       generate_models(output_dir)
+      generate_helpers(output_dir)
       generate_app(output_dir)
       generate_pyproject(output_dir)
-      convert_templates(output_dir)
       generate_tailwind(output_dir)
       copy_turbo_js(output_dir)
 
@@ -41,43 +47,54 @@ module Railcar
       schema_map = {} of String => TableSchema
       app.schemas.each { |s| schema_map[s.name] = s }
 
-      io = IO::Memory.new
-      io << "import sqlite3\n"
-      io << "import os\n"
-      io << "from datetime import datetime\n\n"
-      io << "DB_PATH = os.path.join(os.path.dirname(__file__), 'blog.db')\n\n"
+      models_dir = File.join(output_dir, "models")
 
-      io << "def get_db():\n"
-      io << "    conn = sqlite3.connect(DB_PATH)\n"
-      io << "    conn.row_factory = sqlite3.Row\n"
-      io << "    conn.execute('PRAGMA foreign_keys = ON')\n"
-      io << "    return conn\n\n"
+      # __init__.py — db setup + imports
+      init_io = IO::Memory.new
+      init_io << "import sqlite3\n"
+      init_io << "import os\n"
+      init_io << "from datetime import datetime\n\n"
+      init_io << "DB_PATH = os.path.join(os.path.dirname(__file__), '..', '#{File.basename(output_dir)}.db')\n\n"
 
-      io << "def init_db():\n"
-      io << "    db = get_db()\n"
+      init_io << "def get_db():\n"
+      init_io << "    conn = sqlite3.connect(DB_PATH)\n"
+      init_io << "    conn.row_factory = sqlite3.Row\n"
+      init_io << "    conn.execute('PRAGMA foreign_keys = ON')\n"
+      init_io << "    return conn\n\n"
 
-      # DDL from schemas
+      init_io << "def init_db():\n"
+      init_io << "    db = get_db()\n"
+
       app.schemas.each do |schema|
-        io << "    db.execute('''\n"
-        io << "        CREATE TABLE IF NOT EXISTS #{schema.name} (\n"
-        io << "            id INTEGER PRIMARY KEY AUTOINCREMENT"
+        init_io << "    db.execute('''\n"
+        init_io << "        CREATE TABLE IF NOT EXISTS #{schema.name} (\n"
+        init_io << "            id INTEGER PRIMARY KEY AUTOINCREMENT"
         schema.columns.each do |col|
           next if col.name == "id"
           sql_type = python_sql_type(col.type)
-          io << ",\n            #{col.name} #{sql_type}"
+          init_io << ",\n            #{col.name} #{sql_type}"
           if col.type == "references"
             ref_table = Inflector.pluralize(col.name.chomp("_id"))
-            io << " REFERENCES #{ref_table}(id)"
+            init_io << " REFERENCES #{ref_table}(id)"
           end
         end
-        io << "\n        )\n"
-        io << "    ''')\n"
+        init_io << "\n        )\n"
+        init_io << "    ''')\n"
       end
 
-      io << "    db.commit()\n"
-      io << "    db.close()\n\n"
+      init_io << "    db.commit()\n"
+      init_io << "    db.close()\n\n"
 
-      # Model classes
+      # Import all model classes
+      app.models.each_key do |name|
+        filename = Inflector.underscore(name)
+        init_io << "from .#{filename} import #{name}\n"
+      end
+
+      File.write(File.join(models_dir, "__init__.py"), init_io.to_s)
+      puts "  models/__init__.py"
+
+      # Individual model files
       app.models.each do |name, model|
         table_name = Inflector.pluralize(Inflector.underscore(name))
         schema = schema_map[table_name]?
@@ -85,6 +102,10 @@ module Railcar
 
         columns = schema.columns.reject { |c| c.name == "id" }
         column_names = columns.map(&.name)
+
+        io = IO::Memory.new
+        io << "from . import get_db\n"
+        io << "from datetime import datetime\n\n"
 
         io << "\nclass #{name}:\n"
         io << "    TABLE = '#{table_name}'\n\n"
@@ -98,7 +119,7 @@ module Railcar
         end
         io << "\n"
 
-        # from_row class method
+        # from_row
         io << "    @classmethod\n"
         io << "    def from_row(cls, row):\n"
         io << "        if row is None:\n"
@@ -132,7 +153,7 @@ module Railcar
         io << "        db.close()\n"
         io << "        return [cls.from_row(r) for r in rows]\n\n"
 
-        # save (insert or update)
+        # save
         io << "    def save(self):\n"
         io << "        db = get_db()\n"
         io << "        now = datetime.now().isoformat()\n"
@@ -165,16 +186,16 @@ module Railcar
         io << "        db.commit()\n"
         io << "        db.close()\n\n"
 
-        # Association methods
+        # Associations
         model.associations.each do |assoc|
           case assoc.kind
           when :has_many
             target_class = Inflector.classify(Inflector.singularize(assoc.name))
             fk = Inflector.underscore(name) + "_id"
             io << "    def #{assoc.name}(self):\n"
+            io << "        from .#{Inflector.underscore(target_class)} import #{target_class}\n"
             io << "        return #{target_class}.where(#{fk}=self.id)\n\n"
 
-            # dependent: :destroy
             if assoc.options["dependent"]? == "destroy"
               io << "    def destroy_#{assoc.name}(self):\n"
               io << "        for item in self.#{assoc.name}():\n"
@@ -184,37 +205,28 @@ module Railcar
             target_class = Inflector.classify(assoc.name)
             fk = assoc.name + "_id"
             io << "    def #{assoc.name}(self):\n"
+            io << "        from .#{Inflector.underscore(target_class)} import #{target_class}\n"
             io << "        return #{target_class}.find(self.#{fk})\n\n"
           end
         end
-      end
 
-      File.write(File.join(output_dir, "models.py"), io.to_s)
-      puts "  models.py"
+        filename = Inflector.underscore(name)
+        File.write(File.join(models_dir, "#{filename}.py"), io.to_s)
+        puts "  models/#{filename}.py"
+      end
     end
 
-    private def generate_app(output_dir : String)
+    private def generate_helpers(output_dir : String)
       io = IO::Memory.new
-      io << "from aiohttp import web\n"
-      io << "from urllib.parse import parse_qs\n"
-      io << "import aiohttp\n"
-      io << "import jinja2\n"
-      io << "import os\n"
-      io << "import json\n"
       io << "import base64\n"
-      io << "import asyncio\n"
-      io << "import time\n"
-      io << "from models import *\n\n"
+      io << "import json\n\n"
 
-      # Jinja2 setup
-      io << "TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), 'templates')\n"
-      io << "env = jinja2.Environment(loader=jinja2.FileSystemLoader(TEMPLATE_DIR))\n\n"
-
-      # Template helper functions
+      # link_to
       io << "def link_to(text, url, **kwargs):\n"
       io << "    attrs = ''.join(f' {k.replace(\"_\", \"-\")}=\"{v}\"' for k, v in kwargs.items())\n"
       io << "    return f'<a href=\"{url}\"{attrs}>{text}</a>'\n\n"
 
+      # button_to
       io << "def button_to(text, url, **kwargs):\n"
       io << "    method = kwargs.pop('method', 'post')\n"
       io << "    btn_class = kwargs.pop('class', '')\n"
@@ -230,53 +242,80 @@ module Railcar
       io << "        f'</form>'\n"
       io << "    )\n\n"
 
+      # dom_id
       io << "def dom_id(obj, prefix=None):\n"
       io << "    name = type(obj).__name__.lower()\n"
       io << "    if prefix:\n"
       io << "        return f'{prefix}_{name}_{obj.id}'\n"
       io << "    return f'{name}_{obj.id}'\n\n"
 
+      # pluralize
       io << "def pluralize(count, singular, plural=None):\n"
       io << "    if plural is None:\n"
       io << "        plural = singular + 's'\n"
       io << "    return f'{count} {singular if count == 1 else plural}'\n\n"
 
+      # truncate
+      io << "def truncate(text, length=30, omission='...'):\n"
+      io << "    if text is None:\n"
+      io << "        return ''\n"
+      io << "    if len(text) <= length:\n"
+      io << "        return text\n"
+      io << "    return text[:length - len(omission)] + omission\n\n"
+
+      # turbo_stream_from
       io << "def turbo_stream_from(channel):\n"
       io << "    signed = base64.b64encode(json.dumps(channel).encode()).decode()\n"
       io << "    return f'<turbo-cable-stream-source channel=\"Turbo::StreamsChannel\" signed-stream-name=\"{signed}\"></turbo-cable-stream-source>'\n\n"
 
       # Path helpers
-      io << "def article_path(article):\n"
-      io << "    return f'/articles/{article.id}'\n\n"
+      app.models.each_key do |name|
+        singular = Inflector.underscore(name)
+        plural = Inflector.pluralize(singular)
+        io << "def #{singular}_path(#{singular}):\n"
+        io << "    return f'/#{plural}/{#{singular}.id}'\n\n"
+        io << "def edit_#{singular}_path(#{singular}):\n"
+        io << "    return f'/#{plural}/{#{singular}.id}/edit'\n\n"
+        io << "def #{plural}_path():\n"
+        io << "    return '/#{plural}'\n\n"
+        io << "def new_#{singular}_path():\n"
+        io << "    return '/#{plural}/new'\n\n"
+      end
 
-      io << "def edit_article_path(article):\n"
-      io << "    return f'/articles/{article.id}/edit'\n\n"
+      # Nested resource path helpers
+      app.models.each do |name, model|
+        model.associations.each do |assoc|
+          next unless assoc.kind == :has_many
+          parent_singular = Inflector.underscore(name)
+          parent_plural = Inflector.pluralize(parent_singular)
+          child_name = assoc.name
+          child_singular = Inflector.singularize(child_name)
 
-      io << "def articles_path():\n"
-      io << "    return '/articles'\n\n"
+          io << "def #{parent_singular}_#{child_name}_path(#{parent_singular}):\n"
+          io << "    return f'/#{parent_plural}/{#{parent_singular}.id}/#{child_name}'\n\n"
+          io << "def #{parent_singular}_#{child_singular}_path(#{parent_singular}_id, #{child_singular}):\n"
+          io << "    return f'/#{parent_plural}/{#{parent_singular}_id}/#{child_name}/{#{child_singular}.id}'\n\n"
+        end
+      end
 
-      io << "def new_article_path():\n"
-      io << "    return '/articles/new'\n\n"
+      File.write(File.join(output_dir, "helpers.py"), io.to_s)
+      puts "  helpers.py"
+    end
 
-      io << "def article_comments_path(article):\n"
-      io << "    return f'/articles/{article.id}/comments'\n\n"
+    private def generate_app(output_dir : String)
+      io = IO::Memory.new
+      io << "from aiohttp import web\n"
+      io << "from urllib.parse import parse_qs\n"
+      io << "import aiohttp\n"
+      io << "import os\n"
+      io << "import json\n"
+      io << "import base64\n"
+      io << "import asyncio\n"
+      io << "import time\n"
+      io << "from models import *\n"
+      io << "from helpers import *\n\n"
 
-      io << "def article_comment_path(article_id, comment):\n"
-      io << "    return f'/articles/{article_id}/comments/{comment.id}'\n\n"
-
-      # Register Jinja2 globals
-      io << "env.globals.update(\n"
-      io << "    link_to=link_to, button_to=button_to, dom_id=dom_id,\n"
-      io << "    pluralize=pluralize, turbo_stream_from=turbo_stream_from,\n"
-      io << "    article_path=article_path, edit_article_path=edit_article_path,\n"
-      io << "    articles_path=articles_path, new_article_path=new_article_path,\n"
-      io << "    article_comments_path=article_comments_path, article_comment_path=article_comment_path,\n"
-      io << ")\n\n"
-
-      io << "def render(template_name, **context):\n"
-      io << "    return env.get_template(template_name).render(**context)\n\n"
-
-      # Parse form data
+      # Form parsing helpers
       io << "def parse_form(body_bytes):\n"
       io << "    return parse_qs(body_bytes.decode('utf-8'))\n\n"
 
@@ -306,36 +345,7 @@ module Railcar
 
       io << "cable = CableServer()\n\n"
 
-      # Broadcast helpers
-      io << "async def broadcast_article_append(article):\n"
-      io << "    html = render('articles/_article.html', article=article)\n"
-      io << "    stream = f'<turbo-stream action=\"prepend\" target=\"articles\"><template>{html}</template></turbo-stream>'\n"
-      io << "    await cable.broadcast('articles', stream)\n\n"
-
-      io << "async def broadcast_article_replace(article):\n"
-      io << "    html = render('articles/_article.html', article=article)\n"
-      io << "    stream = f'<turbo-stream action=\"replace\" target=\"article_{article.id}\"><template>{html}</template></turbo-stream>'\n"
-      io << "    await cable.broadcast('articles', stream)\n\n"
-
-      io << "async def broadcast_article_remove(article_id):\n"
-      io << "    stream = f'<turbo-stream action=\"remove\" target=\"article_{article_id}\"></turbo-stream>'\n"
-      io << "    await cable.broadcast('articles', stream)\n\n"
-
-      io << "async def broadcast_comment_append(comment, article_id):\n"
-      io << "    html = render('comments/_comment.html', comment=comment)\n"
-      io << "    stream = f'<turbo-stream action=\"append\" target=\"comments\"><template>{html}</template></turbo-stream>'\n"
-      io << "    await cable.broadcast(f'article_{article_id}_comments', stream)\n"
-      io << "    article = Article.find(article_id)\n"
-      io << "    await broadcast_article_replace(article)\n\n"
-
-      io << "async def broadcast_comment_remove(comment_id, article_id):\n"
-      io << "    stream = f'<turbo-stream action=\"remove\" target=\"comment_{comment_id}\"></turbo-stream>'\n"
-      io << "    await cable.broadcast(f'article_{article_id}_comments', stream)\n"
-      io << "    article = Article.find(article_id)\n"
-      io << "    await broadcast_article_replace(article)\n\n"
-
-      # WebSocket handler for /cable
-      io << "# ActionCable WebSocket handler\n"
+      # ActionCable WebSocket handler
       io << "async def cable_handler(request):\n"
       io << "    ws = web.WebSocketResponse(protocols=['actioncable-v1-json'])\n"
       io << "    await ws.prepare(request)\n"
@@ -365,71 +375,28 @@ module Railcar
       io << "        cable.unsubscribe_all(ws)\n"
       io << "    return ws\n\n"
 
-      # Route handlers
-      io << "# Route handlers\n"
-      io << "async def articles_index(request):\n"
-      io << "    articles = Article.all(order_by='created_at DESC')\n"
-      io << "    return web.Response(text=render('articles/index.html', articles=articles), content_type='text/html')\n\n"
+      # Layout helper
+      io << "LAYOUT_HEAD = '''<!DOCTYPE html>\n"
+      io << "<html>\n"
+      io << "<head>\n"
+      io << "  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+      io << "  <meta name=\"action-cable-url\" content=\"/cable\">\n"
+      io << "  <link rel=\"stylesheet\" href=\"/static/app.css\">\n"
+      io << "  <script type=\"module\" src=\"/static/turbo.min.js\"></script>\n"
+      io << "</head>\n"
+      io << "<body>\n"
+      io << "  <main class=\"container mx-auto mt-28 px-5 flex flex-col\">'''\n\n"
 
-      io << "async def articles_show(request):\n"
-      io << "    id = int(request.match_info['id'])\n"
-      io << "    article = Article.find(id)\n"
-      io << "    return web.Response(text=render('articles/show.html', article=article), content_type='text/html')\n\n"
+      io << "LAYOUT_TAIL = '''  </main>\n"
+      io << "</body>\n"
+      io << "</html>'''\n\n"
 
-      io << "async def articles_new(request):\n"
-      io << "    article = Article()\n"
-      io << "    return web.Response(text=render('articles/new.html', article=article), content_type='text/html')\n\n"
+      io << "def layout(content, title='Blog'):\n"
+      io << "    head = LAYOUT_HEAD.replace('<head>', f'<head>\\n  <title>{title}</title>', 1)\n"
+      io << "    return head + content + LAYOUT_TAIL\n\n"
 
-      io << "async def articles_create(request):\n"
-      io << "    data = parse_form(await request.read())\n"
-      io << "    article = Article(title=form_value(data, 'article[title]'), body=form_value(data, 'article[body]'))\n"
-      io << "    if article.save():\n"
-      io << "        await broadcast_article_append(article)\n"
-      io << "        raise web.HTTPFound(f'/articles/{article.id}')\n"
-      io << "    return web.Response(text=render('articles/new.html', article=article), content_type='text/html', status=422)\n\n"
-
-      io << "async def articles_edit(request):\n"
-      io << "    id = int(request.match_info['id'])\n"
-      io << "    article = Article.find(id)\n"
-      io << "    return web.Response(text=render('articles/edit.html', article=article), content_type='text/html')\n\n"
-
-      io << "async def articles_update_or_destroy(request):\n"
-      io << "    id = int(request.match_info['id'])\n"
-      io << "    data = parse_form(await request.read())\n"
-      io << "    method = form_value(data, '_method').upper()\n"
-      io << "    if method == 'DELETE':\n"
-      io << "        article = Article.find(id)\n"
-      io << "        article.destroy_comments()\n"
-      io << "        article.destroy()\n"
-      io << "        await broadcast_article_remove(id)\n"
-      io << "        raise web.HTTPSeeOther('/articles')\n"
-      io << "    article = Article.find(id)\n"
-      io << "    article.title = form_value(data, 'article[title]')\n"
-      io << "    article.body = form_value(data, 'article[body]')\n"
-      io << "    if article.save():\n"
-      io << "        await broadcast_article_replace(article)\n"
-      io << "        raise web.HTTPSeeOther(f'/articles/{article.id}')\n"
-      io << "    return web.Response(text=render('articles/edit.html', article=article), content_type='text/html', status=422)\n\n"
-
-      io << "async def comments_create(request):\n"
-      io << "    article_id = int(request.match_info['id'])\n"
-      io << "    data = parse_form(await request.read())\n"
-      io << "    article = Article.find(article_id)\n"
-      io << "    comment = Comment(article_id=article.id, commenter=form_value(data, 'comment[commenter]'), body=form_value(data, 'comment[body]'))\n"
-      io << "    comment.save()\n"
-      io << "    await broadcast_comment_append(comment, article_id)\n"
-      io << "    raise web.HTTPFound(f'/articles/{article_id}')\n\n"
-
-      io << "async def comments_destroy(request):\n"
-      io << "    article_id = int(request.match_info['article_id'])\n"
-      io << "    id = int(request.match_info['id'])\n"
-      io << "    data = parse_form(await request.read())\n"
-      io << "    method = form_value(data, '_method').upper()\n"
-      io << "    if method == 'DELETE':\n"
-      io << "        comment = Comment.find(id)\n"
-      io << "        comment.destroy()\n"
-      io << "        await broadcast_comment_remove(id, article_id)\n"
-      io << "    raise web.HTTPSeeOther(f'/articles/{article_id}')\n\n"
+      # TODO: Import transpiled controllers here
+      # For now, keep handlers inline until controller transpilation is ready
 
       # Logging middleware
       io << "@web.middleware\n"
@@ -452,15 +419,22 @@ module Railcar
       io << "    seed_db()\n" if has_seeds
       io << "    app = web.Application(middlewares=[log_middleware])\n"
       io << "    app.router.add_get('/cable', cable_handler)\n"
-      io << "    app.router.add_get('/articles/new', articles_new)\n"
-      io << "    app.router.add_get('/articles/{id}/edit', articles_edit)\n"
-      io << "    app.router.add_get('/articles/{id}', articles_show)\n"
-      io << "    app.router.add_get('/', articles_index)\n"
-      io << "    app.router.add_get('/articles', articles_index)\n"
-      io << "    app.router.add_post('/articles', articles_create)\n"
-      io << "    app.router.add_post('/articles/{id}', articles_update_or_destroy)\n"
-      io << "    app.router.add_post('/articles/{id}/comments', comments_create)\n"
-      io << "    app.router.add_post('/articles/{article_id}/comments/{id}', comments_destroy)\n"
+
+      # Generate routes from route info
+      app.routes.routes.each do |route|
+        controller = route.controller
+        action = route.action
+        method = route.method.downcase
+        pattern = route.path.gsub(/:(\w+)/, "{\\1}")
+
+        case method
+        when "get"
+          io << "    # app.router.add_get('#{pattern}', #{controller}_#{action})\n"
+        when "post", "patch", "put", "delete"
+          io << "    # app.router.add_post('#{pattern}', #{controller}_#{action})\n"
+        end
+      end
+
       io << "    app.router.add_static('/static', os.path.join(os.path.dirname(__file__), 'static'))\n"
       io << "    print('Blog running at http://localhost:3000')\n"
       io << "    web.run_app(app, host='0.0.0.0', port=3000, print=lambda _: None)\n"
@@ -476,77 +450,8 @@ module Railcar
         "name = \"#{project_name}\"\n" \
         "version = \"0.1.0\"\n" \
         "requires-python = \">=3.10\"\n" \
-        "dependencies = [\"aiohttp\", \"jinja2\"]\n")
+        "dependencies = [\"aiohttp\"]\n")
       puts "  pyproject.toml"
-    end
-
-    private def convert_templates(output_dir : String)
-      templates_dir = File.join(output_dir, "templates")
-      views_dir = File.join(rails_dir, "app/views")
-
-      # Generate layout (not from ERB — too Rails-specific)
-      File.write(File.join(templates_dir, "layout.html"), <<-HTML)
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>{{ title|default("Blog") }}</title>
-        <meta name="viewport" content="width=device-width,initial-scale=1">
-        <meta name="action-cable-url" content="/cable">
-        <link rel="stylesheet" href="/static/app.css">
-        <script type="module" src="/static/turbo.min.js"></script>
-      </head>
-      <body>
-        <main class="container mx-auto mt-28 px-5 flex flex-col">
-          {% block content %}{% endblock %}
-        </main>
-      </body>
-      </html>
-      HTML
-      puts "  templates/layout.html"
-
-      # Convert ERB templates
-      converter = PythonErbConverter.new("articles")
-      convert_view(converter, views_dir, templates_dir, "articles", "index")
-      convert_view(converter, views_dir, templates_dir, "articles", "show")
-      convert_view(converter, views_dir, templates_dir, "articles", "new")
-      convert_view(converter, views_dir, templates_dir, "articles", "edit")
-      convert_partial(converter, views_dir, templates_dir, "articles", "_article")
-      convert_partial(converter, views_dir, templates_dir, "articles", "_form")
-
-      comment_converter = PythonErbConverter.new("comments")
-      convert_partial(comment_converter, views_dir, templates_dir, "comments", "_comment")
-    end
-
-    private def convert_view(converter : PythonErbConverter, views_dir : String,
-                              templates_dir : String, controller : String, view : String)
-      erb_path = File.join(views_dir, controller, "#{view}.html.erb")
-      return unless File.exists?(erb_path)
-
-      out_dir = File.join(templates_dir, controller)
-      Dir.mkdir_p(out_dir) unless Dir.exists?(out_dir)
-
-      source = File.read(erb_path)
-      jinja = "{% extends \"layout.html\" %}\n{% block content %}\n"
-      jinja += converter.convert(source)
-      jinja += "\n{% endblock %}\n"
-
-      File.write(File.join(out_dir, "#{view}.html"), jinja)
-      puts "  templates/#{controller}/#{view}.html"
-    end
-
-    private def convert_partial(converter : PythonErbConverter, views_dir : String,
-                                 templates_dir : String, controller : String, partial : String)
-      erb_path = File.join(views_dir, controller, "#{partial}.html.erb")
-      return unless File.exists?(erb_path)
-
-      out_dir = File.join(templates_dir, controller)
-      Dir.mkdir_p(out_dir) unless Dir.exists?(out_dir)
-
-      source = File.read(erb_path)
-      jinja = converter.convert(source, is_partial: true)
-
-      File.write(File.join(out_dir, "#{partial}.html"), jinja)
-      puts "  templates/#{controller}/#{partial}.html"
     end
 
     private def copy_turbo_js(output_dir : String)
