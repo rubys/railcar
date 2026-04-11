@@ -160,6 +160,16 @@ module Railcar
         io << "        db.close()\n"
         io << "        return [cls.from_row(r) for r in rows]\n\n"
 
+        # reload (re-fetch from database)
+        io << "    def reload(self):\n"
+        io << "        db = get_db()\n"
+        io << "        row = db.execute(f'SELECT * FROM {self.TABLE} WHERE id = ?', (self.id,)).fetchone()\n"
+        io << "        db.close()\n"
+        io << "        if row:\n"
+        io << "            for key in dict(row):\n"
+        io << "                setattr(self, key, dict(row)[key])\n"
+        io << "        return self\n\n"
+
         # _create (shorthand for new + save, returns the instance)
         io << "    @classmethod\n"
         io << "    def _create(cls, **kwargs):\n"
