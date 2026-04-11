@@ -225,6 +225,20 @@ module Railcar
         return
       end
 
+      # _buf.append= expr → _buf += str(expr)
+      if name == "append=" && args.size == 1 && obj.is_a?(Crystal::Var) && obj.name == "_buf"
+        io << "_buf += str("
+        emit(args[0], io)
+        io << ")"
+        return
+      end
+
+      # _buf.to_s → return _buf (at statement level, handled by caller)
+      if name == "to_s" && args.empty? && obj.is_a?(Crystal::Var) && obj.name == "_buf"
+        io << "return _buf"
+        return
+      end
+
       # Property setter: obj.name = value
       if name.ends_with?('=') && args.size == 1 && obj
         emit(obj, io)
