@@ -119,7 +119,12 @@ module Railcar
           default = col.type == "references" ? "None" : python_default(col.type)
           io << "        self.#{col.name} = kwargs.get('#{col.name}', #{default})\n"
         end
+        io << "        self._errors = []\n"
         io << "\n"
+
+        # errors
+        io << "    def errors(self):\n"
+        io << "        return self._errors\n\n"
 
         # from_row
         io << "    @classmethod\n"
@@ -360,7 +365,28 @@ module Railcar
       io << "    signed = base64.b64encode(json.dumps(channel).encode()).decode()\n"
       io << "    return f'<turbo-cable-stream-source channel=\"Turbo::StreamsChannel\" signed-stream-name=\"{signed}\"></turbo-cable-stream-source>'\n\n"
 
-      # form_with — generates form HTML (simplified)
+      # form_with_open_tag — generates opening <form> tag for single model forms
+      io << "def form_with_open_tag(**kwargs):\n"
+      io << "    model = kwargs.get('model')\n"
+      io << "    css = kwargs.get('class', '')\n"
+      io << "    cls_attr = f' class=\"{css}\"' if css else ''\n"
+      io << "    name = type(model).__name__.lower()\n"
+      io << "    plural = name + 's'\n"
+      io << "    if model.id:\n"
+      io << "        return (f'<form action=\"/{plural}/{model.id}\" method=\"post\"{cls_attr}>'\n"
+      io << "                f'<input type=\"hidden\" name=\"_method\" value=\"patch\">')\n"
+      io << "    return f'<form action=\"/{plural}\" method=\"post\"{cls_attr}>'\n\n"
+
+      # form_submit_tag — generates submit button with dynamic text
+      io << "def form_submit_tag(**kwargs):\n"
+      io << "    model = kwargs.get('model')\n"
+      io << "    css = kwargs.get('class', '')\n"
+      io << "    cls_attr = f' class=\"{css}\"' if css else ''\n"
+      io << "    name = type(model).__name__\n"
+      io << "    action = 'Update' if model.id else 'Create'\n"
+      io << "    return f'<input type=\"submit\" value=\"{action} {name}\"{cls_attr}>'\n\n"
+
+      # form_with — generates form HTML (simplified, for backward compat)
       io << "def form_with(**kwargs):\n"
       io << "    model = kwargs.get('model')\n"
       io << "    css = kwargs.get('class_', kwargs.get('class', ''))\n"

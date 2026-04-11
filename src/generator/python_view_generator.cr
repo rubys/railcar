@@ -18,6 +18,7 @@ require "../filters/python_constructor"
 require "../filters/python_view"
 require "../filters/render_to_partial"
 require "../filters/rails_helpers"
+require "../filters/form_to_html"
 require "../filters/link_to_path_helper"
 require "../filters/button_to_path_helper"
 
@@ -149,6 +150,7 @@ module Railcar
         LinkToPathHelper.new,
         ButtonToPathHelper.new,
         RenderToPartial.new,
+        FormToHTML.new,
         PythonConstructor.new,
         PythonView.new(locals),
       ] of Crystal::Transformer
