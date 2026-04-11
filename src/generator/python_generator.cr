@@ -378,7 +378,7 @@ module Railcar
       # form_with_open_tag — generates opening <form> tag for single model forms
       io << "def form_with_open_tag(**kwargs):\n"
       io << "    model = kwargs.get('model')\n"
-      io << "    css = kwargs.get('class', '')\n"
+      io << "    css = kwargs.get('class_', kwargs.get('class', ''))\n"
       io << "    cls_attr = f' class=\"{css}\"' if css else ''\n"
       io << "    name = type(model).__name__.lower()\n"
       io << "    plural = name + 's'\n"
@@ -390,7 +390,7 @@ module Railcar
       # form_submit_tag — generates submit button with dynamic text
       io << "def form_submit_tag(**kwargs):\n"
       io << "    model = kwargs.get('model')\n"
-      io << "    css = kwargs.get('class', '')\n"
+      io << "    css = kwargs.get('class_', kwargs.get('class', ''))\n"
       io << "    cls_attr = f' class=\"{css}\"' if css else ''\n"
       io << "    name = type(model).__name__\n"
       io << "    action = 'Update' if model.id else 'Create'\n"
