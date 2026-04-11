@@ -21,7 +21,7 @@ lib/llvm: shard.yml
 	shards install
 
 $(BUILD_DIR)/railcar: $(LIB_DIR)/libprism.a lib/llvm $(shell find src -name '*.cr' 2>/dev/null)
-	CRYSTAL_CONFIG_PATH="lib:$(CRYSTAL_STDLIB)" crystal build src/cli.cr -o $(BUILD_DIR)/railcar
+	CRYSTAL_CONFIG_PATH="lib:$(CRYSTAL_STDLIB)" CRYSTAL_STDLIB="$(CRYSTAL_STDLIB)" crystal build src/cli.cr -o $(BUILD_DIR)/railcar
 
 test: $(LIB_DIR)/libprism.a $(BUILD_DIR)/demo/blog/Gemfile
 	CRYSTAL_CONFIG_PATH="lib:$(CRYSTAL_STDLIB)" crystal spec

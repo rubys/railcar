@@ -338,8 +338,6 @@ module Railcar
 
       # Apply minimal filter chain to make the code valid Crystal.
       # Skip InstanceVarToLocal — we want ivars preserved for type extraction.
-      # Skip controller-specific filters (Signature, Boilerplate, Namespace) —
-      # those restructure for the Crystal web framework, not needed for typing.
       ast = ast.transform(RespondToHTML.new)
       ast = ast.transform(StripTurboStream.new)
       ast = ast.transform(StripCallbacks.new)

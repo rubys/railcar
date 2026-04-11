@@ -65,17 +65,18 @@ module Railcar
         info.actions.each do |action|
           body = action.body
           next unless body
-          next if action.is_private
 
           # Build method body: before_action preambles + action body
           body_parts = [] of Crystal::ASTNode
 
-          # Inline before_action bodies
+          # Inline before_action bodies (only for public actions)
           info.before_actions.each do |ba|
+            next if action.is_private
             next if ba.only && !ba.only.not_nil!.includes?(action.name)
             if method_body = private_methods[ba.method_name]?
               preamble = PrismTranslator.new.translate(method_body)
               preamble = preamble.transform(InstanceVarToLocal.new)
+              preamble = preamble.transform(ParamsExpect.new)
               body_parts << preamble
             end
           end
@@ -84,22 +85,38 @@ module Railcar
           translated = translated.transform(InstanceVarToLocal.new)
           translated = translated.transform(ParamsExpect.new)
           translated = translated.transform(RespondToHTML.new)
-          translated = translated.transform(StrongParams.new)
+          # Don't apply StrongParams — it introduces bare 'params' reference
+          # that can't resolve in top-level methods. article_params/comment_params
+          # are included as private methods in the stubs instead.
           body_parts << translated
 
           full_body = body_parts.size == 1 ? body_parts[0] : Crystal::Expressions.new(body_parts)
 
-          # Unique method name to avoid collisions
-          method_name = "#{Inflector.underscore(info.name).chomp("_controller")}_#{action.name}"
+          # Unique method name (prefix public methods to avoid collisions,
+          # keep private method names as-is so they're callable from action bodies)
+          method_name = if action.is_private
+                          action.name
+                        else
+                          "#{Inflector.underscore(info.name).chomp("_controller")}_#{action.name}"
+                        end
 
-          method_def = Crystal::Def.new(method_name, body: full_body)
+          # Collect param names introduced by ParamsExpect (they become method args)
+          param_names = Set(String).new
+          body_parts.each do |part|
+            collect_param_vars(part, param_names)
+          end
+
+          args = param_names.map { |n| Crystal::Arg.new(n, default_value: Crystal::NumberLiteral.new("0")) }
+          method_def = Crystal::Def.new(method_name, args, body: full_body)
           action_nodes << method_def
 
-          # Call site to trigger type inference
-          call_sites << Crystal::Assign.new(
-            Crystal::Var.new("__type_#{method_name}"),
-            Crystal::Call.new(nil, method_name)
-          )
+          # Call site to trigger type inference (only for public methods)
+          unless action.is_private
+            call_sites << Crystal::Assign.new(
+              Crystal::Var.new("__type_#{method_name}"),
+              Crystal::Call.new(nil, method_name)
+            )
+          end
         end
       end
 
@@ -113,56 +130,108 @@ module Railcar
       @program = prog = Crystal::Program.new
       normalized = prog.normalize(full_ast)
       @typed_ast = prog.semantic(normalized)
-      puts "  semantic analysis: #{action_nodes.size} methods typed"
+      report_typed_methods(action_nodes)
       true
-    rescue
-      # If full analysis fails, retry without failing methods
-      retry_without_failures(@stub_ast.not_nil!, @action_nodes.not_nil!, @call_sites.not_nil!)
-    end
+    rescue ex
+      # Retry, removing methods that fail type-checking.
+      # Must re-parse stubs each time since semantic mutates AST in place.
+      schema_map = {} of String => TableSchema
+      app.schemas.each { |s| schema_map[s.name] = s }
+      stub_source = generate_stubs(schema_map)
 
-    # Retry semantic analysis, progressively removing methods that fail
-    private def retry_without_failures(stub_ast : Crystal::ASTNode,
-                                        action_nodes : Array(Crystal::ASTNode),
-                                        call_sites : Array(Crystal::ASTNode)) : Bool
+      action_nodes = @action_nodes.not_nil!
+      call_sites = @call_sites.not_nil!
       total = action_nodes.size
-      remaining_actions = action_nodes.dup
-      remaining_calls = call_sites.dup
-      skipped = [] of String
+      skip_methods = Set(String).new
 
-      3.times do  # max retries
-        nodes = [Crystal::Require.new("prelude"), stub_ast] of Crystal::ASTNode
-        nodes.concat(remaining_actions)
+      # Extract the failing method from the first error
+      if (msg = ex.message) && msg =~ /instantiating '(\w+)\(\)'/
+        skip_methods << $1
+      end
+
+      5.times do
+        fresh_stubs = Crystal::Parser.parse(stub_source)
+        remaining = action_nodes.reject { |n| n.is_a?(Crystal::Def) && skip_methods.includes?(n.name) }
+        remaining_calls = call_sites.reject { |n| n.is_a?(Crystal::Assign) && skip_methods.any? { |s| n.target.to_s == "__type_#{s}" } }
+
+        nodes = [Crystal::Require.new("prelude"), fresh_stubs] of Crystal::ASTNode
+        nodes.concat(remaining)
         nodes.concat(remaining_calls)
 
         @program = prog = Crystal::Program.new
         normalized = prog.normalize(Crystal::Expressions.new(nodes))
         @typed_ast = prog.semantic(normalized)
+
+        typed = remaining.size
+        if skip_methods.empty?
+          puts "  semantic analysis: #{typed} methods typed"
+        else
+          puts "  semantic analysis: #{typed} of #{total} methods typed, skipped: #{skip_methods.join(", ")}"
+        end
         return true
-      rescue ex
-        msg = ex.message || ""
-        # Extract the failing method name from "instantiating 'method_name()'"
-        if msg =~ /instantiating '(\w+)\(\)'/
-          failing = $1
-          skipped << failing
-          remaining_actions.reject! do |n|
-            n.is_a?(Crystal::Def) && n.name == failing
-          end
-          remaining_calls.reject! do |n|
-            n.is_a?(Crystal::Assign) && n.target.to_s == "__type_#{failing}"
-          end
+      rescue retry_ex
+        if (retry_msg = retry_ex.message) && retry_msg =~ /instantiating '(\w+)\(\)'/
+          skip_methods << $1
         else
           return false
         end
       end
       false
-    ensure
-      if (ra = remaining_actions)
-        typed_count = ra.size
-        if typed_count > 0
-          skip_list = skipped.try(&.join(", ")) || ""
-          skip_msg = skip_list.empty? ? "" : ", skipped: #{skip_list}"
-          puts "  semantic analysis: #{typed_count} of #{total} methods typed#{skip_msg}"
+    end
+
+    # Report which methods were typed by checking the typed AST
+    private def report_typed_methods(action_nodes : Array(Crystal::ASTNode))
+      return unless typed = @typed_ast
+      return unless prog = @program
+
+      typed_names = [] of String
+      untyped_names = [] of String
+
+      action_nodes.each do |node|
+        next unless node.is_a?(Crystal::Def)
+        name = node.name
+        # Check if the call site assignment got a type
+        if typed.is_a?(Crystal::Expressions)
+          typed.expressions.each do |expr|
+            if expr.is_a?(Crystal::Assign) && expr.target.to_s == "__type_#{name}"
+              if expr.value.type?
+                typed_names << name
+              else
+                untyped_names << name
+              end
+            end
+          end
         end
+      end
+
+      total = typed_names.size + untyped_names.size
+      if untyped_names.empty?
+        puts "  semantic analysis: #{typed_names.size} methods typed"
+      else
+        puts "  semantic analysis: #{typed_names.size} of #{total} methods typed, skipped: #{untyped_names.join(", ")}"
+      end
+    end
+
+    # Find variable names that come from ParamsExpect (used but not assigned)
+    private def collect_param_vars(node : Crystal::ASTNode, names : Set(String))
+      case node
+      when Crystal::Expressions
+        node.expressions.each { |e| collect_param_vars(e, names) }
+      when Crystal::Assign
+        # Track assigned variables
+        collect_param_vars(node.value, names)
+      when Crystal::Call
+        if node.name == "find" && node.args.size == 1
+          arg = node.args[0]
+          if arg.is_a?(Crystal::Var) && !%w[self _buf].includes?(arg.name)
+            names << arg.name
+          end
+        end
+        collect_param_vars(node.obj.not_nil!, names) if node.obj
+        node.args.each { |a| collect_param_vars(a, names) }
+      when Crystal::If
+        collect_param_vars(node.then, names)
+        collect_param_vars(node.else, names) if node.else
       end
     end
 

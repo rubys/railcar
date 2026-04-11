@@ -2,6 +2,13 @@ require "./generator/app_generator"
 require "./generator/rbs_generator"
 require "./generator/python_generator"
 
+# Ensure Crystal stdlib is findable at runtime for semantic analysis.
+# CRYSTAL_STDLIB is set as an env var during `make` and baked in via macro.
+CRYSTAL_STDLIB_PATH = {{ env("CRYSTAL_STDLIB") || "" }}
+unless CRYSTAL_STDLIB_PATH.empty?
+  ENV["CRYSTAL_PATH"] ||= "lib:#{CRYSTAL_STDLIB_PATH}"
+end
+
 rbs_mode = ARGV.delete("--rbs")
 python_mode = ARGV.delete("--python")
 
