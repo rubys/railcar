@@ -640,18 +640,209 @@ module Cr2Py
       Dir.mkdir_p(views_dir)
       File.write(File.join(views_dir, "__init__.py"), "")
 
-      # TODO: Read ECR files from app_dir and transpile
-      # For now, create stub view files
       controllers.each do |name, type|
         controller_name = Railcar::Inflector.underscore(name).chomp("_controller")
+        model_name = Railcar::Inflector.classify(Railcar::Inflector.singularize(controller_name))
+        singular = Railcar::Inflector.underscore(model_name).downcase
+        plural = Railcar::Inflector.pluralize(singular)
+
+        ecr_dir = File.join(app_dir, "src/views/#{controller_name}")
+        next unless Dir.exists?(ecr_dir)
+
         io = String.build do |io|
           io << "from helpers import *\n"
-          io << "from models import *\n\n"
-          io << "# TODO: Transpile views from ECR templates\n"
-          io << "# Views will be populated from #{app_dir}/src/views/#{controller_name}/\n"
+          io << "from models import *\n"
+
+          # Cross-controller imports
+          controllers.each do |other_name, _|
+            other = Railcar::Inflector.underscore(other_name).chomp("_controller")
+            next if other == controller_name
+            # Check if any template references the other controller's partials
+            all_ecr = Dir.glob(File.join(ecr_dir, "*.ecr")).map { |f| File.read(f) }.join
+            if all_ecr.includes?("render_#{Railcar::Inflector.singularize(other)}_partial")
+              io << "from views.#{other} import *\n"
+            end
+          end
+          io << "\n"
+
+          Dir.glob(File.join(ecr_dir, "*.ecr")).sort.each do |ecr_path|
+            basename = File.basename(ecr_path, ".ecr")
+            is_partial = basename.starts_with?('_')
+
+            func_name = if is_partial
+                          "render_#{basename.lstrip('_')}_partial"
+                        else
+                          "render_#{basename}"
+                        end
+
+            # Determine parameters
+            if is_partial
+              io << "def #{func_name}(*args):\n"
+              io << "    #{singular} = args[-1] if args else None\n"
+            elsif basename == "index"
+              io << "def #{func_name}(#{plural}, notice=None):\n"
+            else
+              io << "def #{func_name}(#{singular}, notice=None):\n"
+            end
+
+            ecr_source = File.read(ecr_path)
+            io << "    _buf = ''\n"
+            transpile_ecr(ecr_source, io, singular, model_name)
+            io << "    return _buf\n\n"
+          end
         end
+
         File.write(File.join(views_dir, "#{controller_name}.py"), io)
-        puts "  views/#{controller_name}.py (stub)"
+        puts "  views/#{controller_name}.py"
+      end
+    end
+
+    # Transpile ECR template to Python _buf string building
+    private def transpile_ecr(source : String, io : IO, singular : String, model_name : String)
+      pos = 0
+      depth = 0  # track if/for nesting for indentation
+
+      while pos < source.size
+        tag_start = source.index("<%", pos)
+
+        if tag_start.nil?
+          remaining = source[pos..]
+          unless remaining.empty?
+            indent = "    " + "    " * depth
+            io << "#{indent}_buf += #{python_string(remaining)}\n"
+          end
+          break
+        end
+
+        text = source[pos...tag_start]
+        unless text.empty?
+          indent = "    " + "    " * depth
+          io << "#{indent}_buf += #{python_string(text)}\n"
+        end
+
+        tag_end = source.index("%>", tag_start)
+        break unless tag_end
+
+        raw = source[(tag_start + 2)...tag_end].strip
+
+        if raw.starts_with?('=')
+          expr = raw[1..].strip
+          py_expr = crystal_expr_to_python(expr, singular, model_name)
+          indent = "    " + "    " * depth
+          io << "#{indent}_buf += str(#{py_expr})\n"
+        else
+          depth = emit_ecr_statement(raw, io, singular, model_name, depth)
+        end
+
+        pos = tag_end + 2
+      end
+    end
+
+    # Convert a Crystal expression to Python
+    private def crystal_expr_to_python(expr : String, singular : String, model_name : String) : String
+      py = expr
+
+      # Railcar:: namespace
+      py = py.gsub(/Railcar::(\w+)/, "\\1")
+
+      # .size → len()
+      py = py.gsub(/(\w+(?:\.\w+(?:\([^)]*\))?)*)\.size/) { "len(#{$1})" }
+
+      # .persisted? → .id
+      py = py.gsub(/(\w+)\.persisted\?/, "\\1.id")
+
+      # .any? → bool()
+      py = py.gsub(/(\w+(?:\.\w+(?:\([^)]*\))?)*)\.any\?/) { "#{$1}" }
+
+      # .new → ()
+      py = py.gsub(/(\w+)\.new\b/, "\\1()")
+
+      # Crystal ternary: a ? b : c → b if a else c
+      if py =~ /^(.+?)\s*\?\s*(.+?)\s*:\s*(.+)$/
+        cond, then_val, else_val = $1, $2, $3
+        py = "#{then_val} if #{cond} else #{else_val}"
+      end
+
+      # Symbol :name → "name" (for keyword args)
+      py = py.gsub(/:(\w+)(?=\s*=>|\s*,|\s*\))/, "\"\\1\"")
+
+      # Crystal keyword args (key: value) → Python (key=value)
+      # But only inside function calls — be careful not to transform ternary
+      py = py.gsub(/(\w+):\s+(?!:)(?="[^"]*"|'[^']*'|\d+|true|false|nil|\w+)/) do |m|
+        key = m.split(":").first.strip
+        "#{key}="
+      end
+
+      # true/false/nil
+      py = py.gsub(/\btrue\b/, "True")
+      py = py.gsub(/\bfalse\b/, "False")
+      py = py.gsub(/\bnil\b/, "None")
+
+      # String interpolation #{expr} → {expr} (for f-string context)
+      # Not needed here since we're using str()
+
+      py
+    end
+
+    # Emit an ECR code statement as Python. Returns updated depth.
+    private def emit_ecr_statement(stmt : String, io : IO, singular : String, model_name : String, depth : Int32) : Int32
+      stripped = stmt.strip
+      indent = "    " + "    " * depth
+
+      # end — decrease depth (before emitting)
+      if stripped == "end"
+        return {depth - 1, 0}.max
+      end
+
+      # else — decrease then increase (same level as if)
+      if stripped == "else"
+        outer_indent = "    " + "    " * {depth - 1, 0}.max
+        io << "#{outer_indent}else:\n"
+        return depth
+      end
+
+      # elsif
+      if stripped =~ /^elsif\s+(.+)$/
+        cond = crystal_expr_to_python($1, singular, model_name)
+        outer_indent = "    " + "    " * {depth - 1, 0}.max
+        io << "#{outer_indent}elif #{cond}:\n"
+        return depth
+      end
+
+      # if condition — emit and increase depth
+      if stripped =~ /^if\s+(.+)$/
+        cond = crystal_expr_to_python($1, singular, model_name)
+        io << "#{indent}if #{cond}:\n"
+        return depth + 1
+      end
+
+      # collection.each do |var| — emit for and increase depth
+      if stripped =~ /(\w+(?:\.\w+(?:\([^)]*\))?)*)\.each\s+do\s*\|(\w+)\|/
+        collection = crystal_expr_to_python($1, singular, model_name)
+        var = $2
+        io << "#{indent}for #{var} in #{collection}:\n"
+        return depth + 1
+      end
+
+      # Variable assignment
+      if stripped =~ /^(\w+)\s*=\s*(.+)$/
+        var = $1
+        value = crystal_expr_to_python($2, singular, model_name)
+        io << "#{indent}#{var} = #{value}\n"
+        return depth
+      end
+
+      # Anything else — comment it out
+      io << "#{indent}# #{stripped}\n"
+      depth
+    end
+
+    # Convert a string to a Python string literal (triple-quoted if multiline)
+    private def python_string(s : String) : String
+      if s.includes?('\n') || s.includes?('"')
+        "'''#{s.gsub("'''", "\\\\'''").gsub("\\", "\\\\\\\\")}'''"
+      else
+        s.inspect
       end
     end
 
