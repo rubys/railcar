@@ -9,7 +9,7 @@ require "./app_model"
 require "./schema_extractor"
 require "./python_seed_extractor"
 require "./python_model_runtime"
-require "./python_semantic"
+require "./semantic_analyzer"
 require "./python_controller_generator"
 require "./python_view_generator"
 require "./python_test_generator"
@@ -34,7 +34,7 @@ module Railcar
       puts "Generating Python app from #{rails_dir}..."
 
       # Run semantic analysis once for the full program (types available on AST nodes)
-      semantic = PythonSemantic.new(app, rails_dir)
+      semantic = SemanticAnalyzer.new(app, rails_dir)
       semantic.analyze
 
       generate_models(output_dir)
