@@ -1,10 +1,11 @@
 # Railcar
 
-Three things in one:
+Four things in one:
 
-1. **Transpiler** -- converts a Ruby on Rails application into a Crystal web application
-2. **Framework** -- a Rails-compatible runtime for Crystal, currently covering ActiveRecord and Hotwire, with more to come
-3. **RBS generator** -- produces RBS type signatures for existing Rails apps, using Crystal's semantic type inference to determine method return types and instance variable types
+1. **Crystal transpiler** -- converts a Ruby on Rails application into a Crystal web application
+2. **Python transpiler** -- converts a Ruby on Rails application into a Python web application
+3. **Framework** -- a Rails-compatible runtime for Crystal, currently covering ActiveRecord and Hotwire, with more to come
+4. **RBS generator** -- produces RBS type signatures for existing Rails apps, using Crystal's semantic type inference to determine method return types and instance variable types
 
 These mix and match. Both Ruby and Crystal input files are supported in the same project, so you can start with a Rails app, generate the Crystal version, then gradually rewrite individual files in Crystal. The pipeline handles both seamlessly.
 
@@ -12,7 +13,7 @@ These mix and match. Both Ruby and Crystal input files are supported in the same
 
 ## What it does
 
-Given a Rails app directory, Railcar parses the source code, applies a chain of AST transformations, and generates a Crystal application that compiles and runs.
+Given a Rails app directory, Railcar parses the source code, applies a chain of AST transformations, and generates a Crystal or Python application.
 
 ```
 Source (.rb or .cr)
@@ -24,11 +25,14 @@ Parse (Prism for Ruby, Crystal parser for Crystal)
 Crystal AST (canonical intermediate representation)
     |
     v
-Filter chain (composable transformations)
+Shared filter chain (Rails-specific transformations)
     |
-    v
-Crystal source output (via Crystal.format)
+    +--> Crystal filters --> Crystal.format --> .cr output
+    |
+    +--> Python filters --> PythonEmitter --> .py output
 ```
+
+The shared filters normalize Rails conventions (instance variables, params, respond_to, strong params, redirects, render calls) into a target-neutral AST. Target-specific filters and emitters handle the language differences.
 
 ## Prerequisites
 
@@ -55,6 +59,14 @@ build/railcar /path/to/rails/app /path/to/output
 cd /path/to/output
 shards install
 crystal build src/app.cr
+
+# Generate a Python app
+build/railcar --python /path/to/rails/app /path/to/output
+cd /path/to/output
+uv run python3 app.py
+
+# Run Python tests
+uv run --extra test pytest tests/ -v
 
 # Generate RBS type signatures
 build/railcar --rbs /path/to/rails/app /path/to/output
@@ -84,14 +96,18 @@ Downloads a sample Rails blog app and runs the 240-test spec suite.
 
 ## What works
 
-The blog demo exercises these patterns:
+The blog demo exercises these patterns across both Crystal and Python targets:
 
 - **Models** -- `has_many`, `belongs_to`, `validates` (presence, length), `dependent: :destroy`
 - **Controllers** -- CRUD actions, `before_action`, strong params, `respond_to`, `redirect_to` with flash, `render` with status codes
-- **Views** -- ERB to ECR conversion, `link_to`, `button_to`, `form_with`, partials, `render @collection`
+- **Views** -- ERB to ECR (Crystal) or Python string functions, `link_to`, `button_to`, `form_with`, partials, `render @collection`
 - **Routes** -- `resources`, nested resources, `root`
-- **Tests** -- Minitest to Crystal spec, model and controller tests, fixtures with dependency ordering
-- **Runtime** -- ActiveRecord-like ORM with macros, query chaining, validations, associations
+- **Tests** -- Minitest to Crystal spec or pytest, model and controller tests, fixtures
+- **Real-time** -- ActionCable/WebSocket with Turbo Streams broadcasting
+
+**Crystal:** 243 specs passing, compiled binary, full ActiveRecord-like runtime with macros.
+
+**Python:** 20 tests passing (4 model + 5 model + 8 controller + 3 controller), aiohttp async server, SQLite ORM with validations.
 
 ## Status
 
@@ -124,6 +140,17 @@ Many common Rails patterns are not yet implemented:
 - **Runtime metaprogramming** -- `eval`, `method_missing`, dynamic `send` cannot be transpiled
 
 The filter architecture is designed so each of these can be added incrementally. See [ARCHITECTURE.md](ARCHITECTURE.md) for how to contribute.
+
+## Adding a new target language
+
+The shared Rails filters handle ~50% of the work for any target. To add a new language:
+
+1. Write a **language emitter** that serializes Crystal AST to the target syntax
+2. Write **language-specific filters** (constructor syntax, redirect/render patterns)
+3. Write **infrastructure** (HTTP server, routing, ORM, WebSocket)
+4. Write a **test adapter** (test framework integration)
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the filter pipeline details.
 
 ## Relationship to ruby2js
 

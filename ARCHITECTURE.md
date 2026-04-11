@@ -16,19 +16,16 @@ Source file (.rb or .cr)
   .cr files: Crystal::Parser → Crystal AST
        |
        v
-   Filter chain (Crystal::Transformer subclasses)
+   Shared filter chain (Rails normalization)
        |
-       v
-   Serialization (.to_s or ERBConverter for templates)
+       +---> Crystal filters → .to_s → Crystal.format → .cr/.ecr output
        |
-       v
-   Crystal.format (validation + normalization)
-       |
-       v
-   Output file (.cr or .ecr)
+       +---> Python filters → PythonEmitter → .py output
 ```
 
-Crystal AST (`Crystal::ASTNode`) is the canonical intermediate representation. All filters operate on it, regardless of whether the source was Ruby or Crystal.
+Crystal AST (`Crystal::ASTNode`) is the canonical intermediate representation. All filters operate on it, regardless of whether the source was Ruby or Crystal, and regardless of the target language.
+
+The shared filters normalize Rails conventions into a target-neutral form. Target-specific filters then handle language differences (constructor syntax, error handling, property vs method access). The emitter serializes the final AST to the target language's source code.
 
 ### Semantic analysis
 
@@ -73,7 +70,7 @@ Routes `.rb` files through PrismTranslator and `.cr` files through Crystal's own
 
 Each filter is a `Crystal::Transformer` subclass that pattern-matches on AST nodes and rewrites them. Filters are composable -- they run in sequence, each receiving the output of the previous one.
 
-**Controller filters** (applied in this order):
+**Shared controller filters** (used by both Crystal and Python targets):
 
 | Filter | What it does |
 |--------|-------------|
@@ -81,6 +78,11 @@ Each filter is a `Crystal::Transformer` subclass that pattern-matches on AST nod
 | `ParamsExpect` | `params.expect(:id)` → `id` |
 | `RespondToHTML` | Extracts `format.html { ... }` from `respond_to` blocks |
 | `StrongParams` | `Article.new(article_params)` → `Article.new(extract_model_params(...))` |
+
+**Crystal-specific controller filters** (applied after shared filters):
+
+| Filter | What it does |
+|--------|-------------|
 | `RedirectToResponse` | `redirect_to @article` → status 302 + Location header + flash |
 | `RenderToECR` | `render :new` → `response.print(layout { ECR.embed(...) })` |
 | `ControllerSignature` | Adds typed parameters, inlines `before_action`, appends view rendering |
@@ -94,7 +96,21 @@ Each filter is a `Crystal::Transformer` subclass that pattern-matches on AST nod
 | `BroadcastsTo` | Converts `broadcasts_to`/`after_*_commit` to broadcast calls |
 | `ModelBoilerplate` | Wraps body in `model("table") { columns + declarations }`, adds validations |
 
-**View filters** (applied to template AST before ERBConverter):
+**Python controller filters** (applied after shared filters instead of Crystal-specific ones):
+
+| Filter | What it does |
+|--------|-------------|
+| `PythonConstructor` | `Article.new(...)` → `Article(...)` |
+| `PythonRedirect` | `redirect_to @article` → `raise web.HTTPFound(article_path(article))` |
+| `PythonRender` | `render :new` → `return web.Response(text=layout(render_new(...)))` |
+
+**Python view filter:**
+
+| Filter | What it does |
+|--------|-------------|
+| `PythonView` | Converts `_buf` patterns, bare calls → vars, `.size` → `len()`, `.any?`/`.present?` → truthy, `content_for` → assignment, `button_to` data hash flattening |
+
+**View filters** (shared, applied to template AST before ERBConverter or PythonEmitter):
 
 | Filter | What it does |
 |--------|-------------|
@@ -113,12 +129,27 @@ Converts ERB/ECR templates to Crystal ECR output. After view filters have transf
 
 The `ErbCompiler` extracts code from `<% %>` tags into Ruby/Crystal source. This works identically for `.erb` and `.ecr` input since the tag syntax is the same.
 
-### AppGenerator (`src/generator/app_generator.cr`)
+### PythonEmitter (`src/generator/python_emitter.cr`)
 
-Orchestrates the full generation pipeline. For each file type (model, controller, template, route, test), it:
+Serializes Crystal AST to Python source. The Python counterpart of Crystal's built-in `.to_s()`. Handles:
+- Indentation-based blocks (no `end`)
+- `_buf` string-building patterns for views (`_buf.append=` → `_buf += str(...)`)
+- Property vs method access (type-aware: uses semantic analysis `.type?` or AppModel metadata)
+- Python reserved word handling (`class` → `class_`)
+- f-strings for string interpolation
+- `raise` as statement (not function)
+
+### AppGenerator / PythonGenerator
+
+**AppGenerator** (`src/generator/app_generator.cr`) orchestrates Crystal output. **PythonGenerator** (`src/generator/python_generator.cr`) orchestrates Python output, delegating to:
+- **PythonControllerGenerator** -- transpiles controllers through shared + Python filters, handles structural transformation (class → async functions, routing, before_action inlining)
+- **PythonViewGenerator** -- transpiles ERB through ErbCompiler → shared filters → PythonView filter → PythonEmitter, producing string-building functions
+- **PythonTestGenerator** -- converts Minitest to pytest (fixtures, assertions, async HTTP client)
+
+For each file type, the generator:
 1. Parses the source
 2. Applies the appropriate filter chain
-3. Wraps in module/require structure
+3. Wraps in target-specific structure
 4. Serializes and writes the output
 
 ### Runtime (`src/runtime/`)
@@ -209,14 +240,30 @@ end
 
 This enables runtime dispatch for abstract-typed children. It's a minimal, non-breaking change. The patch could be contributed upstream to make programmatic AST construction a supported use case.
 
+## Adding a new target language
+
+To add a new target (e.g., Go, Elixir):
+
+1. **Write an emitter** (`src/generator/go_emitter.cr`) -- serialize Crystal AST to the target syntax
+2. **Write language-specific filters** (`src/filters/go_*.cr`) -- handle constructor syntax, error handling, redirect/render patterns
+3. **Write a generator** (`src/generator/go_generator.cr`) -- orchestrate the pipeline: parse → shared filters → language filters → emitter → output
+4. **Write infrastructure generators** -- HTTP server, routing, ORM, WebSocket support
+5. **Write a test adapter** -- convert Minitest assertions to the target test framework
+
+The shared filters (InstanceVarToLocal, ParamsExpect, RespondToHTML, StrongParams, RenderToPartial, LinkToPathHelper, ButtonToPathHelper) handle Rails-specific normalization and are reusable across all targets. They provide ~50% of the transformation work.
+
+Semantic type information from Crystal's type checker can inform the emitter (see `spec/python_semantic_spec.cr` for the proven approach).
+
 ## Testing
 
 ```bash
-make test     # runs all 240 specs
+make test     # runs all Crystal specs (~247)
 crystal spec spec/filters_spec.cr   # run a specific spec file
 ```
 
-Tests are organized by component:
+CI also generates the Python blog and runs its 20 pytest tests.
+
+Crystal tests are organized by component:
 
 | File | What it tests |
 |------|--------------|
@@ -233,5 +280,15 @@ Tests are organized by component:
 | `prism_spec.cr` | Prism FFI bindings |
 | `semantic_spec.cr` | LLVM stub + Crystal type inference |
 | `semantic_prism_spec.cr` | Full pipeline: Ruby → Prism → Crystal AST → semantic → inferred types |
+| `python_semantic_spec.cr` | Crystal type inference for Python emission |
+
+Python tests are generated alongside the Python app and run via pytest:
+
+| File | What it tests |
+|------|--------------|
+| `test_article.py` | Article model CRUD, validations, dependent destroy |
+| `test_comment.py` | Comment model, associations, FK validation |
+| `test_articles_controller.py` | Articles CRUD endpoints, redirects, form handling |
+| `test_comments_controller.py` | Comments create/destroy endpoints |
 
 The `make test` target downloads a sample Rails blog app to `build/demo/blog/` for integration testing.
