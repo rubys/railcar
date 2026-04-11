@@ -19,6 +19,7 @@ require "../filters/python_view"
 require "../filters/render_to_partial"
 require "../filters/rails_helpers"
 require "../filters/form_to_html"
+require "../filters/buf_to_interpolation"
 require "../filters/link_to_path_helper"
 require "../filters/button_to_path_helper"
 
@@ -153,6 +154,7 @@ module Railcar
         FormToHTML.new,
         PythonConstructor.new,
         PythonView.new(locals),
+        BufToInterpolation.new,
       ] of Crystal::Transformer
 
       filtered = ast.as(Crystal::ASTNode)

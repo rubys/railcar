@@ -434,18 +434,43 @@ module Railcar
     end
 
     private def emit_string_interpolation(node : Crystal::StringInterpolation, io : IO)
-      io << "f\""
+      # Check if content has newlines or double quotes — use triple-quote if so
+      has_newlines = false
+      has_quotes = false
       node.expressions.each do |part|
-        case part
-        when Crystal::StringLiteral
-          io << part.value.gsub('"', "\\\"").gsub('{', "{{").gsub('}', "}}")
-        else
-          io << "{"
-          emit(part, io)
-          io << "}"
+        if part.is_a?(Crystal::StringLiteral)
+          has_newlines = true if part.value.includes?('\n')
+          has_quotes = true if part.value.includes?('"')
         end
       end
-      io << "\""
+
+      if has_newlines || has_quotes
+        io << "f'''"
+        node.expressions.each do |part|
+          case part
+          when Crystal::StringLiteral
+            io << part.value.gsub('{', "{{").gsub('}', "}}")
+          else
+            io << "{"
+            emit(part, io)
+            io << "}"
+          end
+        end
+        io << "'''"
+      else
+        io << "f\""
+        node.expressions.each do |part|
+          case part
+          when Crystal::StringLiteral
+            io << part.value.gsub('"', "\\\"").gsub('{', "{{").gsub('}', "}}")
+          else
+            io << "{"
+            emit(part, io)
+            io << "}"
+          end
+        end
+        io << "\""
+      end
     end
 
     private def emit_array(node : Crystal::ArrayLiteral, io : IO)
