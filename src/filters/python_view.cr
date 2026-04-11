@@ -47,6 +47,28 @@ module Railcar
         return Crystal::Call.new(nil, "len", [obj] of Crystal::ASTNode)
       end
 
+      # .any? → just the receiver (truthy check in Python)
+      if (node.name == "any?" || node.name == "is_any") && node.args.empty? && node.obj
+        return node.obj.not_nil!.transform(self)
+      end
+
+      # .present? → just the receiver
+      if node.name == "present?" && node.args.empty? && node.obj
+        return node.obj.not_nil!.transform(self)
+      end
+
+      # content_for(:title, "text") → title = "text" (as an assignment)
+      if node.name == "content_for" && node.obj.nil? && node.args.size == 2
+        key = node.args[0]
+        value = node.args[1]
+        if key.is_a?(Crystal::SymbolLiteral)
+          return Crystal::Assign.new(
+            Crystal::Var.new(key.value),
+            value.transform(self)
+          )
+        end
+      end
+
       # button_to: flatten data: { turbo_confirm: "..." } into data_turbo_confirm="..."
       if node.name == "button_to" && node.obj.nil?
         return transform_button_to(node)
