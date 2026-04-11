@@ -36,7 +36,9 @@ module Railcar
       app.models.each_key do |name|
         table_name = Inflector.pluralize(Inflector.underscore(name))
         if schema = schema_map[table_name]?
-          @properties[name] = Set.new(schema.columns.map(&.name))
+          props = Set.new(schema.columns.map(&.name))
+          props << "id"
+          @properties[name] = props
         end
       end
     end

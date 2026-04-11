@@ -158,6 +158,17 @@ module Railcar
         io << "        db.close()\n"
         io << "        return [cls.from_row(r) for r in rows]\n\n"
 
+        # count
+        io << "    @classmethod\n"
+        io << "    def count(cls):\n"
+        io << "        return len(cls.all())\n\n"
+
+        # last
+        io << "    @classmethod\n"
+        io << "    def last(cls):\n"
+        io << "        records = cls.all()\n"
+        io << "        return records[-1] if records else None\n\n"
+
         # save
         io << "    def save(self):\n"
         io << "        db = get_db()\n"
@@ -224,7 +235,35 @@ module Railcar
     private def generate_helpers(output_dir : String)
       io = IO::Memory.new
       io << "import base64\n"
-      io << "import json\n\n"
+      io << "import json\n"
+      io << "from urllib.parse import parse_qs\n\n"
+
+      # Form parsing
+      io << "def parse_form(body_bytes):\n"
+      io << "    return parse_qs(body_bytes.decode('utf-8'))\n\n"
+
+      io << "def form_value(data, key):\n"
+      io << "    return data.get(key, [''])[0]\n\n"
+
+      # Layout
+      io << "LAYOUT_HEAD = '''<!DOCTYPE html>\n"
+      io << "<html>\n"
+      io << "<head>\n"
+      io << "  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+      io << "  <meta name=\"action-cable-url\" content=\"/cable\">\n"
+      io << "  <link rel=\"stylesheet\" href=\"/static/app.css\">\n"
+      io << "  <script type=\"module\" src=\"/static/turbo.min.js\"></script>\n"
+      io << "</head>\n"
+      io << "<body>\n"
+      io << "  <main class=\"container mx-auto mt-28 px-5 flex flex-col\">'''\n\n"
+
+      io << "LAYOUT_TAIL = '''  </main>\n"
+      io << "</body>\n"
+      io << "</html>'''\n\n"
+
+      io << "def layout(content, title='Blog'):\n"
+      io << "    head = LAYOUT_HEAD.replace('<head>', f'<head>\\n  <title>{title}</title>', 1)\n"
+      io << "    return head + content + LAYOUT_TAIL\n\n"
 
       # link_to
       io << "def link_to(text, url, **kwargs):\n"
@@ -310,7 +349,6 @@ module Railcar
     private def generate_app(output_dir : String)
       io = IO::Memory.new
       io << "from aiohttp import web\n"
-      io << "from urllib.parse import parse_qs\n"
       io << "import aiohttp\n"
       io << "import os\n"
       io << "import json\n"
@@ -321,20 +359,11 @@ module Railcar
       io << "from helpers import *\n"
 
       # Import controllers
-      controller_names = [] of String
       app.controllers.each do |info|
         name = Inflector.underscore(info.name).chomp("_controller")
-        controller_names << name
         io << "from controllers import #{name} as #{name}_controller\n"
       end
       io << "\n"
-
-      # Form parsing helpers
-      io << "def parse_form(body_bytes):\n"
-      io << "    return parse_qs(body_bytes.decode('utf-8'))\n\n"
-
-      io << "def form_value(data, key):\n"
-      io << "    return data.get(key, [''])[0]\n\n"
 
       # ActionCable WebSocket server
       io << "# ActionCable server for Turbo Streams\n"
@@ -389,29 +418,6 @@ module Railcar
       io << "        cable.unsubscribe_all(ws)\n"
       io << "    return ws\n\n"
 
-      # Layout helper
-      io << "LAYOUT_HEAD = '''<!DOCTYPE html>\n"
-      io << "<html>\n"
-      io << "<head>\n"
-      io << "  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
-      io << "  <meta name=\"action-cable-url\" content=\"/cable\">\n"
-      io << "  <link rel=\"stylesheet\" href=\"/static/app.css\">\n"
-      io << "  <script type=\"module\" src=\"/static/turbo.min.js\"></script>\n"
-      io << "</head>\n"
-      io << "<body>\n"
-      io << "  <main class=\"container mx-auto mt-28 px-5 flex flex-col\">'''\n\n"
-
-      io << "LAYOUT_TAIL = '''  </main>\n"
-      io << "</body>\n"
-      io << "</html>'''\n\n"
-
-      io << "def layout(content, title='Blog'):\n"
-      io << "    head = LAYOUT_HEAD.replace('<head>', f'<head>\\n  <title>{title}</title>', 1)\n"
-      io << "    return head + content + LAYOUT_TAIL\n\n"
-
-      # TODO: Import transpiled controllers here
-      # For now, keep handlers inline until controller transpilation is ready
-
       # Logging middleware
       io << "@web.middleware\n"
       io << "async def log_middleware(request, handler):\n"
@@ -427,12 +433,10 @@ module Railcar
         io << PythonSeedExtractor.generate(seeds_path, first_model)
       end
 
-      # Main
-      io << "if __name__ == '__main__':\n"
-      io << "    init_db()\n"
-      io << "    seed_db()\n" if has_seeds
-      io << "    app = web.Application(middlewares=[log_middleware])\n"
-      io << "    app.router.add_get('/cable', cable_handler)\n"
+      # create_app function (used by both main and tests)
+      io << "def create_app():\n"
+      io << "    application = web.Application(middlewares=[log_middleware])\n"
+      io << "    application.router.add_get('/cable', cable_handler)\n"
 
       # Generate routes
       # Group PATCH/PUT/DELETE with POST on same path (aiohttp uses POST + method override)
@@ -445,7 +449,7 @@ module Railcar
 
         case method
         when "get"
-          io << "    app.router.add_get('#{pattern}', #{controller}_controller.#{action})\n"
+          io << "    application.router.add_get('#{pattern}', #{controller}_controller.#{action})\n"
         when "post"
           post_paths[pattern] ||= [] of Tuple(String, String, String)
           post_paths[pattern] << {method, controller, action}
@@ -459,7 +463,7 @@ module Railcar
       post_paths.each do |pattern, methods|
         if methods.size == 1
           m, c, a = methods[0]
-          io << "    app.router.add_post('#{pattern}', #{c}_controller.#{a})\n"
+          io << "    application.router.add_post('#{pattern}', #{c}_controller.#{a})\n"
         else
           # Multiple methods on same path — need a dispatcher
           # Find the controller (should be the same for all)
@@ -485,19 +489,25 @@ module Railcar
           if post_action
             io << "        return await #{controller}_controller.#{post_action[1]}(request, data)\n"
           end
-          io << "    app.router.add_post('#{pattern}', _dispatch_#{controller}_#{pattern.gsub(/[{}\/]/, "_").strip('_')})\n"
+          io << "    application.router.add_post('#{pattern}', _dispatch_#{controller}_#{pattern.gsub(/[{}\/]/, "_").strip('_')})\n"
         end
       end
 
       # Root route
       root_controller = app.routes.routes.find { |r| r.method == "GET" && r.action == "index" }
       if root_controller
-        io << "    app.router.add_get('/', #{root_controller.controller}_controller.index)\n"
+        io << "    application.router.add_get('/', #{root_controller.controller}_controller.index)\n"
       end
 
-      io << "    app.router.add_static('/static', os.path.join(os.path.dirname(__file__), 'static'))\n"
+      io << "    application.router.add_static('/static', os.path.join(os.path.dirname(__file__), 'static'))\n"
+      io << "    return application\n\n"
+
+      # Main
+      io << "if __name__ == '__main__':\n"
+      io << "    init_db()\n"
+      io << "    seed_db()\n" if has_seeds
       io << "    print('Blog running at http://localhost:3000')\n"
-      io << "    web.run_app(app, host='0.0.0.0', port=3000, print=lambda _: None)\n"
+      io << "    web.run_app(create_app(), host='0.0.0.0', port=3000, print=lambda _: None)\n"
 
       File.write(File.join(output_dir, "app.py"), io.to_s)
       puts "  app.py"
@@ -510,7 +520,10 @@ module Railcar
         "name = \"#{project_name}\"\n" \
         "version = \"0.1.0\"\n" \
         "requires-python = \">=3.10\"\n" \
-        "dependencies = [\"aiohttp\"]\n")
+        "dependencies = [\"aiohttp\"]\n" \
+        "\n" \
+        "[project.optional-dependencies]\n" \
+        "test = [\"pytest\", \"pytest-aiohttp\"]\n")
       puts "  pyproject.toml"
     end
 

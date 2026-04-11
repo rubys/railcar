@@ -24,6 +24,7 @@ module Railcar
       tests_dir = File.join(output_dir, "tests")
       Dir.mkdir_p(tests_dir) unless Dir.exists?(tests_dir)
 
+      File.write(File.join(tests_dir, "__init__.py"), "")
       generate_conftest(tests_dir, output_dir)
 
       # Convert model tests
@@ -78,15 +79,23 @@ module Railcar
       io << "        os.remove(db_path)\n\n"
 
       # Fixture data
+      # Collect known fixture table names for association detection
+      fixture_table_names = app.fixtures.map(&.name).to_set
+      association_fields = Set(String).new
+      app.models.each do |_, model|
+        model.associations.each do |assoc|
+          association_fields << Inflector.singularize(assoc.name) if assoc.kind == :belongs_to
+        end
+      end
+
       io << "def setup_fixtures():\n"
       app.fixtures.each do |fixture|
         model_name = Inflector.classify(Inflector.singularize(fixture.name))
         fixture.records.each do |record|
           io << "    #{fixture.name}_#{record.label} = #{model_name}("
           fields = record.fields.reject { |k, _| k == "id" }
-          # Handle association references
           field_strs = fields.map do |k, v|
-            if k.ends_with?("_id") || (v.is_a?(String) && app.fixtures.any? { |f| f.name == k })
+            if association_fields.includes?(k) && fixture_table_names.includes?(Inflector.pluralize(k))
               # Association reference: article: one → article_id=articles_one.id
               ref_fixture = Inflector.pluralize(k)
               "#{k}_id=#{ref_fixture}_#{v}.id"
@@ -409,6 +418,17 @@ module Railcar
       end
     end
 
+    # Build set of property names from schema (all columns are properties in Python)
+    private def property_names : Set(String)
+      @property_names ||= begin
+        names = Set{"id", "created_at", "updated_at"}
+        app.schemas.each do |schema|
+          schema.columns.each { |col| names << col.name }
+        end
+        names
+      end
+    end
+
     private def py_expr_call(call : Prism::CallNode) : String
       receiver = call.receiver
       method = call.name
@@ -433,9 +453,40 @@ module Railcar
         end
       end
 
-      # Method calls
+      # Constructor: Article.new(title: "x", body: "y") → Article(title="x", body="y")
+      if method == "new" && receiver.is_a?(Prism::ConstantReadNode)
+        model = receiver.name
+        if args.size == 1 && args[0].is_a?(Prism::KeywordHashNode)
+          kwargs = build_kwargs(args[0].as(Prism::KeywordHashNode))
+          return "#{model}(#{kwargs})"
+        elsif args.empty?
+          return "#{model}()"
+        end
+      end
+
+      # Association .create(kwargs) and .build(kwargs) → Model(fk=parent.id, kwargs)
+      if (method == "create" || method == "build") && receiver && args.size == 1 && args[0].is_a?(Prism::KeywordHashNode)
+        kwargs = build_kwargs(args[0].as(Prism::KeywordHashNode))
+        recv = py_expr(receiver)
+        # For article.comments.create → Comment(article_id=article.id, kwargs)
+        # This is complex; for now emit as a method call
+        return "#{recv}.#{method}(#{kwargs})"
+      end
+
       if receiver
         recv = py_expr(receiver)
+
+        # Property access: article.title, article.id, etc.
+        if args.empty? && property_names.includes?(method)
+          return "#{recv}.#{method}"
+        end
+
+        # .last → .all()[-1] (no .last on Python model)
+        if method == "last" && args.empty?
+          return "#{recv}.all()[-1]"
+        end
+
+        # Regular method call
         if args.empty?
           "#{recv}.#{method}()"
         else
@@ -484,6 +535,15 @@ module Railcar
     end
 
     # --- Helpers ---
+
+    @property_names : Set(String)?
+
+    private def build_kwargs(hash : Prism::KeywordHashNode) : String
+      hash.elements.compact_map do |el|
+        next nil unless el.is_a?(Prism::AssocNode) && el.key.is_a?(Prism::SymbolNode)
+        "#{el.key.as(Prism::SymbolNode).value}=#{py_expr(el.value_node)}"
+      end.join(", ")
+    end
 
     private def find_class(node : Prism::Node) : Prism::ClassNode?
       case node
