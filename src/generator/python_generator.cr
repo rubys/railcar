@@ -316,7 +316,16 @@ module Railcar
       io << "import asyncio\n"
       io << "import time\n"
       io << "from models import *\n"
-      io << "from helpers import *\n\n"
+      io << "from helpers import *\n"
+
+      # Import controllers
+      controller_names = [] of String
+      app.controllers.each do |info|
+        name = Inflector.underscore(info.name).chomp("_controller")
+        controller_names << name
+        io << "from controllers import #{name} as #{name}_controller\n"
+      end
+      io << "\n"
 
       # Form parsing helpers
       io << "def parse_form(body_bytes):\n"
@@ -423,7 +432,9 @@ module Railcar
       io << "    app = web.Application(middlewares=[log_middleware])\n"
       io << "    app.router.add_get('/cable', cable_handler)\n"
 
-      # Generate routes from route info
+      # Generate routes
+      # Group PATCH/PUT/DELETE with POST on same path (aiohttp uses POST + method override)
+      post_paths = {} of String => Array(Tuple(String, String, String))
       app.routes.routes.each do |route|
         controller = route.controller
         action = route.action
@@ -432,10 +443,54 @@ module Railcar
 
         case method
         when "get"
-          io << "    # app.router.add_get('#{pattern}', #{controller}_#{action})\n"
-        when "post", "patch", "put", "delete"
-          io << "    # app.router.add_post('#{pattern}', #{controller}_#{action})\n"
+          io << "    app.router.add_get('#{pattern}', #{controller}_controller.#{action})\n"
+        when "post"
+          post_paths[pattern] ||= [] of Tuple(String, String, String)
+          post_paths[pattern] << {method, controller, action}
+        when "patch", "put", "delete"
+          post_paths[pattern] ||= [] of Tuple(String, String, String)
+          post_paths[pattern] << {method, controller, action}
         end
+      end
+
+      # For paths that have both POST and PATCH/DELETE, generate a dispatcher
+      post_paths.each do |pattern, methods|
+        if methods.size == 1
+          m, c, a = methods[0]
+          io << "    app.router.add_post('#{pattern}', #{c}_controller.#{a})\n"
+        else
+          # Multiple methods on same path — need a dispatcher
+          # Find the controller (should be the same for all)
+          controller = methods[0][1]
+          actions = methods.map { |m, c, a| {m, a} }
+
+          post_action = actions.find { |m, a| m == "post" }
+          patch_action = actions.find { |m, a| m == "patch" || m == "put" }
+          delete_action = actions.find { |m, a| m == "delete" }
+
+          # Generate inline dispatcher
+          io << "    async def _dispatch_#{controller}_#{pattern.gsub(/[{}\/]/, "_").strip('_')}(request):\n"
+          io << "        data = parse_form(await request.read())\n"
+          io << "        method = form_value(data, '_method').upper()\n"
+          if delete_action
+            io << "        if method == 'DELETE':\n"
+            io << "            return await #{controller}_controller.#{delete_action[1]}(request, data)\n"
+          end
+          if patch_action
+            io << "        if method in ('PATCH', 'PUT'):\n"
+            io << "            return await #{controller}_controller.#{patch_action[1]}(request, data)\n"
+          end
+          if post_action
+            io << "        return await #{controller}_controller.#{post_action[1]}(request, data)\n"
+          end
+          io << "    app.router.add_post('#{pattern}', _dispatch_#{controller}_#{pattern.gsub(/[{}\/]/, "_").strip('_')})\n"
+        end
+      end
+
+      # Root route
+      root_controller = app.routes.routes.find { |r| r.method == "GET" && r.action == "index" }
+      if root_controller
+        io << "    app.router.add_get('/', #{root_controller.controller}_controller.index)\n"
       end
 
       io << "    app.router.add_static('/static', os.path.join(os.path.dirname(__file__), 'static'))\n"

@@ -60,17 +60,17 @@ module Railcar
         end
       end
 
-      # Build: render("controller/template.html", model=model)
-      template_path = Crystal::StringLiteral.new("#{controller}/#{template_name}.html")
-      render_args = [template_path] of Crystal::ASTNode
+      # Build: layout(render_template(model=model))
+      render_func = "render_#{template_name}"
       render_named = [
         Crystal::NamedArgument.new(model_name, Crystal::Var.new(model_name)),
       ]
-      render_call = Crystal::Call.new(nil, "render", render_args, named_args: render_named)
+      render_call = Crystal::Call.new(nil, render_func, named_args: render_named)
+      layout_call = Crystal::Call.new(nil, "layout", [render_call] of Crystal::ASTNode)
 
-      # Build: web.Response(text=..., content_type="text/html", status=N)
+      # Build: web.Response(text=layout(...), content_type="text/html", status=N)
       response_named = [
-        Crystal::NamedArgument.new("text", render_call),
+        Crystal::NamedArgument.new("text", layout_call),
         Crystal::NamedArgument.new("content_type", Crystal::StringLiteral.new("text/html")),
       ]
 

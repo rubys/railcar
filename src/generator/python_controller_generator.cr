@@ -87,7 +87,8 @@ module Railcar
         end
       end
 
-      io << "from helpers import *\n\n"
+      io << "from helpers import *\n"
+      io << "from views.#{controller_name} import *\n\n"
 
       # Determine which actions need which preambles
       id_actions = %w[show edit update destroy]
@@ -126,9 +127,13 @@ module Railcar
       plural = Inflector.pluralize(singular)
 
       # Determine if this action needs form data
-      needs_form = %w[create update].includes?(name)
+      needs_form = %w[create update destroy].includes?(name)
 
-      io << "async def #{name}(request):\n"
+      if needs_form
+        io << "async def #{name}(request, data=None):\n"
+      else
+        io << "async def #{name}(request):\n"
+      end
 
       # Extract route params from before_action bodies
       # Translate via Prism to find ParamsExpect patterns, then emit param extraction
@@ -144,9 +149,10 @@ module Railcar
         end
       end
 
-      # Parse form data
+      # Parse form data (accept pre-parsed data from dispatcher)
       if needs_form
-        io << "    data = parse_form(await request.read())\n"
+        io << "    if data is None:\n"
+        io << "        data = parse_form(await request.read())\n"
       end
 
       # Inline before_action
@@ -198,6 +204,9 @@ module Railcar
         # Post-process: replace .update(extract_model_params...) with field assignments
         body_py = expand_update_call(body_py, singular, columns)
 
+        # Post-process: replace ActiveRecord query chains with Python model API
+        body_py = simplify_query_chain(body_py, model_name)
+
         body_py.each_line do |line|
           stripped = line.strip
           next if stripped.empty? && io.to_s.ends_with?("\n\n")
@@ -246,6 +255,19 @@ module Railcar
         node.args.each { |a| names.concat(find_param_names(a)) }
       end
       names.uniq
+    end
+
+    # Simplify ActiveRecord query chains to Python model API
+    # Article.includes("comments").order(created_at="desc") → Article.all(order_by='created_at DESC')
+    private def simplify_query_chain(source : String, model_name : String) : String
+      # Match Model.includes(...).order(...) or Model.order(...)
+      source.gsub(/#{model_name}\.includes\([^)]*\)\.order\(created_at="desc"\)/) do
+        "#{model_name}.all(order_by='created_at DESC')"
+      end.gsub(/#{model_name}\.includes\([^)]*\)\.order\(created_at="asc"\)/) do
+        "#{model_name}.all(order_by='created_at ASC')"
+      end.gsub(/#{model_name}\.includes\([^)]*\)/) do
+        "#{model_name}.all()"
+      end
     end
 
     # Replace Article(extract_model_params(params, "article"))
