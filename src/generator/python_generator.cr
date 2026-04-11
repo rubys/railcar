@@ -8,6 +8,7 @@
 require "./app_model"
 require "./schema_extractor"
 require "./python_seed_extractor"
+require "./python_model_runtime"
 require "./python_controller_generator"
 require "./python_view_generator"
 require "./python_test_generator"
@@ -51,11 +52,14 @@ module Railcar
 
       models_dir = File.join(output_dir, "models")
 
+      # base.py — ApplicationRecord runtime
+      File.write(File.join(models_dir, "base.py"), PythonModelRuntime.generate)
+      puts "  models/base.py"
+
       # __init__.py — db setup + imports
       init_io = IO::Memory.new
       init_io << "import sqlite3\n"
-      init_io << "import os\n"
-      init_io << "from datetime import datetime\n\n"
+      init_io << "import os\n\n"
       init_io << "DB_PATH = os.path.join(os.path.dirname(__file__), '..', '#{File.basename(output_dir)}.db')\n\n"
 
       init_io << "def get_db():\n"
@@ -87,7 +91,6 @@ module Railcar
       init_io << "    db.commit()\n"
       init_io << "    db.close()\n\n"
 
-      # Import all model classes
       app.models.each_key do |name|
         filename = Inflector.underscore(name)
         init_io << "from .#{filename} import #{name}\n"
@@ -96,194 +99,61 @@ module Railcar
       File.write(File.join(models_dir, "__init__.py"), init_io.to_s)
       puts "  models/__init__.py"
 
-      # Individual model files
+      # Individual model files — thin declarations using ApplicationRecord
       app.models.each do |name, model|
         table_name = Inflector.pluralize(Inflector.underscore(name))
         schema = schema_map[table_name]?
         next unless schema
 
-        columns = schema.columns.reject { |c| c.name == "id" }
-        column_names = columns.map(&.name)
+        column_names = schema.columns.reject { |c| c.name == "id" }.map(&.name)
 
         io = IO::Memory.new
-        io << "from . import get_db\n"
-        io << "from datetime import datetime\n\n"
+        io << "from .base import ApplicationRecord\n\n"
+        io << "\nclass #{name}(ApplicationRecord):\n"
+        io << "    TABLE = '#{table_name}'\n"
+        io << "    COLUMNS = #{column_names.map(&.inspect).join(", ").insert(0, "[") + "]"}\n"
 
-        io << "\nclass #{name}:\n"
-        io << "    TABLE = '#{table_name}'\n\n"
-
-        # __init__
-        io << "    def __init__(self, **kwargs):\n"
-        io << "        self.id = kwargs.get('id')\n"
-        columns.each do |col|
-          default = col.type == "references" ? "None" : python_default(col.type)
-          io << "        self.#{col.name} = kwargs.get('#{col.name}', #{default})\n"
-        end
-        io << "        self._errors = []\n"
-        io << "\n"
-
-        # errors
-        io << "    def errors(self):\n"
-        io << "        return self._errors\n\n"
-
-        # from_row
-        io << "    @classmethod\n"
-        io << "    def from_row(cls, row):\n"
-        io << "        if row is None:\n"
-        io << "            return None\n"
-        io << "        return cls(**dict(row))\n\n"
-
-        # find
-        io << "    @classmethod\n"
-        io << "    def find(cls, id):\n"
-        io << "        db = get_db()\n"
-        io << "        row = db.execute(f'SELECT * FROM {cls.TABLE} WHERE id = ?', (id,)).fetchone()\n"
-        io << "        db.close()\n"
-        io << "        if row is None:\n"
-        io << "            raise ValueError(f'{cls.__name__} not found: {id}')\n"
-        io << "        return cls.from_row(row)\n\n"
-
-        # all
-        io << "    @classmethod\n"
-        io << "    def all(cls, order_by='id'):\n"
-        io << "        db = get_db()\n"
-        io << "        rows = db.execute(f'SELECT * FROM {cls.TABLE} ORDER BY {order_by}').fetchall()\n"
-        io << "        db.close()\n"
-        io << "        return [cls.from_row(r) for r in rows]\n\n"
-
-        # where
-        io << "    @classmethod\n"
-        io << "    def where(cls, **conditions):\n"
-        io << "        db = get_db()\n"
-        io << "        clauses = ' AND '.join(f'{k} = ?' for k in conditions)\n"
-        io << "        rows = db.execute(f'SELECT * FROM {cls.TABLE} WHERE {clauses}', tuple(conditions.values())).fetchall()\n"
-        io << "        db.close()\n"
-        io << "        return [cls.from_row(r) for r in rows]\n\n"
-
-        # reload (re-fetch from database)
-        io << "    def reload(self):\n"
-        io << "        db = get_db()\n"
-        io << "        row = db.execute(f'SELECT * FROM {self.TABLE} WHERE id = ?', (self.id,)).fetchone()\n"
-        io << "        db.close()\n"
-        io << "        if row:\n"
-        io << "            for key in dict(row):\n"
-        io << "                setattr(self, key, dict(row)[key])\n"
-        io << "        return self\n\n"
-
-        # _create (shorthand for new + save, returns the instance)
-        io << "    @classmethod\n"
-        io << "    def _create(cls, **kwargs):\n"
-        io << "        obj = cls(**kwargs)\n"
-        io << "        obj.save()\n"
-        io << "        return obj\n\n"
-
-        # count
-        io << "    @classmethod\n"
-        io << "    def count(cls):\n"
-        io << "        return len(cls.all())\n\n"
-
-        # last
-        io << "    @classmethod\n"
-        io << "    def last(cls):\n"
-        io << "        records = cls.all()\n"
-        io << "        return records[-1] if records else None\n\n"
-
-        # validate
-        if model.validations.any? || model.associations.any? { |a| a.kind == :belongs_to }
-          io << "    def is_valid(self):\n"
-          model.validations.each do |v|
-            case v.kind
-            when "presence"
-              io << "        if not self.#{v.field}:\n"
-              io << "            return False\n"
-            when "length"
-              if min = v.options["minimum"]?
-                io << "        if self.#{v.field} is not None and len(self.#{v.field}) < #{min}:\n"
-                io << "            return False\n"
-              end
-            end
+        # Validations
+        validations = model.validations.map do |v|
+          parts = ["'field': '#{v.field}'", "'kind': '#{v.kind}'"]
+          if min = v.options["minimum"]?
+            parts << "'minimum': #{min}"
           end
-          # belongs_to FK validation
-          model.associations.each do |assoc|
-            if assoc.kind == :belongs_to
-              fk = assoc.name + "_id"
-              target_class = Inflector.classify(assoc.name)
-              io << "        if self.#{fk} is not None:\n"
-              io << "            try:\n"
-              io << "                from .#{Inflector.underscore(target_class)} import #{target_class}\n"
-              io << "                #{target_class}.find(self.#{fk})\n"
-              io << "            except (ValueError, Exception):\n"
-              io << "                return False\n"
-            end
-          end
-          io << "        return True\n\n"
+          "{#{parts.join(", ")}}"
         end
-
-        # save
-        io << "    def save(self):\n"
-        if model.validations.any? || model.associations.any? { |a| a.kind == :belongs_to }
-          io << "        if not self.is_valid():\n"
-          io << "            return False\n"
-        end
-        io << "        db = get_db()\n"
-        io << "        now = datetime.now().isoformat()\n"
-        io << "        if self.id is None:\n"
-        if column_names.includes?("created_at")
-          io << "            self.created_at = now\n"
-          io << "            self.updated_at = now\n"
-        end
-        io << "            cols = '#{column_names.join(", ")}'\n"
-        io << "            placeholders = '#{column_names.map { "?" }.join(", ")}'\n"
-        io << "            values = (#{column_names.map { |c| "self.#{c}" }.join(", ")},)\n"
-        io << "            cursor = db.execute(f'INSERT INTO #{table_name} ({cols}) VALUES ({placeholders})', values)\n"
-        io << "            self.id = cursor.lastrowid\n"
-        io << "        else:\n"
-        if column_names.includes?("updated_at")
-          io << "            self.updated_at = now\n"
-        end
-        update_cols = column_names.reject { |c| c == "created_at" }
-        io << "            sets = '#{update_cols.map { |c| "#{c} = ?" }.join(", ")}'\n"
-        io << "            values = (#{update_cols.map { |c| "self.#{c}" }.join(", ")}, self.id)\n"
-        io << "            db.execute(f'UPDATE #{table_name} SET {sets} WHERE id = ?', values)\n"
-        io << "        db.commit()\n"
-        io << "        db.close()\n"
-        io << "        return True\n\n"
-
-        # destroy (with dependent: :destroy cascading)
-        io << "    def destroy(self):\n"
-        # Auto-cascade dependent: :destroy associations
-        model.associations.each do |assoc|
-          if assoc.kind == :has_many && assoc.options["dependent"]? == "destroy"
-            io << "        for item in self.#{assoc.name}():\n"
-            io << "            item.destroy()\n"
-          end
-        end
-        io << "        db = get_db()\n"
-        io << "        db.execute(f'DELETE FROM {self.TABLE} WHERE id = ?', (self.id,))\n"
-        io << "        db.commit()\n"
-        io << "        db.close()\n\n"
+        io << "    VALIDATIONS = [#{validations.join(", ")}]\n"
 
         # Associations
+        associations = model.associations.map do |assoc|
+          target = case assoc.kind
+                   when :has_many then Inflector.classify(Inflector.singularize(assoc.name))
+                   when :belongs_to then Inflector.classify(assoc.name)
+                   else assoc.name
+                   end
+          mod_name = Inflector.underscore(target)
+          parts = ["'kind': '#{assoc.kind}'", "'name': '#{assoc.name}'",
+                   "'class_name': '#{target}'", "'module': '#{mod_name}'"]
+          if assoc.options["dependent"]?
+            parts << "'dependent': '#{assoc.options["dependent"]}'"
+          end
+          "{#{parts.join(", ")}}"
+        end
+        io << "    ASSOCIATIONS = [#{associations.join(", ")}]\n"
+
+        # Association methods (these need model-specific imports)
         model.associations.each do |assoc|
           case assoc.kind
           when :has_many
             target_class = Inflector.classify(Inflector.singularize(assoc.name))
             fk = Inflector.underscore(name) + "_id"
-            io << "    def #{assoc.name}(self):\n"
+            io << "\n    def #{assoc.name}(self):\n"
             io << "        from .#{Inflector.underscore(target_class)} import #{target_class}\n"
-            io << "        return #{target_class}.where(#{fk}=self.id)\n\n"
-
-            if assoc.options["dependent"]? == "destroy"
-              io << "    def destroy_#{assoc.name}(self):\n"
-              io << "        for item in self.#{assoc.name}():\n"
-              io << "            item.destroy()\n\n"
-            end
+            io << "        return #{target_class}.where(#{fk}=self.id)\n"
           when :belongs_to
             target_class = Inflector.classify(assoc.name)
-            fk = assoc.name + "_id"
-            io << "    def #{assoc.name}(self):\n"
+            io << "\n    def #{assoc.name}(self):\n"
             io << "        from .#{Inflector.underscore(target_class)} import #{target_class}\n"
-            io << "        return #{target_class}.find(self.#{fk})\n\n"
+            io << "        return #{target_class}.find(self.#{assoc.name}_id)\n"
           end
         end
 
