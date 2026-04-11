@@ -8,5 +8,7 @@ dependencies:
     github: crystal-lang/crystal-sqlite3
   llvm:
     path: stubs/llvm
+  ast-builder:
+    path: shards/ast-builder
 
 crystal: ">= 1.10.0"

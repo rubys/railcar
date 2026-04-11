@@ -22,10 +22,12 @@
 #   _buf += '</form>'
 
 require "compiler/crystal/syntax"
+require "ast-builder"
 require "../generator/inflector"
 
 module Railcar
   class FormToHTML < Crystal::Transformer
+    include CrystalAST::Builder
     # Transform _buf.append= form_with(...) do |form| ... end
     # into a sequence of _buf += "..." string operations
     def transform(node : Crystal::Call) : Crystal::ASTNode
@@ -99,11 +101,9 @@ module Railcar
       elsif model_var
         plural = Inflector.pluralize(model_var)
         # Dynamic form: new vs edit
-        stmts << buf_append(Crystal::Call.new(nil, "form_with_open_tag",
-          named_args: [
-            Crystal::NamedArgument.new("model", Crystal::Var.new(model_var)),
-            css_class ? Crystal::NamedArgument.new("class", Crystal::StringLiteral.new(css_class)) : nil,
-          ].compact))
+        na = [named("model", var(model_var))]
+        na << named("class", css_class) if css_class
+        stmts << buf_append(call("form_with_open_tag", named_args: na))
       else
         stmts << buf_str("<form method=\"post\"#{css_attr}>")
       end
@@ -175,10 +175,9 @@ module Railcar
         field_id = "#{model_prefix}_#{field}"
         css = extract_named_string(call, "class")
         css_attr = css ? " class=\"#{css}\"" : ""
-        # Value needs to be dynamic — use _buf.append= with interpolation
         buf_concat(
           "<input type=\"text\" name=\"#{model_prefix}[#{field}]\" id=\"#{field_id}\" value=\"",
-          Crystal::Call.new(Crystal::Var.new(model_prefix), field),
+          call(var(model_prefix), field),
           "\"#{css_attr}>"
         )
       when "text_area", "textarea"
@@ -190,7 +189,7 @@ module Railcar
         rows_attr = rows ? " rows=\"#{rows}\"" : ""
         buf_concat(
           "<textarea name=\"#{model_prefix}[#{field}]\" id=\"#{field_id}\"#{rows_attr}#{css_attr}>\n",
-          Crystal::Call.new(Crystal::Var.new(model_prefix), field),
+          call(var(model_prefix), field),
           "</textarea>"
         )
       when "submit"
@@ -200,12 +199,9 @@ module Railcar
         if explicit_text
           buf_str("<button type=\"submit\"#{css_attr}>#{explicit_text}</button>")
         else
-          # Dynamic submit text based on model state
-          buf_append(Crystal::Call.new(nil, "form_submit_tag",
-            named_args: [
-              Crystal::NamedArgument.new("model", Crystal::Var.new(model_prefix)),
-              css ? Crystal::NamedArgument.new("class", Crystal::StringLiteral.new(css)) : nil,
-            ].compact))
+          na = [named("model", var(model_prefix))]
+          na << named("class", css) if css
+          buf_append(call("form_submit_tag", named_args: na))
         end
       else
         buf_str("")
@@ -213,34 +209,6 @@ module Railcar
     end
 
     # --- Helpers ---
-
-    # _buf += "string"
-    private def buf_str(s : String) : Crystal::ASTNode
-      Crystal::OpAssign.new(
-        Crystal::Var.new("_buf"),
-        "+",
-        Crystal::StringLiteral.new(s)
-      )
-    end
-
-    # _buf.append= expr (will become _buf += str(expr) in Python, <%= expr %> in Crystal)
-    private def buf_append(expr : Crystal::ASTNode) : Crystal::ASTNode
-      Crystal::Call.new(
-        Crystal::Var.new("_buf"),
-        "append=",
-        [Crystal::Call.new(expr, "to_s")] of Crystal::ASTNode
-      )
-    end
-
-    # _buf += "before" + str(expr) + "after"
-    # Emitted as three statements: buf_str + buf_append + buf_str
-    private def buf_concat(before : String, expr : Crystal::ASTNode, after : String) : Crystal::ASTNode
-      Crystal::Expressions.new([
-        buf_str(before),
-        buf_append(expr),
-        buf_str(after),
-      ] of Crystal::ASTNode)
-    end
 
     private def unwrap_to_s(node : Crystal::ASTNode?) : Crystal::ASTNode?
       return nil unless node
