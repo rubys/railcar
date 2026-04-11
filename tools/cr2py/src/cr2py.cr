@@ -124,7 +124,7 @@ module Cr2Py
         io << "from .base import ApplicationRecord\n\n\n"
         io << "class #{name}(ApplicationRecord):\n"
         io << "    TABLE = '#{table}'\n"
-        io << "    COLUMNS = #{columns.map(&.[0].inspect).to_a}\n"
+        io << "    COLUMNS = [#{columns.map { |c| "\"#{c[0]}\"" }.join(", ")}]\n"
         io << "    VALIDATIONS = #{validations}\n"
         io << "    ASSOCIATIONS = #{associations}\n"
 
@@ -135,9 +135,9 @@ module Cr2Py
             next unless ret
             ret_str = ret.to_s
 
-            if ret_str.starts_with?("Railcar::CollectionProxy(")
+            if ret_str.includes?("CollectionProxy(")
               # has_many
-              target = ret_str.gsub(/.*CollectionProxy\(Railcar::(\w+)\).*/, "\\1")
+              target = ret_str.scan(/CollectionProxy\(Railcar::(\w+)\)/).first?.try(&.[1]) || Railcar::Inflector.classify(method_name)
               fk = Railcar::Inflector.underscore(name) + "_id"
               io << "\n    def #{method_name}(self):\n"
               io << "        from .#{Railcar::Inflector.underscore(target)} import #{target}\n"
@@ -473,12 +473,13 @@ module Cr2Py
           return
         end
 
-        # response.headers["Location"] = path
+        # response.headers["Location"] = path → raise redirect
         if obj.to_s == "response.headers" || (obj.is_a?(Crystal::Call) && obj.name == "headers")
-          # Extract the path value
           path_expr = call.args[1]? || call.args[0]?
           if path_expr
-            io << "    raise web.HTTPSeeOther(#{emit_path_expr(path_expr, singular, plural)})\n"
+            # create uses HTTPFound (302), update/destroy use HTTPSeeOther (303)
+            exc = action_name == "create" ? "web.HTTPFound" : "web.HTTPSeeOther"
+            io << "    raise #{exc}(#{emit_path_expr(path_expr, singular, plural)})\n"
           end
           return
         end
@@ -501,18 +502,16 @@ module Cr2Py
                                    controller_name : String, model_name : String,
                                    singular : String, plural : String)
       cond = node.cond
-      io << "    if #{emit_cond_expr(cond, singular)}:\n"
+      io << "    if #{emit_cond_expr(cond, singular, io, model_name)}:\n"
 
-      # Then branch
+      # Then branch — statements need extra indent (inside if)
       then_body = node.then
       case then_body
       when Crystal::Expressions
         then_body.expressions.each do |expr|
-          io << "    "
           emit_action_statement(io, expr, action_name, controller_name, model_name, singular, plural)
         end
       else
-        io << "    "
         emit_action_statement(io, then_body, action_name, controller_name, model_name, singular, plural)
       end
 
@@ -523,11 +522,9 @@ module Cr2Py
           case else_body
           when Crystal::Expressions
             else_body.expressions.each do |expr|
-              io << "    "
               emit_action_statement(io, expr, action_name, controller_name, model_name, singular, plural)
             end
           else
-            io << "    "
             emit_action_statement(io, else_body, action_name, controller_name, model_name, singular, plural)
           end
         end
@@ -556,20 +553,31 @@ module Cr2Py
         end
       end
 
-      # Railcar::Article.includes(...).order(...)  → Article.all(order_by=...)
-      if obj.to_s.starts_with?("Railcar::") || (obj.is_a?(Crystal::Call) && obj.to_s.includes?("includes"))
+      # Railcar::Article.includes(...).order(...) or any chain → Article.all(order_by=...)
+      if obj.to_s.includes?("includes") || obj.to_s.includes?("order") || (name == "order" || name == "includes")
         return "#{target} = #{model_name}.all(order_by='created_at DESC')"
+      end
+
+      # Railcar::Model.new or .find without params
+      if obj.to_s.starts_with?("Railcar::")
+        return "#{target} = #{model_name}.#{name}(#{args.map(&.to_s).join(", ")})"
       end
 
       "#{target} = #{value.to_s}"
     end
 
-    private def emit_cond_expr(cond : Crystal::ASTNode, singular : String) : String
+    private def emit_cond_expr(cond : Crystal::ASTNode, singular : String,
+                               io : IO? = nil, model_name : String? = nil) : String
       case cond
       when Crystal::Call
         if cond.name == "save" && cond.obj
           return "#{singular}.save()"
-        elsif cond.name == "update" && cond.obj
+        elsif cond.name == "update" && cond.obj && io && model_name
+          # Emit field assignments before the condition
+          columns = extract_data_columns(model_name)
+          columns.each do |c|
+            io << "    #{singular}.#{c} = form_value(data, '#{singular}[#{c}]')\n"
+          end
           return "#{singular}.save()"
         end
       end
@@ -577,16 +585,35 @@ module Cr2Py
     end
 
     private def emit_render_call(call : Crystal::Call, action_name : String, singular : String) : String
-      "layout(render_#{action_name}(#{singular}=#{singular}))"
+      plural = Railcar::Inflector.pluralize(singular)
+      # Map action to template: create→new, update→edit, others→same name
+      template = case action_name
+                 when "create" then "new"
+                 when "update" then "edit"
+                 else action_name
+                 end
+      # Index uses plural (articles), others use singular (article)
+      param = action_name == "index" ? "#{plural}=#{plural}" : "#{singular}=#{singular}"
+      "layout(render_#{template}(#{param}))"
     end
 
     private def emit_path_expr(expr : Crystal::ASTNode, singular : String, plural : String) : String
-      expr_str = expr.to_s
-      if expr_str.includes?("_path")
-        expr_str.gsub("Railcar::", "").gsub(/(\w+)_path\b/) { "#{$1}_path(#{singular})" }
-                .gsub("#{plural}_path(#{singular})", "#{plural}_path()")
+      case expr
+      when Crystal::Call
+        name = expr.name
+        if name.ends_with?("_path")
+          args = expr.args
+          if args.empty?
+            "#{name}()"
+          else
+            arg_strs = args.map { |a| a.to_s.gsub("Railcar::", "").downcase }
+            "#{name}(#{arg_strs.join(", ")})"
+          end
+        else
+          expr.to_s
+        end
       else
-        expr_str
+        expr.to_s.gsub("Railcar::", "")
       end
     end
 
@@ -803,7 +830,8 @@ module Cr2Py
           ret_str = ret.to_s
 
           if ret_str.includes?("CollectionProxy")
-            target = ret_str.gsub(/.*CollectionProxy\(Railcar::(\w+)\).*/, "\\1")
+            target_match = ret_str.match(/CollectionProxy\(Railcar::(\w+)\)/)
+            target = target_match ? target_match[1] : Railcar::Inflector.classify(Railcar::Inflector.singularize(method_name))
             mod = Railcar::Inflector.underscore(target)
             # Check for dependent: :destroy
             has_destroy = type.defs.try(&.has_key?("destroy"))
