@@ -12,6 +12,7 @@ require "../../../src/generator/python_emitter"
 require "../../../src/generator/python_model_runtime"
 require "../../../src/generator/inflector"
 require "file_utils"
+require "./py_ast"
 
 module Cr2Py
   class Transpiler
@@ -665,6 +666,8 @@ module Cr2Py
           end
           io << "\n"
 
+          mod_nodes = [] of PyAST::Node
+
           Dir.glob(File.join(ecr_dir, "*.ecr")).sort.each do |ecr_path|
             basename = File.basename(ecr_path, ".ecr")
             is_partial = basename.starts_with?('_')
@@ -676,20 +679,32 @@ module Cr2Py
                         end
 
             # Determine parameters
+            args = if is_partial
+                     ["*args"]
+                   elsif basename == "index"
+                     [plural, "notice=None"]
+                   else
+                     [singular, "notice=None"]
+                   end
+
+            # Build function body
+            body = [] of PyAST::Node
             if is_partial
-              io << "def #{func_name}(*args):\n"
-              io << "    #{singular} = args[-1] if args else None\n"
-            elsif basename == "index"
-              io << "def #{func_name}(#{plural}, notice=None):\n"
-            else
-              io << "def #{func_name}(#{singular}, notice=None):\n"
+              body << PyAST::Assign.new(singular, "args[-1] if args else None")
             end
+            body << PyAST::Assign.new("_buf", "''")
 
             ecr_source = File.read(ecr_path)
-            io << "    _buf = ''\n"
-            transpile_ecr(ecr_source, io, singular, model_name)
-            io << "    return _buf\n\n"
+            transpile_ecr_to_ast(ecr_source, body, singular, model_name)
+
+            body << PyAST::Return.new("_buf")
+
+            mod_nodes << PyAST::Func.new(func_name, args, body)
           end
+
+          # Serialize
+          serializer = PyAST::Serializer.new
+          io << serializer.serialize(PyAST::Module.new(mod_nodes))
         end
 
         File.write(File.join(views_dir, "#{controller_name}.py"), io)
@@ -697,28 +712,24 @@ module Cr2Py
       end
     end
 
-    # Transpile ECR template to Python _buf string building
-    private def transpile_ecr(source : String, io : IO, singular : String, model_name : String)
+    # Transpile ECR template to PyAST nodes
+    private def transpile_ecr_to_ast(source : String, nodes : Array(PyAST::Node),
+                                      singular : String, model_name : String)
       pos = 0
-      depth = 0  # track if/for nesting for indentation
+      # Stack of node arrays for nesting (if/for blocks)
+      stack = [nodes]
 
       while pos < source.size
         tag_start = source.index("<%", pos)
 
         if tag_start.nil?
           remaining = source[pos..]
-          unless remaining.empty?
-            indent = "    " + "    " * depth
-            io << "#{indent}_buf += #{python_string(remaining)}\n"
-          end
+          stack.last << PyAST::BufLiteral.new(remaining) unless remaining.empty?
           break
         end
 
         text = source[pos...tag_start]
-        unless text.empty?
-          indent = "    " + "    " * depth
-          io << "#{indent}_buf += #{python_string(text)}\n"
-        end
+        stack.last << PyAST::BufLiteral.new(text) unless text.empty?
 
         tag_end = source.index("%>", tag_start)
         break unless tag_end
@@ -728,14 +739,73 @@ module Cr2Py
         if raw.starts_with?('=')
           expr = raw[1..].strip
           py_expr = crystal_expr_to_python(expr, singular, model_name)
-          indent = "    " + "    " * depth
-          io << "#{indent}_buf += str(#{py_expr})\n"
+          stack.last << PyAST::BufAppend.new(py_expr)
         else
-          depth = emit_ecr_statement(raw, io, singular, model_name, depth)
+          process_ecr_statement(raw, stack, singular, model_name)
         end
 
         pos = tag_end + 2
       end
+    end
+
+    private def process_ecr_statement(stmt : String, stack : Array(Array(PyAST::Node)),
+                                       singular : String, model_name : String)
+      stripped = stmt.strip
+
+      # end — pop the stack
+      if stripped == "end"
+        stack.pop if stack.size > 1
+        return
+      end
+
+      # else — start a new branch on the current If node
+      if stripped == "else"
+        # The current stack.last is the if body. Find the If node in the parent.
+        if stack.size > 1
+          if_body = stack.pop
+          parent = stack.last
+          if_node = parent.last
+          if if_node.is_a?(PyAST::If)
+            else_body = [] of PyAST::Node
+            # Replace the If with one that has an else branch
+            parent[-1] = PyAST::If.new(if_node.cond, if_body, else_body)
+            stack.push(else_body)
+          end
+        end
+        return
+      end
+
+      # if condition
+      if stripped =~ /^if\s+(.+)$/
+        cond = crystal_expr_to_python($1, singular, model_name)
+        body = [] of PyAST::Node
+        if_node = PyAST::If.new(cond, body)
+        stack.last << if_node
+        stack.push(body)
+        return
+      end
+
+      # collection.each do |var|
+      if stripped =~ /(\w+(?:\.\w+(?:\([^)]*\))?)*)\.each\s+do\s*\|(\w+)\|/
+        collection = crystal_expr_to_python($1, singular, model_name)
+        var = $2
+        body = [] of PyAST::Node
+        for_node = PyAST::For.new(var, collection, body)
+        stack.last << for_node
+        stack.push(body)
+        return
+      end
+
+      # Variable assignment
+      if stripped =~ /^(\w+)\s*=\s*(.+)$/
+        var = $1
+        value = crystal_expr_to_python($2, singular, model_name)
+        stack.last << PyAST::Assign.new(var, value)
+        return
+      end
+
+      # Anything else
+      stack.last << PyAST::Statement.new("# #{stripped}")
     end
 
     # Convert a Crystal expression to Python
@@ -784,67 +854,7 @@ module Cr2Py
       py
     end
 
-    # Emit an ECR code statement as Python. Returns updated depth.
-    private def emit_ecr_statement(stmt : String, io : IO, singular : String, model_name : String, depth : Int32) : Int32
-      stripped = stmt.strip
-      indent = "    " + "    " * depth
-
-      # end — decrease depth (before emitting)
-      if stripped == "end"
-        return {depth - 1, 0}.max
-      end
-
-      # else — decrease then increase (same level as if)
-      if stripped == "else"
-        outer_indent = "    " + "    " * {depth - 1, 0}.max
-        io << "#{outer_indent}else:\n"
-        return depth
-      end
-
-      # elsif
-      if stripped =~ /^elsif\s+(.+)$/
-        cond = crystal_expr_to_python($1, singular, model_name)
-        outer_indent = "    " + "    " * {depth - 1, 0}.max
-        io << "#{outer_indent}elif #{cond}:\n"
-        return depth
-      end
-
-      # if condition — emit and increase depth
-      if stripped =~ /^if\s+(.+)$/
-        cond = crystal_expr_to_python($1, singular, model_name)
-        io << "#{indent}if #{cond}:\n"
-        return depth + 1
-      end
-
-      # collection.each do |var| — emit for and increase depth
-      if stripped =~ /(\w+(?:\.\w+(?:\([^)]*\))?)*)\.each\s+do\s*\|(\w+)\|/
-        collection = crystal_expr_to_python($1, singular, model_name)
-        var = $2
-        io << "#{indent}for #{var} in #{collection}:\n"
-        return depth + 1
-      end
-
-      # Variable assignment
-      if stripped =~ /^(\w+)\s*=\s*(.+)$/
-        var = $1
-        value = crystal_expr_to_python($2, singular, model_name)
-        io << "#{indent}#{var} = #{value}\n"
-        return depth
-      end
-
-      # Anything else — comment it out
-      io << "#{indent}# #{stripped}\n"
-      depth
-    end
-
-    # Convert a string to a Python string literal (triple-quoted if multiline)
-    private def python_string(s : String) : String
-      if s.includes?('\n') || s.includes?('"')
-        "'''#{s.gsub("'''", "\\\\'''").gsub("\\", "\\\\\\\\")}'''"
-      else
-        s.inspect
-      end
-    end
+    # (ECR statement handling moved to process_ecr_statement with PyAST)
 
     # --- App ---
 
