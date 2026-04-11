@@ -60,11 +60,24 @@ module Railcar
 
         io = IO::Memory.new
         io << "from helpers import *\n"
-        # Import other view modules for cross-controller partials
-        app.controllers.each do |other_info|
-          other_name = Inflector.underscore(other_info.name).chomp("_controller")
-          next if other_name == controller_name
-          io << "from views.#{other_name} import *\n"
+        io << "from models import *\n"
+
+        # Check if ERB files reference associations that use partials from other controllers
+        # Only import if needed (to avoid circular imports)
+        rails_controller_views_check = File.join(rails_views, controller_name)
+        if Dir.exists?(rails_controller_views_check)
+          all_erb = Dir.glob(File.join(rails_controller_views_check, "*.html.erb")).map { |p| File.read(p) }.join
+          app.models.each do |mname, mmodel|
+            mmodel.associations.each do |assoc|
+              next unless assoc.kind == :has_many
+              assoc_controller = Inflector.pluralize(Inflector.singularize(assoc.name))
+              next if assoc_controller == controller_name
+              # Check if any ERB renders this association
+              if all_erb.includes?("render @") && all_erb.includes?(".#{assoc.name}")
+                io << "from views.#{assoc_controller} import *\n"
+              end
+            end
+          end
         end
         io << "\n"
 
@@ -81,8 +94,10 @@ module Railcar
                       end
 
           # Determine function parameters
+          # Partials may be called as partial(child) or partial(parent, child)
+          # from RenderToPartial which passes parent as first arg for associations
           params = if is_partial
-                     [singular]
+                     ["*args"]
                    else
                      # Page views get the plural collection or singular model
                      case basename
@@ -100,6 +115,10 @@ module Railcar
           body = transpile_erb(source, controller_name, model_name, is_partial ? [singular] : params.map { |p| p.split('=').first })
 
           io << "def #{func_name}(#{params.join(", ")}):\n"
+          if is_partial
+            # Unpack *args: called as partial(child) or partial(parent, child)
+            io << "    #{singular} = args[-1] if args else None\n"
+          end
           body.each_line do |line|
             io << "    " << line.rstrip << "\n" unless line.strip.empty? && io.to_s.ends_with?("\n\n")
           end

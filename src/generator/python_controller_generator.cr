@@ -149,6 +149,27 @@ module Railcar
         end
       end
 
+      # Also extract params from action body (e.g., comments#destroy has params.expect(:id))
+      already_extracted = Set(String).new
+      before_actions.each do |ba|
+        next if ba.only && !ba.only.not_nil!.includes?(name)
+        if method_body = private_methods[ba.method_name]?
+          translated_ba = PrismTranslator.new.translate(method_body)
+          translated_ba = translated_ba.transform(ParamsExpect.new)
+          find_param_names(translated_ba).each { |p| already_extracted << p }
+        end
+      end
+
+      if body = action.body
+        translated_for_params = PrismTranslator.new.translate(body)
+        translated_for_params = translated_for_params.transform(ParamsExpect.new)
+        find_param_names(translated_for_params).each do |param_name|
+          next if already_extracted.includes?(param_name)
+          io << "    #{param_name} = int(request.match_info['#{param_name}'])\n"
+          already_extracted << param_name
+        end
+      end
+
       # Parse form data (accept pre-parsed data from dispatcher)
       if needs_form
         io << "    if data is None:\n"
@@ -207,6 +228,9 @@ module Railcar
         # Post-process: replace ActiveRecord query chains with Python model API
         body_py = simplify_query_chain(body_py, model_name)
 
+        # Post-process: replace association.build/create/find patterns
+        body_py = expand_association_calls(body_py, singular, model_name, columns)
+
         body_py.each_line do |line|
           stripped = line.strip
           next if stripped.empty? && io.to_s.ends_with?("\n\n")
@@ -244,8 +268,8 @@ module Railcar
       when Crystal::Assign
         names.concat(find_param_names(node.value))
       when Crystal::Call
-        # Look for Model.find(var) — the var is a param name
-        if node.name == "find" && node.obj.is_a?(Crystal::Path)
+        # Look for .find(var) — the var is a param name
+        if node.name == "find"
           node.args.each do |arg|
             names << arg.as(Crystal::Var).name if arg.is_a?(Crystal::Var)
           end
@@ -255,6 +279,33 @@ module Railcar
         node.args.each { |a| names.concat(find_param_names(a)) }
       end
       names.uniq
+    end
+
+    # Replace association method calls with direct model construction
+    # article.comments().build(extract_model_params(params, "comment"))
+    #   → Comment(article_id=article.id, commenter=form_value(data, 'comment[commenter]'), ...)
+    # article.comments().find(id) → Comment.find(id)
+    private def expand_association_calls(source : String, model_singular : String,
+                                          model_name : String, columns : Array(String)) : String
+      result = source
+
+      # parent.assoc().build(extract_model_params(params, "model"))
+      result = result.gsub(/(\w+)\.\w+\(\)\.build\(extract_model_params\(params, "#{model_singular}"\)\)/) do
+        parent_var = $1
+        parent_model = Inflector.classify(parent_var)
+        fk = Inflector.underscore(parent_model) + "_id"
+        # Exclude the FK column since we set it explicitly from the parent
+        non_fk_columns = columns.reject { |c| c == fk }
+        field_args = non_fk_columns.map { |c| "#{c}=form_value(data, '#{model_singular}[#{c}]')" }.join(", ")
+        "#{model_name}(#{fk}=#{parent_var}.id, #{field_args})"
+      end
+
+      # parent.assoc().find(id) → Model.find(id)
+      result = result.gsub(/\w+\.\w+\(\)\.find\((\w+)\)/) do
+        "#{model_name}.find(#{$1})"
+      end
+
+      result
     end
 
     # Simplify ActiveRecord query chains to Python model API

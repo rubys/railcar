@@ -369,11 +369,7 @@ module Railcar
       io << "        parent, child = model\n"
       io << "        parent_name = type(parent).__name__.lower()\n"
       io << "        child_name = type(child).__name__.lower()\n"
-      io << "        from helpers import globals as _g\n"
-      io << "        path_func = f'{parent_name}_{child_name}s_path'\n"
-      io << "        import sys\n"
-      io << "        mod = sys.modules[__name__]\n"
-      io << "        action = getattr(mod, path_func)(parent)\n"
+      io << "        action = f'/{parent_name}s/{parent.id}/{child_name}s'\n"
       io << "        return f'<form action=\"{action}\" method=\"post\"{cls_attr}>'\n"
       io << "    elif model is not None:\n"
       io << "        name = type(model).__name__.lower()\n"
@@ -410,8 +406,9 @@ module Railcar
 
           io << "def #{parent_singular}_#{child_name}_path(#{parent_singular}):\n"
           io << "    return f'/#{parent_plural}/{#{parent_singular}.id}/#{child_name}'\n\n"
-          io << "def #{parent_singular}_#{child_singular}_path(#{parent_singular}_id, #{child_singular}):\n"
-          io << "    return f'/#{parent_plural}/{#{parent_singular}_id}/#{child_name}/{#{child_singular}.id}'\n\n"
+          io << "def #{parent_singular}_#{child_singular}_path(#{parent_singular}_or_id, #{child_singular}):\n"
+          io << "    pid = #{parent_singular}_or_id.id if hasattr(#{parent_singular}_or_id, 'id') else #{parent_singular}_or_id\n"
+          io << "    return f'/#{parent_plural}/{pid}/#{child_name}/{#{child_singular}.id}'\n\n"
         end
       end
 
