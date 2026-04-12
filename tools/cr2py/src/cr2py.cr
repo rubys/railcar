@@ -629,6 +629,18 @@ module Cr2Py
 
       # .new → constructor: ClassName(...)
       if name == "new" && obj
+        # Generic collection constructors → empty literals
+        if obj.is_a?(Crystal::Generic) && args.empty? && named.nil?
+          base = obj.name.to_s.gsub("Railcar::", "").gsub("::", "")
+          case base
+          when "Hash", "NamedTuple"     then return "{}"
+          when "Array"                  then return "[]"
+          when "Set"                    then return "set()"
+          else
+            # Other generics with no args → just call the base type
+            return "#{crystal_type_to_python(base)}()"
+          end
+        end
         return "#{to_expr(obj)}(#{emit_args(args, named)})"
       end
 
@@ -853,7 +865,8 @@ module Cr2Py
         .gsub("HTTP::Server::Context", "Any")
         .gsub("HTTP::Server::Response", "Any")
         .gsub("HTTP::Request", "Any")
-        # Remove :: (Crystal namespace separator)
+        # Remove :: and Railcar namespace
+        .gsub("Railcar::", "")
         .gsub("::", "")
         # Type name mappings
         .gsub("String", "str")
@@ -865,6 +878,7 @@ module Cr2Py
         .gsub("Nil", "None")
         .gsub("Array", "list")
         .gsub("Hash", "dict")
+        .gsub(/NamedTuple\([^)]*\)/, "dict")
         .gsub("NamedTuple", "dict")
         .gsub("Symbol", "str")
         .gsub("Time", "str")
@@ -896,6 +910,29 @@ result = CrystalAnalyzer.analyze(entry, include_specs: true)
 
 puts "  #{result.files.size} source files, #{result.views.size} views, #{result.tests.size} tests"
 
+# Generate import statements based on symbols used in the content
+def generate_imports(content : String, is_test : Bool = false) : String
+  imports = [] of String
+
+  imports << "from __future__ import annotations" if content.includes?("->") || content.includes?(": ")
+  imports << "from typing import Any" if content.includes?("Any")
+  imports << "from typing import Self" if content.includes?("Self")
+  imports << "import sqlite3" if content.includes?("sqlite3.")
+  imports << "import logging" if content.includes?("logging.")
+  imports << "from datetime import datetime" if content.includes?("datetime.")
+
+  # Test files import from conftest
+  if is_test
+    imports << "from conftest import *"
+  end
+
+  if imports.empty?
+    ""
+  else
+    imports.join("\n") + "\n\n"
+  end
+end
+
 Dir.mkdir_p(output_dir)
 emitter = Cr2Py::Emitter.new(result.program)
 serializer = PyAST::Serializer.new
@@ -916,7 +953,9 @@ result.files.each do |filename, info|
   end
 
   mod = PyAST::Module.new(nodes)
-  File.write(out_path, serializer.serialize(mod))
+  content = serializer.serialize(mod)
+  imports = generate_imports(content)
+  File.write(out_path, imports + content)
   puts "  #{py_filename}"
 end
 
@@ -931,7 +970,9 @@ result.views.each do |ecr_filename, ast|
 
   nodes = emitter.to_nodes(ast.transform(db_filter))
   mod = PyAST::Module.new(nodes)
-  File.write(out_path, serializer.serialize(mod))
+  content = serializer.serialize(mod)
+  imports = generate_imports(content)
+  File.write(out_path, imports + content)
   puts "  #{py_filename}"
 end
 
@@ -962,7 +1003,10 @@ result.tests.each do |filename, info|
   end
 
   mod = PyAST::Module.new(nodes)
-  File.write(out_path, serializer.serialize(mod))
+  content = serializer.serialize(mod)
+  is_test = !py_filename.includes?("conftest")
+  imports = generate_imports(content, is_test: is_test)
+  File.write(out_path, imports + content)
   puts "  #{py_filename}"
 end
 
