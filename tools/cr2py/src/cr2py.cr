@@ -14,6 +14,7 @@ require "../../../shards/crystal-analyzer/src/crystal-analyzer"
 require "./py_ast"
 require "./filters/spec_filter"
 require "./filters/db_filter"
+require "./filters/overload_filter"
 
 module Cr2Py
   PYTHON_KEYWORDS = %w[False True None and as assert async await break class
@@ -55,6 +56,16 @@ module Cr2Py
         @in_class = true
         body = body_to_nodes(node.body)
         @in_class = old_in_class
+        # Deduplicate methods with same Python name (e.g., create and create!)
+        seen_methods = Set(String).new
+        body = body.reject do |n|
+          if n.is_a?(PyAST::Func) && seen_methods.includes?(n.name)
+            true
+          else
+            seen_methods << n.name if n.is_a?(PyAST::Func)
+            false
+          end
+        end
         [PyAST::Class.new(name, superclass, body)] of PyAST::Node
 
       when Crystal::Def
@@ -319,10 +330,24 @@ module Cr2Py
         if restriction = arg.restriction
           "#{aname}: #{crystal_type_to_python(restriction.to_s)}"
         elsif default = arg.default_value
-          "#{aname}=#{to_expr(default)}"
+          default_str = to_expr(default)
+          # Python can't use self.x in default args — use None sentinel
+          if default_str.includes?("self.")
+            "#{aname}=None"
+          else
+            "#{aname}=#{default_str}"
+          end
         else
           aname
         end
+      end
+
+      # Add *splat and **double_splat
+      if si = node.splat_index
+        args.insert(si, "*#{args.delete_at(si)}")
+      end
+      if ds = node.double_splat
+        args << "**#{python_name(ds.name)}"
       end
 
       # Add self/cls for class members
@@ -703,6 +728,10 @@ module Cr2Py
       vars = block.args.map(&.name).join(", ")
       vars = "_" if vars.empty?
       collection = to_expr(call.obj.not_nil!)
+      # Crystal Hash#each yields (key, value) pairs — Python needs .items()
+      if block.args.size == 2
+        collection = "#{collection}.items()"
+      end
       body = body_to_nodes(block.body)
       [PyAST::For.new(vars, collection, body)] of PyAST::Node
     end
@@ -911,7 +940,35 @@ result = CrystalAnalyzer.analyze(entry, include_specs: true)
 puts "  #{result.files.size} source files, #{result.views.size} views, #{result.tests.size} tests"
 
 # Generate import statements based on symbols used in the content
-def generate_imports(content : String, is_test : Bool = false) : String
+# Build export map: Crystal name → Python module path + class name
+export_map = {} of String => {String, String}  # crystal_name → {py_module, py_name}
+
+all_files = result.files.merge(result.tests)
+all_files.each do |filename, info|
+  py_module = filename
+    .sub(/^src\//, "")
+    .sub(/^spec\//, "tests/")
+    .sub(/\.cr$/, "")
+    .gsub("/", ".")
+
+  # Rename spec files
+  py_module = py_module.sub(/\.(\w+)_spec$/) { ".test_#{$1}" }
+  py_module = py_module.sub(".spec_helper", ".conftest")
+
+  info.exports.each do |export_name|
+    # Skip bare module names like "Railcar"
+    next if export_name == "Railcar"
+    next if %w[COLUMNS VALIDATIONS HAS_MANY BELONGS_TO Log].includes?(export_name)
+
+    # Strip Railcar:: prefix for Python name
+    py_name = export_name.gsub("Railcar::", "").gsub("::", ".")
+    export_map[export_name] = {py_module, py_name}
+  end
+end
+
+def generate_imports(content : String, file_imports : Array(String),
+                     export_map : Hash(String, {String, String}),
+                     is_test : Bool = false, own_module : String = "") : String
   imports = [] of String
 
   imports << "from __future__ import annotations" if content.includes?("->") || content.includes?(": ")
@@ -923,7 +980,52 @@ def generate_imports(content : String, is_test : Bool = false) : String
 
   # Test files import from conftest
   if is_test
-    imports << "from conftest import *"
+    imports << "from tests.conftest import *"
+  end
+
+  # Cross-file imports based on analyzer metadata
+  # Skip Crystal built-in types and modules that are included (inlined)
+  skip_imports = %w[DB String Int32 Int64 Float64 Bool Nil Array Hash Symbol
+    Time IO HTTP Set Broadcasts RouteHelpers ViewHelpers]
+
+  seen_modules = Set(String).new
+  file_imports.each do |crystal_import|
+    short_name = crystal_import.gsub("Railcar::", "").gsub("::", ".")
+    next if skip_imports.includes?(short_name)
+
+    # Try exact match, then qualified with Railcar::
+    entry = export_map[crystal_import]? ||
+            export_map["Railcar::#{crystal_import}"]?
+    if entry
+      py_module, py_name = entry
+      next if py_module == own_module  # don't import from self
+      import_stmt = "from #{py_module} import #{py_name}"
+      unless seen_modules.includes?(import_stmt)
+        imports << import_stmt
+        seen_modules << import_stmt
+      end
+    end
+  end
+
+  # Also scan content for class names (capitalized) that need importing
+  # Strip comments first to avoid false matches
+  code_lines = content.lines.reject(&.strip.starts_with?("#")).join("\n")
+  export_map.each do |crystal_name, entry|
+    py_module, py_name = entry
+    next if py_module == own_module
+    next if py_name.includes?(".")          # skip qualified names
+    next unless py_name[0]?.try(&.uppercase?) # only match class names (capitalized)
+    # Check if the Python name appears in the code as a reference
+    if code_lines.includes?("(#{py_name})") ||       # superclass: class Foo(Bar)
+       code_lines.includes?("#{py_name}(") ||         # constructor: Bar(...)
+       code_lines.includes?("#{py_name}.") ||         # class method: Bar.method()
+       code_lines.includes?(": #{py_name}")           # type annotation: x: Bar
+      import_stmt = "from #{py_module} import #{py_name}"
+      unless seen_modules.includes?(import_stmt)
+        imports << import_stmt
+        seen_modules << import_stmt
+      end
+    end
   end
 
   if imports.empty?
@@ -936,7 +1038,11 @@ end
 Dir.mkdir_p(output_dir)
 emitter = Cr2Py::Emitter.new(result.program)
 serializer = PyAST::Serializer.new
+overload_filter = Cr2Py::OverloadFilter.new
 db_filter = Cr2Py::DbFilter.new
+
+# Create __init__.py for each subdirectory to make them Python packages
+created_dirs = Set(String).new
 
 # Emit source files
 result.files.each do |filename, info|
@@ -949,12 +1055,13 @@ result.files.each do |filename, info|
 
   nodes = [] of PyAST::Node
   info.nodes.each do |node|
-    nodes.concat(emitter.to_nodes(node.transform(db_filter)))
+    nodes.concat(emitter.to_nodes(node.transform(overload_filter).transform(db_filter)))
   end
 
   mod = PyAST::Module.new(nodes)
   content = serializer.serialize(mod)
-  imports = generate_imports(content)
+  own_module = py_filename.sub(/\.py$/, "").gsub("/", ".")
+  imports = generate_imports(content, info.imports, export_map, own_module: own_module)
   File.write(out_path, imports + content)
   puts "  #{py_filename}"
 end
@@ -968,10 +1075,10 @@ result.views.each do |ecr_filename, ast|
   out_path = File.join(output_dir, py_filename)
   Dir.mkdir_p(File.dirname(out_path))
 
-  nodes = emitter.to_nodes(ast.transform(db_filter))
+  nodes = emitter.to_nodes(ast.transform(overload_filter).transform(db_filter))
   mod = PyAST::Module.new(nodes)
   content = serializer.serialize(mod)
-  imports = generate_imports(content)
+  imports = generate_imports(content, [] of String, export_map)
   File.write(out_path, imports + content)
   puts "  #{py_filename}"
 end
@@ -998,16 +1105,31 @@ result.tests.each do |filename, info|
   # Transform spec AST → pytest AST, then emit
   nodes = [] of PyAST::Node
   info.nodes.each do |node|
-    transformed = node.transform(db_filter).transform(spec_filter)
+    transformed = node.transform(overload_filter).transform(db_filter).transform(spec_filter)
     nodes.concat(emitter.to_nodes(transformed))
   end
 
   mod = PyAST::Module.new(nodes)
   content = serializer.serialize(mod)
   is_test = !py_filename.includes?("conftest")
-  imports = generate_imports(content, is_test: is_test)
+  imports = generate_imports(content, info.imports, export_map, is_test: is_test)
   File.write(out_path, imports + content)
   puts "  #{py_filename}"
+end
+
+# Create __init__.py for each subdirectory (Python packages)
+Dir.glob(File.join(output_dir, "**/*")).each do |path|
+  next unless File.directory?(path)
+  init_path = File.join(path, "__init__.py")
+  unless File.exists?(init_path)
+    File.write(init_path, "")
+  end
+end
+
+# Also create a root conftest.py for pytest to find the project root
+root_conftest = File.join(output_dir, "conftest.py")
+unless File.exists?(root_conftest)
+  File.write(root_conftest, "import sys\nimport os\nsys.path.insert(0, os.path.dirname(__file__))\n")
 end
 
 puts "\ncr2py: done"
