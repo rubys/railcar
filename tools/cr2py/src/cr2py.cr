@@ -13,14 +13,21 @@ require "../../../src/semantic"
 require "../../../shards/crystal-analyzer/src/crystal-analyzer"
 require "./py_ast"
 require "./filters/spec_filter"
+require "./filters/db_filter"
 
 module Cr2Py
   PYTHON_KEYWORDS = %w[False True None and as assert async await break class
     continue def del elif else except finally for from global if import in is
     lambda nonlocal not or pass raise return try while with yield]
 
+  PYTHON_BUILTINS = %w[print len int str float bool isinstance hasattr type
+    range enumerate zip sorted reversed list dict set tuple super abs min max
+    sum any all map filter open getattr setattr delattr repr hash id input
+    round format]
+
   class Emitter
     getter program : Crystal::Program
+    property in_class : Bool = false
 
     def initialize(@program)
     end
@@ -44,7 +51,10 @@ module Cr2Py
       when Crystal::ClassDef
         name = node.name.names.last
         superclass = node.superclass.try { |sc| emit_type_name(sc) }
+        old_in_class = @in_class
+        @in_class = true
         body = body_to_nodes(node.body)
+        @in_class = old_in_class
         [PyAST::Class.new(name, superclass, body)] of PyAST::Node
 
       when Crystal::Def
@@ -119,7 +129,9 @@ module Cr2Py
         node.name.lstrip('@').lstrip('@').upcase
 
       when Crystal::Path
-        node.names.join(".")
+        names = node.names
+        names = names[1..] if names.first? == "Railcar" && names.size > 1
+        names.join(".")
 
       when Crystal::Generic
         base = crystal_type_to_python(node.name.to_s)
@@ -285,15 +297,22 @@ module Cr2Py
         arg = node.args[0]
         aname = python_name(arg.name)
         setter_name = "set_#{prop}"
-        cr_args = [aname]
+        cr_args = @in_class ? ["self"] : [] of String
         if restriction = arg.restriction
-          cr_args = ["#{aname}: #{crystal_type_to_python(restriction.to_s)}"]
+          cr_args << "#{aname}: #{crystal_type_to_python(restriction.to_s)}"
+        else
+          cr_args << aname
         end
         body = [PyAST::Statement.new("self.#{prop} = #{aname}")] of PyAST::Node
         return [PyAST::Func.new(setter_name, cr_args, body)] of PyAST::Node
       end
 
       name = python_name(name)
+
+      # Determine if this is a class method (def self.method_name)
+      is_class_method = @in_class && node.receiver.try { |r|
+        r.is_a?(Crystal::Var) && r.name == "self"
+      }
 
       args = node.args.map do |arg|
         aname = python_name(arg.name)
@@ -306,10 +325,22 @@ module Cr2Py
         end
       end
 
+      # Add self/cls for class members
+      if @in_class
+        if is_class_method
+          args.unshift("cls")
+        else
+          args.unshift("self")
+        end
+      end
+
       ret = node.return_type.try { |rt| crystal_type_to_python(rt.to_s) }
       body = body_to_nodes(node.body)
 
-      [PyAST::Func.new(name, args, body, ret)] of PyAST::Node
+      decorators = [] of String
+      decorators << "classmethod" if is_class_method
+
+      [PyAST::Func.new(name, args, body, ret, decorators)] of PyAST::Node
     end
 
     # ── Assign ──
@@ -407,6 +438,11 @@ module Cr2Py
         return [PyAST::BufAppend.new(to_expr(obj.not_nil!))] of PyAST::Node
       end
 
+      # << on non-__str__ → .append()
+      if name == "<<" && obj && args.size == 1
+        return [PyAST::Statement.new("#{to_expr(obj)}.append(#{to_expr(args[0])})")]  of PyAST::Node
+      end
+
       # each/each_with_index → for loop
       if block && (name == "each" || name == "each_with_index") && obj
         return each_to_nodes(node, block)
@@ -464,7 +500,14 @@ module Cr2Py
       args = node.args
       named = node.named_args
 
-      # Operators (but not << which needs special handling)
+      # << on non-IO → .append() in expression context
+      if name == "<<" && args.size == 1 && obj
+        unless obj.is_a?(Crystal::Var) && obj.name == "__str__"
+          return "#{to_expr(obj)}.append(#{to_expr(args[0])})"
+        end
+      end
+
+      # Operators
       if is_operator?(name) && args.size == 1 && obj
         # << on non-__str__ → list append in statement context, but here treat as operator
         return "#{to_expr(obj)} #{python_operator(name)} #{to_expr(args[0])}"
@@ -635,6 +678,8 @@ module Cr2Py
       method_name = python_name(name)
       if obj
         "#{to_expr(obj)}.#{method_name}(#{emit_args(args, named)})"
+      elsif @in_class && !PYTHON_BUILTINS.includes?(method_name) && !method_name.starts_with?("test_")
+        "self.#{method_name}(#{emit_args(args, named)})"
       else
         "#{method_name}(#{emit_args(args, named)})"
       end
@@ -854,6 +899,7 @@ puts "  #{result.files.size} source files, #{result.views.size} views, #{result.
 Dir.mkdir_p(output_dir)
 emitter = Cr2Py::Emitter.new(result.program)
 serializer = PyAST::Serializer.new
+db_filter = Cr2Py::DbFilter.new
 
 # Emit source files
 result.files.each do |filename, info|
@@ -866,7 +912,7 @@ result.files.each do |filename, info|
 
   nodes = [] of PyAST::Node
   info.nodes.each do |node|
-    nodes.concat(emitter.to_nodes(node))
+    nodes.concat(emitter.to_nodes(node.transform(db_filter)))
   end
 
   mod = PyAST::Module.new(nodes)
@@ -883,7 +929,7 @@ result.views.each do |ecr_filename, ast|
   out_path = File.join(output_dir, py_filename)
   Dir.mkdir_p(File.dirname(out_path))
 
-  nodes = emitter.to_nodes(ast)
+  nodes = emitter.to_nodes(ast.transform(db_filter))
   mod = PyAST::Module.new(nodes)
   File.write(out_path, serializer.serialize(mod))
   puts "  #{py_filename}"
@@ -911,7 +957,7 @@ result.tests.each do |filename, info|
   # Transform spec AST → pytest AST, then emit
   nodes = [] of PyAST::Node
   info.nodes.each do |node|
-    transformed = node.transform(spec_filter)
+    transformed = node.transform(db_filter).transform(spec_filter)
     nodes.concat(emitter.to_nodes(transformed))
   end
 

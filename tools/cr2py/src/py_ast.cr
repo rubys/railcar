@@ -65,7 +65,8 @@ module PyAST
     getter args : Array(String)
     getter body : Array(Node)
     getter return_type : String?
-    def initialize(@name, @args, @body, @return_type = nil); end
+    getter decorators : Array(String)
+    def initialize(@name, @args, @body, @return_type = nil, @decorators = [] of String); end
   end
 
   # async def name(args): body
@@ -132,6 +133,7 @@ module PyAST
         io << "\n"
 
       when Func
+        node.decorators.each { |d| io << indent << "@" << d << "\n" }
         io << indent << "def " << node.name << "(" << node.args.join(", ") << ")"
         if rt = node.return_type
           io << " -> " << rt
