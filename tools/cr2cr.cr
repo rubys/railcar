@@ -118,7 +118,7 @@ files.each do |filename, nodes|
   content = String.build do |io|
     nodes.each_with_index do |node, i|
       io << "\n" if i > 0
-      io << node.to_s
+      emit_node(node, io)
       io << "\n"
     end
   end
