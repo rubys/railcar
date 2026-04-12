@@ -17,7 +17,7 @@ module PyAST
     def initialize(@expr); end
   end
 
-  # if condition: body else: else_body
+  # if condition: body [elif ...] [else: else_body]
   class If < Node
     getter cond : String
     getter body : Array(Node)
@@ -31,6 +31,13 @@ module PyAST
     getter collection : String
     getter body : Array(Node)
     def initialize(@var, @collection, @body); end
+  end
+
+  # while condition: body
+  class While < Node
+    getter cond : String
+    getter body : Array(Node)
+    def initialize(@cond, @body); end
   end
 
   # variable = value
@@ -57,7 +64,8 @@ module PyAST
     getter name : String
     getter args : Array(String)
     getter body : Array(Node)
-    def initialize(@name, @args, @body); end
+    getter return_type : String?
+    def initialize(@name, @args, @body, @return_type = nil); end
   end
 
   # async def name(args): body
@@ -66,6 +74,14 @@ module PyAST
     getter args : Array(String)
     getter body : Array(Node)
     def initialize(@name, @args, @body); end
+  end
+
+  # class Name(Base): body
+  class Class < Node
+    getter name : String
+    getter superclass : String?
+    getter body : Array(Node)
+    def initialize(@name, @superclass, @body); end
   end
 
   # Raw Python line (for imports, class declarations, etc.)
@@ -101,13 +117,26 @@ module PyAST
 
       case node
       when Raw
-        io << node.code << "\n"
+        io << indent << node.code << "\n"
 
       when Blank
         io << "\n"
 
+      when Class
+        io << indent << "class " << node.name
+        if sc = node.superclass
+          io << "(" << sc << ")"
+        end
+        io << ":\n"
+        emit_body(node.body, io, depth + 1)
+        io << "\n"
+
       when Func
-        io << indent << "def " << node.name << "(" << node.args.join(", ") << "):\n"
+        io << indent << "def " << node.name << "(" << node.args.join(", ") << ")"
+        if rt = node.return_type
+          io << " -> " << rt
+        end
+        io << ":\n"
         emit_body(node.body, io, depth + 1)
         io << "\n"
 
@@ -129,9 +158,19 @@ module PyAST
         io << indent << "if " << node.cond << ":\n"
         emit_body(node.body, io, depth + 1)
         if else_body = node.else_body
-          io << indent << "else:\n"
-          emit_body(else_body, io, depth + 1)
+          # elif: else body is a single If node
+          if else_body.size == 1 && else_body[0].is_a?(If)
+            io << indent << "el"
+            emit(else_body[0], io, depth)
+          else
+            io << indent << "else:\n"
+            emit_body(else_body, io, depth + 1)
+          end
         end
+
+      when While
+        io << indent << "while " << node.cond << ":\n"
+        emit_body(node.body, io, depth + 1)
 
       when For
         io << indent << "for " << node.var << " in " << node.collection << ":\n"
