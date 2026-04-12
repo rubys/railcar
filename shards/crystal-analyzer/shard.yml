@@ -1,0 +1,7 @@
+name: crystal-analyzer
+version: 0.1.0
+crystal: ">= 1.10.0"
+
+dependencies:
+  llvm:
+    path: ../../stubs/llvm
