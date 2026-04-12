@@ -110,6 +110,12 @@ end
 
 collect(result.node, files)
 
+
+# NOTE: ECR.embed nodes are NOT expanded in the typed AST when using
+# no_codegen. The run() macro requires actual code execution which
+# is skipped. ECR templates must be read from disk.
+# The ECR.embed args[0] contains the template filename.
+
 # Write each file
 files.each do |filename, nodes|
   out_path = File.join(output_dir, filename)
@@ -118,7 +124,7 @@ files.each do |filename, nodes|
   content = String.build do |io|
     nodes.each_with_index do |node, i|
       io << "\n" if i > 0
-      emit_node(node, io)
+      io << node.to_s
       io << "\n"
     end
   end
