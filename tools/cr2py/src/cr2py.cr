@@ -29,8 +29,28 @@ module Cr2Py
   class Emitter
     getter program : Crystal::Program
     property in_class : Bool = false
+    getter known_ivars : Set(String)
 
     def initialize(@program)
+      # Build instance variable lookup from program types
+      @known_ivars = Set(String).new
+      collect_ivars(@program.types)
+    end
+
+    private def collect_ivars(types : Hash)
+      types.each_value do |type|
+        begin
+          type.instance_vars.each_key { |name| @known_ivars << name.lstrip('@') }
+        rescue
+        end
+        # Recurse into nested types (e.g., Railcar::Article)
+        if type.responds_to?(:types)
+          begin
+            collect_ivars(type.types)
+          rescue
+          end
+        end
+      end
     end
 
     # ── Statement context: Crystal AST → PyAST nodes ──
@@ -319,6 +339,20 @@ module Cr2Py
       end
 
       name = python_name(name)
+
+      # Skip trivial getter methods for known instance variables.
+      # Crystal: def attributes; @attributes; end
+      # Python doesn't need these — the attribute is accessed directly.
+      if @in_class && node.args.empty? && !node.double_splat && @known_ivars.includes?(node.name)
+        body = node.body
+        is_trivial_getter = case body
+                            when Crystal::InstanceVar
+                              body.name.lstrip('@') == node.name
+                            else
+                              false
+                            end
+        return [] of PyAST::Node if is_trivial_getter
+      end
 
       # Determine if this is a class method (def self.method_name)
       is_class_method = @in_class && node.receiver.try { |r|
@@ -724,7 +758,12 @@ module Cr2Py
       if obj
         "#{to_expr(obj)}.#{method_name}(#{emit_args(args, named)})"
       elsif @in_class && !PYTHON_BUILTINS.includes?(method_name) && !method_name.starts_with?("test_")
-        "self.#{method_name}(#{emit_args(args, named)})"
+        # Bare property access (known ivar) → self.name without parens
+        if args.empty? && named.nil? && @known_ivars.includes?(name)
+          "self.#{name}"
+        else
+          "self.#{method_name}(#{emit_args(args, named)})"
+        end
       else
         "#{method_name}(#{emit_args(args, named)})"
       end
@@ -883,14 +922,8 @@ module Cr2Py
     end
 
     private def is_property?(node : Crystal::Call) : Bool
-      return false unless obj = node.obj
-      if obj_type = obj.type?
-        begin
-          return obj_type.instance_vars.has_key?("@#{node.name}")
-        rescue
-        end
-      end
-      false
+      return false unless node.obj
+      @known_ivars.includes?(node.name)
     end
 
     private def emit_type_name(node : Crystal::ASTNode) : String
@@ -938,15 +971,74 @@ module Cr2Py
   end
 end
 
+def generate_imports(content : String, file_imports : Array(String),
+                     export_map : Hash(String, {String, String}),
+                     is_test : Bool = false, own_module : String = "") : String
+  imports = [] of String
+
+  imports << "from __future__ import annotations" if content.includes?("->") || content.includes?(": ")
+  imports << "from typing import Any" if content.includes?("Any")
+  imports << "from typing import Self" if content.includes?("Self")
+  imports << "import sqlite3" if content.includes?("sqlite3.")
+  imports << "import logging" if content.includes?("logging.")
+  imports << "from datetime import datetime" if content.includes?("datetime.")
+
+  # Test files import from conftest
+  if is_test
+    imports << "from tests.conftest import *"
+  end
+
+  # Cross-file imports based on analyzer metadata
+  skip_imports = %w[DB String Int32 Int64 Float64 Bool Nil Array Hash Symbol
+    Time IO HTTP Set Broadcasts RouteHelpers ViewHelpers]
+
+  seen_modules = Set(String).new
+  file_imports.each do |crystal_import|
+    short_name = crystal_import.gsub("Railcar::", "").gsub("::", ".")
+    next if skip_imports.includes?(short_name)
+
+    entry = export_map[crystal_import]? ||
+            export_map["Railcar::#{crystal_import}"]?
+    if entry
+      py_module, py_name = entry
+      next if py_module == own_module
+      import_stmt = "from #{py_module} import #{py_name}"
+      unless seen_modules.includes?(import_stmt)
+        imports << import_stmt
+        seen_modules << import_stmt
+      end
+    end
+  end
+
+  # Scan content for class names that need importing
+  code_lines = content.lines.reject(&.strip.starts_with?("#")).join("\n")
+  export_map.each do |crystal_name, entry|
+    py_module, py_name = entry
+    next if py_module == own_module
+    next if py_name.includes?(".")
+    next unless py_name[0]?.try(&.uppercase?)
+    if code_lines.includes?("(#{py_name})") ||
+       code_lines.includes?("#{py_name}(") ||
+       code_lines.includes?("#{py_name}.") ||
+       code_lines.includes?(": #{py_name}")
+      import_stmt = "from #{py_module} import #{py_name}"
+      unless seen_modules.includes?(import_stmt)
+        imports << import_stmt
+        seen_modules << import_stmt
+      end
+    end
+  end
+
+  if imports.empty?
+    ""
+  else
+    imports.join("\n") + "\n\n"
+  end
+end
+
 # --- Main ---
 
-entry = ARGV[0]?
-output_dir = ARGV[1]?
-
-unless entry && output_dir
-  STDERR.puts "Usage: cr2py <crystal-app-entry> <output-dir>"
-  exit 1
-end
+if (entry = ARGV[0]?) && (output_dir = ARGV[1]?)
 
 puts "cr2py: analyzing #{entry}"
 
@@ -978,75 +1070,6 @@ all_files.each do |filename, info|
     # Strip Railcar:: prefix for Python name
     py_name = export_name.gsub("Railcar::", "").gsub("::", ".")
     export_map[export_name] = {py_module, py_name}
-  end
-end
-
-def generate_imports(content : String, file_imports : Array(String),
-                     export_map : Hash(String, {String, String}),
-                     is_test : Bool = false, own_module : String = "") : String
-  imports = [] of String
-
-  imports << "from __future__ import annotations" if content.includes?("->") || content.includes?(": ")
-  imports << "from typing import Any" if content.includes?("Any")
-  imports << "from typing import Self" if content.includes?("Self")
-  imports << "import sqlite3" if content.includes?("sqlite3.")
-  imports << "import logging" if content.includes?("logging.")
-  imports << "from datetime import datetime" if content.includes?("datetime.")
-
-  # Test files import from conftest
-  if is_test
-    imports << "from tests.conftest import *"
-  end
-
-  # Cross-file imports based on analyzer metadata
-  # Skip Crystal built-in types and modules that are included (inlined)
-  skip_imports = %w[DB String Int32 Int64 Float64 Bool Nil Array Hash Symbol
-    Time IO HTTP Set Broadcasts RouteHelpers ViewHelpers]
-
-  seen_modules = Set(String).new
-  file_imports.each do |crystal_import|
-    short_name = crystal_import.gsub("Railcar::", "").gsub("::", ".")
-    next if skip_imports.includes?(short_name)
-
-    # Try exact match, then qualified with Railcar::
-    entry = export_map[crystal_import]? ||
-            export_map["Railcar::#{crystal_import}"]?
-    if entry
-      py_module, py_name = entry
-      next if py_module == own_module  # don't import from self
-      import_stmt = "from #{py_module} import #{py_name}"
-      unless seen_modules.includes?(import_stmt)
-        imports << import_stmt
-        seen_modules << import_stmt
-      end
-    end
-  end
-
-  # Also scan content for class names (capitalized) that need importing
-  # Strip comments first to avoid false matches
-  code_lines = content.lines.reject(&.strip.starts_with?("#")).join("\n")
-  export_map.each do |crystal_name, entry|
-    py_module, py_name = entry
-    next if py_module == own_module
-    next if py_name.includes?(".")          # skip qualified names
-    next unless py_name[0]?.try(&.uppercase?) # only match class names (capitalized)
-    # Check if the Python name appears in the code as a reference
-    if code_lines.includes?("(#{py_name})") ||       # superclass: class Foo(Bar)
-       code_lines.includes?("#{py_name}(") ||         # constructor: Bar(...)
-       code_lines.includes?("#{py_name}.") ||         # class method: Bar.method()
-       code_lines.includes?(": #{py_name}")           # type annotation: x: Bar
-      import_stmt = "from #{py_module} import #{py_name}"
-      unless seen_modules.includes?(import_stmt)
-        imports << import_stmt
-        seen_modules << import_stmt
-      end
-    end
-  end
-
-  if imports.empty?
-    ""
-  else
-    imports.join("\n") + "\n\n"
   end
 end
 
@@ -1148,3 +1171,4 @@ unless File.exists?(root_conftest)
 end
 
 puts "\ncr2py: done"
+end # if entry && output_dir
