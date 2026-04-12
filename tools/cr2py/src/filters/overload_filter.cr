@@ -1,17 +1,23 @@
 # OverloadFilter — merges Crystal method overloads into single Python methods.
 #
 # Crystal supports multiple methods with the same name but different signatures.
-# Python doesn't. This filter merges them into a single method with an if/elif
-# chain that dispatches based on argument types, similar to how Elixir compiles
-# multiple function clauses.
+# Python doesn't. This filter merges them into a single method that dispatches
+# based on argument types, similar to how Elixir compiles function clauses.
 #
-# Patterns handled:
-#   def foo(x : Hash)  + def foo(**kwargs)  → dispatch on isinstance(dict)
-#   def foo(x : String, y) + def foo(**kw)  → dispatch on isinstance(str)
-#   def foo() + def foo()                    → keep first (identical)
+# Strategy: use the positional version's body as primary logic. When kwargs
+# are provided instead, convert them to a dict and run the same body.
+# isinstance() dispatch on the first arg's type restriction.
+#
+# Synthetic nodes get proper types set so downstream checks (e.g. is_hash_type?)
+# work correctly.
 
 module Cr2Py
   class OverloadFilter < Crystal::Transformer
+    getter program : Crystal::Program
+
+    def initialize(@program)
+    end
+
     def transform(node : Crystal::ClassDef) : Crystal::ASTNode
       body = node.body
 
@@ -20,20 +26,17 @@ module Cr2Py
               else [body.as(Crystal::ASTNode)]
               end
 
-      # Group Defs by Python-compatible name (strip !, ? suffix collisions)
+      # Group Defs by Crystal name
       groups = {} of String => Array(Crystal::Def)
       stmts.each do |stmt|
         if stmt.is_a?(Crystal::Def)
-          # Group by Crystal name (keep ! variants separate since they have
-          # different semantics — create vs create! — and only merge
-          # positional vs kwargs overloads of the same method)
           key = "#{stmt.receiver ? "self." : ""}#{stmt.name}"
           groups[key] ||= [] of Crystal::Def
           groups[key] << stmt
         end
       end
 
-      # Replace overloaded groups with merged methods
+      # Merge overloaded groups
       merged = {} of String => Crystal::Def
       groups.each do |key, defs|
         next if defs.size < 2
@@ -42,7 +45,7 @@ module Cr2Py
 
       return node if merged.empty?
 
-      # Rebuild the body, replacing overloaded defs with merged versions
+      # Rebuild the body
       seen = Set(String).new
       new_stmts = [] of Crystal::ASTNode
       stmts.each do |stmt|
@@ -53,7 +56,6 @@ module Cr2Py
               new_stmts << m
               seen << key
             end
-            # Skip subsequent overloads
           else
             new_stmts << stmt.transform(self)
           end
@@ -74,64 +76,112 @@ module Cr2Py
     end
 
     private def merge_overloads(defs : Array(Crystal::Def)) : Crystal::Def
-      # If all defs have identical args, just keep the first
-      if defs.all? { |d| d.args.size == defs[0].args.size && d.double_splat.nil? == defs[0].double_splat.nil? }
-        if defs.map(&.args.size).uniq.size == 1 && defs.all?(&.double_splat.nil?)
-          return defs[0]
-        end
+      # If all defs have identical signatures (same arg count, no kwargs), keep first
+      if defs.all?(&.double_splat.nil?) && defs.map(&.args.size).uniq.size == 1
+        return defs[0]
       end
 
-      # Separate kwargs versions from positional versions
       kwargs_defs = defs.select(&.double_splat)
       positional_defs = defs.reject(&.double_splat)
-
-      # Build merged parameter list: *args, **kwargs
-      # The merged method accepts everything and dispatches internally
       first = defs[0]
 
-      # Build the dispatch body as if/elif chain
-      branches = [] of Crystal::ASTNode
+      # Pick primary def (positional version has the real logic)
+      primary = positional_defs.first? || kwargs_defs.first.not_nil!
+      has_kwargs = !kwargs_defs.empty?
+      max_args = defs.map(&.args.size).max
 
-      # Positional clauses first (more specific)
-      positional_defs.each do |d|
-        if d.args.empty? && !d.double_splat
-          # No-arg version — this is the fallback
-          next
+      # Build merged parameter list: _ov_arg0=None, ..., **_ov_kwargs
+      merged_args = [] of Crystal::Arg
+      max_args.times do |i|
+        arg = Crystal::Arg.new("_ov_arg#{i}")
+        arg.default_value = Crystal::NilLiteral.new
+        merged_args << arg
+      end
+
+      # Build body with dispatch
+      body_stmts = [] of Crystal::ASTNode
+
+      if has_kwargs && primary.args.size > 0
+        # Dispatch: if isinstance(_ov_arg0, <type>), use it; else use kwargs
+        first_arg_name = primary.args[0].name
+        cond = build_type_check(primary.args[0])
+
+        # Both branches assign a typed variable so downstream checks work
+        then_var = Crystal::Var.new(first_arg_name)
+        if arg_type = resolve_arg_type(primary.args[0])
+          then_var.set_type(arg_type)
         end
-        cond = build_dispatch_condition(d)
-        if cond
-          # Wrap body with local variable assignments from args
-          body = build_dispatched_body(d)
-          branches << Crystal::If.new(cond, body)
+        then_body = Crystal::Assign.new(
+          then_var,
+          Crystal::Var.new("_ov_arg0")
+        )
+
+        # kwargs → dict via .copy() (kwargs is already a dict in Python)
+        kwargs_var = Crystal::Var.new("_ov_kwargs")
+        kwargs_var.set_type(hash_type)
+        else_var = Crystal::Var.new(first_arg_name)
+        else_var.set_type(hash_type)
+        else_body = Crystal::Assign.new(
+          else_var,
+          Crystal::Call.new(kwargs_var, "copy")
+        )
+
+        body_stmts << Crystal::If.new(cond, then_body, else_body)
+
+        # Assign remaining positional args
+        primary.args.each_with_index do |arg, i|
+          next if i == 0
+          body_stmts << Crystal::Assign.new(
+            Crystal::Var.new(arg.name),
+            Crystal::Var.new("_ov_arg#{i}")
+          )
+        end
+      elsif positional_defs.size > 1 && positional_defs.map(&.args.size).uniq.size > 1
+        # Multiple positional overloads with different arg counts
+        primary = positional_defs.max_by(&.args.size)
+        cond = build_type_check(primary.args[0])
+
+        then_stmts = primary.args.map_with_index { |arg, i|
+          Crystal::Assign.new(
+            Crystal::Var.new(arg.name),
+            Crystal::Var.new("_ov_arg#{i}")
+          ).as(Crystal::ASTNode)
+        }
+        then_stmts << primary.body
+        then_body = Crystal::Expressions.new(then_stmts)
+
+        shorter = positional_defs.min_by(&.args.size)
+        else_stmts = shorter.args.map_with_index { |arg, i|
+          Crystal::Assign.new(
+            Crystal::Var.new(arg.name),
+            Crystal::Var.new("_ov_arg#{i}")
+          ).as(Crystal::ASTNode)
+        }
+        else_stmts << shorter.body
+        else_body = Crystal::Expressions.new(else_stmts)
+
+        body_stmts << Crystal::If.new(cond, then_body, else_body)
+
+        merged = Crystal::Def.new(first.name, merged_args, Crystal::Expressions.new(body_stmts))
+        merged.receiver = first.receiver
+        merged.return_type = first.return_type
+        merged.location = first.location
+        return merged
+      else
+        # Just assign positional args
+        primary.args.each_with_index do |arg, i|
+          body_stmts << Crystal::Assign.new(
+            Crystal::Var.new(arg.name),
+            Crystal::Var.new("_ov_arg#{i}")
+          )
         end
       end
 
-      # kwargs clause
-      if kw = kwargs_defs.first?
-        body = build_kwargs_body(kw)
-        if branches.empty?
-          branches << body
-        else
-          # Add as else clause to the last if
-          branches << body
-        end
-      end
+      # Type the body's parameter references so downstream checks work
+      typed_body = type_body_vars(primary)
+      body_stmts << typed_body
+      final_body = Crystal::Expressions.new(body_stmts)
 
-      # No-arg fallback
-      no_arg = positional_defs.find { |d| d.args.empty? && !d.double_splat }
-
-      # Build final body
-      final_body = if branches.size == 0 && no_arg
-                     no_arg.body
-                   elsif branches.size == 1 && !no_arg
-                     branches[0]
-                   else
-                     build_if_chain(branches, no_arg)
-                   end
-
-      # Build merged def with generic args
-      merged_args = build_merged_args(defs)
-      has_kwargs = defs.any?(&.double_splat)
       merged = Crystal::Def.new(first.name, merged_args, final_body)
       merged.receiver = first.receiver
       merged.return_type = first.return_type
@@ -142,102 +192,69 @@ module Cr2Py
       merged
     end
 
-    private def build_dispatch_condition(d : Crystal::Def) : Crystal::ASTNode?
-      return nil if d.args.empty?
-
-      first_arg = d.args[0]
-      restriction = first_arg.restriction
-      return nil unless restriction
-
-      type_str = restriction.to_s
-      python_type = case type_str
-                    when /Hash/ then "dict"
-                    when /String/ then "str"
-                    when /Int/   then "int"
-                    when /Float/ then "float"
-                    when /Bool/  then "bool"
-                    when /Array/ then "list"
-                    else nil
+    private def build_type_check(arg : Crystal::Arg) : Crystal::ASTNode
+      python_type = if restriction = arg.restriction
+                      case restriction.to_s
+                      when /Hash/   then "dict"
+                      when /String/ then "str"
+                      when /Int/    then "int"
+                      when /Float/  then "float"
+                      when /Bool/   then "bool"
+                      when /Array/  then "list"
+                      else "dict"
+                      end
+                    else
+                      "dict"
                     end
 
-      return nil unless python_type
-
-      # Build: isinstance(args[0], <type>)
-      # We use _args as the merged positional args tuple
       Crystal::Call.new(nil, "isinstance",
         [Crystal::Var.new("_ov_arg0"),
          Crystal::Path.new(python_type)] of Crystal::ASTNode)
     end
 
-    private def build_dispatched_body(d : Crystal::Def) : Crystal::ASTNode
-      # Assign local vars from positional args, then run the original body
-      assigns = [] of Crystal::ASTNode
-      d.args.each_with_index do |arg, i|
-        assigns << Crystal::Assign.new(
-          Crystal::Var.new(arg.name),
-          Crystal::Var.new("_ov_arg#{i}")
-        )
-      end
-      assigns << d.body
-      Crystal::Expressions.new(assigns)
+    private def hash_type : Crystal::Type
+      @program.types["Hash"]
     end
 
-    private def build_kwargs_body(d : Crystal::Def) : Crystal::ASTNode
-      if ds = d.double_splat
-        # Assign kwargs to the double_splat name
-        assigns = [Crystal::Assign.new(
-          Crystal::Var.new(ds.name),
-          Crystal::Var.new("_ov_kwargs")
-        ).as(Crystal::ASTNode)]
-        assigns << d.body
-        Crystal::Expressions.new(assigns)
+    # Walk the body of a Def and set types on Var nodes matching parameter names
+    private def type_body_vars(d : Crystal::Def) : Crystal::ASTNode
+      param_types = {} of String => Crystal::Type
+      d.args.each do |arg|
+        if t = resolve_arg_type(arg)
+          param_types[arg.name] = t
+        end
+      end
+      return d.body if param_types.empty?
+      typer = VarTyper.new(param_types)
+      d.body.transform(typer)
+    end
+
+    private class VarTyper < Crystal::Transformer
+      def initialize(@param_types : Hash(String, Crystal::Type))
+      end
+
+      def transform(node : Crystal::Var) : Crystal::ASTNode
+        if t = @param_types[node.name]?
+          node.set_type(t)
+        end
+        node
+      end
+
+      def transform(node : Crystal::ASTNode) : Crystal::ASTNode
+        super
+      end
+    end
+
+    private def resolve_arg_type(arg : Crystal::Arg) : Crystal::Type?
+      if restriction = arg.restriction
+        case restriction.to_s
+        when /Hash/  then @program.types["Hash"]
+        when /Array/ then @program.types["Array"]
+        else nil
+        end
       else
-        d.body
+        nil
       end
-    end
-
-    private def build_if_chain(branches : Array(Crystal::ASTNode), fallback : Crystal::Def?) : Crystal::ASTNode
-      if branches.size == 1
-        if fb = fallback
-          if branches[0].is_a?(Crystal::If)
-            # Add fallback as else
-            if_node = branches[0].as(Crystal::If)
-            return Crystal::If.new(if_node.cond, if_node.then, fb.body)
-          end
-        end
-        return branches[0]
-      end
-
-      # Build elif chain from bottom up
-      result : Crystal::ASTNode = if fb = fallback
-                                    fb.body
-                                  else
-                                    branches.pop
-                                  end
-
-      branches.reverse_each do |branch|
-        if branch.is_a?(Crystal::If)
-          result = Crystal::If.new(branch.cond, branch.then, result)
-        else
-          result = branch
-        end
-      end
-      result
-    end
-
-    private def build_merged_args(defs : Array(Crystal::Def)) : Array(Crystal::Arg)
-      # Find max positional args across all overloads
-      max_args = defs.map(&.args.size).max
-      has_kwargs = defs.any?(&.double_splat)
-
-      args = [] of Crystal::Arg
-      max_args.times do |i|
-        arg = Crystal::Arg.new("_ov_arg#{i}")
-        arg.default_value = Crystal::NilLiteral.new
-        args << arg
-      end
-
-      args
     end
   end
 end

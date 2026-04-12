@@ -327,19 +327,22 @@ module Cr2Py
 
       args = node.args.map do |arg|
         aname = python_name(arg.name)
-        if restriction = arg.restriction
-          "#{aname}: #{crystal_type_to_python(restriction.to_s)}"
-        elsif default = arg.default_value
-          default_str = to_expr(default)
-          # Python can't use self.x in default args — use None sentinel
-          if default_str.includes?("self.")
-            "#{aname}=None"
-          else
-            "#{aname}=#{default_str}"
-          end
-        else
-          aname
-        end
+        type_ann = if restriction = arg.restriction
+                     ": #{crystal_type_to_python(restriction.to_s)}"
+                   else
+                     ""
+                   end
+        default_part = if default = arg.default_value
+                         default_str = to_expr(default)
+                         if default_str.includes?("self.")
+                           "=None"
+                         else
+                           "=#{default_str}"
+                         end
+                       else
+                         ""
+                       end
+        "#{aname}#{type_ann}#{default_part}"
       end
 
       # Add *splat and **double_splat
@@ -652,6 +655,11 @@ module Cr2Py
         return "#{to_expr(obj)}[-1]"
       end
 
+      # bare new() inside a class → cls() (classmethod constructor)
+      if name == "new" && !obj && @in_class
+        return "cls(#{emit_args(args, named)})"
+      end
+
       # .new → constructor: ClassName(...)
       if name == "new" && obj
         # Generic collection constructors → empty literals
@@ -729,11 +737,18 @@ module Cr2Py
       vars = "_" if vars.empty?
       collection = to_expr(call.obj.not_nil!)
       # Crystal Hash#each yields (key, value) pairs — Python needs .items()
-      if block.args.size == 2
+      if is_hash_type?(call.obj.not_nil!)
         collection = "#{collection}.items()"
       end
       body = body_to_nodes(block.body)
       [PyAST::For.new(vars, collection, body)] of PyAST::Node
+    end
+
+    private def is_hash_type?(node : Crystal::ASTNode) : Bool
+      if obj_type = node.type?
+        return obj_type.to_s.starts_with?("Hash")
+      end
+      false
     end
 
     # ── String.build → buf sequence ──
@@ -1038,7 +1053,7 @@ end
 Dir.mkdir_p(output_dir)
 emitter = Cr2Py::Emitter.new(result.program)
 serializer = PyAST::Serializer.new
-overload_filter = Cr2Py::OverloadFilter.new
+overload_filter = Cr2Py::OverloadFilter.new(result.program)
 db_filter = Cr2Py::DbFilter.new
 
 # Create __init__.py for each subdirectory to make them Python packages
