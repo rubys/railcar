@@ -378,4 +378,31 @@ files.each do |filename, nodes|
   puts "  #{filename}"
 end
 
+# Write expanded ECR content as .cr files
+ecr_written = Set(String).new
+finder.found.each do |ecr|
+  next if ecr_written.includes?(ecr.ecr_filename)
+  ecr_written << ecr.ecr_filename
+
+  key = "#{ecr.type_name}##{ecr.def_node.name}"
+  body = ecr_methods[key]?
+  next unless body
+
+  # src/views/articles/_article.ecr → src/views/articles/_article.cr
+  cr_filename = ecr.ecr_filename.chomp(".ecr") + ".cr"
+  out_path = File.join(output_dir, cr_filename)
+  Dir.mkdir_p(File.dirname(out_path))
+
+  content = body.to_s
+
+  begin
+    formatted = Crystal.format(content)
+    File.write(out_path, formatted)
+  rescue
+    File.write(out_path, content)
+  end
+
+  puts "  #{cr_filename}"
+end
+
 puts "\ncr2cr: done"
