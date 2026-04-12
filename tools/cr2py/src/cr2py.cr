@@ -841,9 +841,9 @@ end
 
 puts "cr2py: analyzing #{entry}"
 
-result = CrystalAnalyzer.analyze(entry)
+result = CrystalAnalyzer.analyze(entry, include_specs: true)
 
-puts "  #{result.files.size} source files, #{result.views.size} views"
+puts "  #{result.files.size} source files, #{result.views.size} views, #{result.tests.size} tests"
 
 Dir.mkdir_p(output_dir)
 emitter = Cr2Py::Emitter.new(result.program)
@@ -878,6 +878,26 @@ result.views.each do |ecr_filename, ast|
   Dir.mkdir_p(File.dirname(out_path))
 
   nodes = emitter.to_nodes(ast)
+  mod = PyAST::Module.new(nodes)
+  File.write(out_path, serializer.serialize(mod))
+  puts "  #{py_filename}"
+end
+
+# Emit test files
+result.tests.each do |filename, info|
+  # spec/article_spec.cr → tests/article_spec.py
+  py_filename = filename
+    .sub(/^spec\//, "tests/")
+    .sub(/\.cr$/, ".py")
+
+  out_path = File.join(output_dir, py_filename)
+  Dir.mkdir_p(File.dirname(out_path))
+
+  nodes = [] of PyAST::Node
+  info.nodes.each do |node|
+    nodes.concat(emitter.to_nodes(node))
+  end
+
   mod = PyAST::Module.new(nodes)
   File.write(out_path, serializer.serialize(mod))
   puts "  #{py_filename}"

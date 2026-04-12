@@ -41,12 +41,13 @@ jobs:
       - name: Build binary
         run: make
 
-      - name: Generate and compile Crystal blog
+      - name: Generate, compile, and test Crystal blog
         run: |
           build/railcar build/demo/blog build/crystal-blog
           cd build/crystal-blog
           shards install
           crystal build src/app.cr -o blog
+          crystal spec
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6

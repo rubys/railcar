@@ -33,14 +33,17 @@ module CrystalAnalyzer
   class Result
     getter files : Hash(String, FileInfo)
     getter views : Hash(String, Crystal::ASTNode)
+    getter tests : Hash(String, FileInfo)
     getter program : Crystal::Program
 
-    def initialize(@files, @views, @program)
+    def initialize(@files, @views, @program, @tests = {} of String => FileInfo)
     end
   end
 
   # Analyze a Crystal application. Returns typed AST grouped by source file.
-  def self.analyze(entry_path : String) : Result
+  # When include_specs is true, also compiles spec files and returns them
+  # in result.tests.
+  def self.analyze(entry_path : String, include_specs : Bool = false) : Result
     full_path = File.expand_path(entry_path)
     app_dir = File.dirname(File.dirname(full_path))
     source_text = File.read(full_path)
@@ -53,6 +56,14 @@ module CrystalAnalyzer
     app_sources = Set(String).new
     Dir.glob(File.join(app_dir, "src/**/*.cr")).each do |path|
       app_sources << path.sub(app_dir + "/", "")
+    end
+
+    # Scan spec files if requested
+    spec_sources = Set(String).new
+    if include_specs
+      Dir.glob(File.join(app_dir, "spec/**/*.cr")).each do |path|
+        spec_sources << path.sub(app_dir + "/", "")
+      end
     end
 
     # --- Pass 1: find ECR.embed calls ---
@@ -122,10 +133,13 @@ module CrystalAnalyzer
 
     # --- Build import/export info per file ---
     files = {} of String => FileInfo
+    tests = {} of String => FileInfo
     expander = ExpandTransformer.new(ecr_methods)
 
     raw_files.each do |filename, nodes|
-      next unless app_sources.includes?(filename)
+      is_source = app_sources.includes?(filename)
+      is_spec = spec_sources.includes?(filename)
+      next unless is_source || is_spec
 
       # Transform to expand macros
       expanded_nodes = nodes.map { |n| n.transform(expander) }
@@ -134,12 +148,55 @@ module CrystalAnalyzer
       imports = [] of String
       extract_exports_imports(expanded_nodes, exports, imports)
 
-      files[filename] = FileInfo.new(expanded_nodes, exports, imports)
+      info = FileInfo.new(expanded_nodes, exports, imports)
+      if is_spec
+        tests[filename] = info
+      else
+        files[filename] = info
+      end
+    end
+
+    # --- Optional: compile spec files separately ---
+    if include_specs && !spec_sources.empty?
+      begin
+        # Build a synthetic spec runner that requires all spec files
+        spec_entry = String.build do |s|
+          spec_sources.to_a.sort.each do |spec_path|
+            req = spec_path.sub(/\.cr$/, "")
+            s << "require \"./" << req << "\"\n"
+          end
+        end
+
+        spec_compiler = Crystal::Compiler.new
+        spec_compiler.no_codegen = true
+        # Use a virtual entry at the app root
+        spec_source = Crystal::Compiler::Source.new("_spec_runner_.cr", spec_entry)
+        spec_result = spec_compiler.compile(spec_source, "analyzer_specs")
+
+        # Collect spec files from the AST
+        spec_raw_files = {} of String => Array(Crystal::ASTNode)
+        collect_files(spec_result.node, spec_raw_files)
+
+        spec_raw_files.each do |filename, nodes|
+          next unless spec_sources.includes?(filename)
+
+          expanded_nodes = nodes.map { |n| n.transform(expander) }
+
+          exports = [] of String
+          imports = [] of String
+          extract_exports_imports(expanded_nodes, exports, imports)
+
+          tests[filename] = FileInfo.new(expanded_nodes, exports, imports)
+        end
+      rescue ex
+        msg = ex.message || "unknown error"
+        STDERR.puts "Warning: spec compilation failed:\n#{msg}"
+      end
     end
 
     Dir.cd(saved_dir)
 
-    Result.new(files, ecr_views, result2.program)
+    Result.new(files, ecr_views, result2.program, tests)
   end
 
   # --- ECR Finder (pass 1) ---
@@ -225,10 +282,16 @@ module CrystalAnalyzer
 
   # --- File collector ---
 
+  private def self.app_file?(fn : String) : Bool
+    return false unless fn.is_a?(String)
+    return false if fn.includes?("/crystal/src/") || fn.includes?("/lib/")
+    fn.starts_with?("src/") || fn.starts_with?("spec/")
+  end
+
   private def self.source_file(node : Crystal::ASTNode) : String?
     if loc = node.location
       fn = loc.original_filename || loc.filename
-      if fn.is_a?(String) && fn.starts_with?("src/") && !fn.includes?("/crystal/src/")
+      if fn.is_a?(String) && app_file?(fn)
         return fn
       end
     end
@@ -241,25 +304,30 @@ module CrystalAnalyzer
       node.expressions.each { |e| collect_files(e, files) }
     when Crystal::FileNode
       fn = node.filename
-      if fn.starts_with?("src/") || fn.includes?("/src/")
-        rel = fn.includes?("/src/") ? "src/" + fn.split("/src/").last : fn
-        if rel.starts_with?("src/") && !rel.includes?("crystal/src/") && !rel.includes?("/lib/")
-          files[rel] ||= [] of Crystal::ASTNode
-          inner = node.node
-          case inner
-          when Crystal::Expressions
-            inner.expressions.each do |e|
-              case e
-              when Crystal::FileNode then collect_files(e, files)
-              when Crystal::Nop then nil
-              else files[rel] << e
-              end
+      # Normalize: extract relative path from src/ or spec/
+      rel = if fn.starts_with?("src/") || fn.starts_with?("spec/")
+              fn
+            elsif fn.includes?("/src/")
+              "src/" + fn.split("/src/").last
+            elsif fn.includes?("/spec/")
+              "spec/" + fn.split("/spec/").last
+            else
+              nil
             end
-          else
-            files[rel] << inner unless inner.is_a?(Crystal::Nop)
+      if rel && app_file?(rel)
+        files[rel] ||= [] of Crystal::ASTNode
+        inner = node.node
+        case inner
+        when Crystal::Expressions
+          inner.expressions.each do |e|
+            case e
+            when Crystal::FileNode then collect_files(e, files)
+            when Crystal::Nop then nil
+            else files[rel] << e
+            end
           end
         else
-          collect_files(node.node, files)
+          files[rel] << inner unless inner.is_a?(Crystal::Nop)
         end
       else
         collect_files(node.node, files)

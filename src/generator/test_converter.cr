@@ -72,6 +72,11 @@ module Railcar
         else
           Crystal::Call.new(recv, method, args.map { |a| map_node(a) })
         end
+      when "last", "first"
+        recv = receiver ? map_node(receiver) : Crystal::Var.new("self")
+        call_node = Crystal::Call.new(recv, method)
+        # These return nilable — add .not_nil! for test assertions
+        Crystal::Call.new(call_node, "not_nil!")
       else
         if receiver
           generic_call_node(call)
@@ -226,7 +231,12 @@ module Railcar
           when "assert_select"        then build_assert_select(stmt)
           when "assert_difference"    then build_assert_difference(stmt, controller_test: true)
           when "assert_no_difference" then build_assert_no_difference(stmt, controller_test: true)
-          else build_assertion(stmt)
+          else
+            if stmt.name.starts_with?("assert")
+              build_assertion(stmt)
+            else
+              [map_call(stmt).as(Crystal::ASTNode)]
+            end
           end
         else
           [] of Crystal::ASTNode
@@ -385,13 +395,7 @@ module Railcar
     # --- Boilerplate builders ---
 
     private def build_test_response_record : Crystal::ASTNode
-      Crystal::Call.new(nil, "record", [
-        Crystal::Path.new("TestResponse"),
-      ] of Crystal::ASTNode, named_args: [
-        Crystal::NamedArgument.new("status_code", Crystal::Path.new("Int32")),
-        Crystal::NamedArgument.new("headers", Crystal::Path.new(["HTTP", "Headers"])),
-        Crystal::NamedArgument.new("body", Crystal::Path.new("String")),
-      ])
+      Crystal::MacroLiteral.new("record TestResponse, status_code : Int32, headers : HTTP::Headers, body : String\n")
     end
 
     private def build_mock_request_def : Crystal::Def
