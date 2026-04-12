@@ -1,6 +1,4 @@
-# cr2cr — Read a Crystal application, write it back out.
-# Shows what the typed AST looks like when serialized,
-# including macro-expanded ECR templates.
+# cr2cr — Read a Crystal application, write it back out grouped by source file.
 #
 # Usage: cr2cr path/to/crystal-app/src/app.cr output-dir
 
@@ -41,90 +39,99 @@ Dir.cd(saved_dir)
 Dir.mkdir_p(output_dir)
 
 puts "cr2cr: semantic analysis OK"
-puts ""
 
-# Walk the typed AST and group nodes by source file
-files = {} of String => Array(String)
+# Collect top-level declarations grouped by source file
+files = {} of String => Array(Crystal::ASTNode)
 
-def collect_by_file(node : Crystal::ASTNode, files : Hash(String, Array(String)), app_dir : String)
-  loc = node.location
-  if loc
-    filename = loc.original_filename || loc.filename
-    if filename.is_a?(String) && filename.starts_with?("src/")
-      files[filename] ||= [] of String
-      # Only add top-level declarations, not every sub-node
-      text = node.to_s
-      files[filename] << text unless text.strip.empty?
+def source_file(node : Crystal::ASTNode) : String?
+  if loc = node.location
+    fn = loc.original_filename || loc.filename
+    if fn.is_a?(String) && fn.starts_with?("src/") && !fn.includes?("/crystal/src/")
+      return fn
     end
   end
+  nil
+end
 
+# Walk the top-level AST — FileNodes wrap each required file's content
+def collect(node : Crystal::ASTNode, files : Hash(String, Array(Crystal::ASTNode)))
   case node
   when Crystal::Expressions
-    node.expressions.each { |e| collect_by_file(e, files, app_dir) }
-  when Crystal::ModuleDef
-    collect_by_file(node.body, files, app_dir)
-  when Crystal::ClassDef
-    # Don't recurse into class bodies — the class to_s includes everything
+    node.expressions.each { |e| collect(e, files) }
+  when Crystal::FileNode
+    fn = node.filename
+    if fn.starts_with?("src/") || fn.includes?("/src/")
+      # Extract relative path from app dir
+      rel = fn.includes?("/src/") ? "src/" + fn.split("/src/").last : fn
+      if rel.starts_with?("src/") && !rel.includes?("crystal/src/") && !rel.includes?("/lib/")
+        # Collect the entire file node's content under this filename
+        files[rel] ||= [] of Crystal::ASTNode
+        inner = node.node
+        case inner
+        when Crystal::Expressions
+          inner.expressions.each do |e|
+            case e
+            when Crystal::FileNode
+              collect(e, files)
+            when Crystal::Nop
+              # skip
+            else
+              files[rel] << e
+            end
+          end
+        else
+          files[rel] << inner unless inner.is_a?(Crystal::Nop)
+        end
+      else
+        # Stdlib/shard file — recurse to find app files inside
+        collect(node.node, files)
+      end
+    else
+      collect(node.node, files)
+    end
   when Crystal::Require
-    # Show expanded requires
     if expanded = node.expanded
-      collect_by_file(expanded, files, app_dir)
+      collect(expanded, files)
+    end
+  when Crystal::ModuleDef
+    if fn = source_file(node)
+      files[fn] ||= [] of Crystal::ASTNode
+      files[fn] << node
+    else
+      collect(node.body, files)
+    end
+  when Crystal::ClassDef, Crystal::Def, Crystal::Assign, Crystal::Call, Crystal::If
+    if fn = source_file(node)
+      files[fn] ||= [] of Crystal::ASTNode
+      files[fn] << node
     end
   end
 end
 
-collect_by_file(result.node, files, app_dir)
+collect(result.node, files)
 
 # Write each file
-files.each do |filename, contents|
+files.each do |filename, nodes|
   out_path = File.join(output_dir, filename)
   Dir.mkdir_p(File.dirname(out_path))
 
+  content = String.build do |io|
+    nodes.each_with_index do |node, i|
+      io << "\n" if i > 0
+      io << node.to_s
+      io << "\n"
+    end
+  end
+
   # Try to format
-  source_text = contents.join("\n\n")
   begin
-    formatted = Crystal.format(source_text)
+    formatted = Crystal.format(content)
     File.write(out_path, formatted)
   rescue
-    File.write(out_path, source_text)
+    File.write(out_path, content)
   end
-  puts "  #{filename} (#{contents.size} nodes)"
+
+  puts "  #{filename} (#{nodes.size} declarations)"
 end
-
-# Also dump all unique source filenames referenced in the AST
-puts "\nAll source files referenced:"
-all_files = Set(String).new
-
-def collect_filenames(node : Crystal::ASTNode, files : Set(String))
-  if loc = node.location
-    fn = loc.original_filename || loc.filename
-    files << fn.to_s if fn.is_a?(String) && fn.to_s.starts_with?("src/")
-  end
-  case node
-  when Crystal::Expressions
-    node.expressions.each { |e| collect_filenames(e, files) }
-  when Crystal::ModuleDef
-    collect_filenames(node.body, files)
-  when Crystal::ClassDef
-    collect_filenames(node.body, files)
-  when Crystal::Def
-    collect_filenames(node.body, files) if node.body
-  when Crystal::If
-    collect_filenames(node.then, files)
-    collect_filenames(node.else, files) if node.else
-  when Crystal::Call
-    node.args.each { |a| collect_filenames(a, files) }
-    collect_filenames(node.obj.not_nil!, files) if node.obj
-    collect_filenames(node.block.not_nil!.body, files) if node.block
-  when Crystal::Assign
-    collect_filenames(node.value, files)
-  when Crystal::Require
-    collect_filenames(node.expanded.not_nil!, files) if node.expanded
-  end
-rescue
-end
-
-collect_filenames(result.node, all_files)
-all_files.to_a.sort.each { |f| puts "  #{f}" }
 
 puts "\ncr2cr: done"
