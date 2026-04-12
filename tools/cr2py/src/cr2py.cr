@@ -29,28 +29,9 @@ module Cr2Py
   class Emitter
     getter program : Crystal::Program
     property in_class : Bool = false
-    getter known_ivars : Set(String)
+    property current_class_type : Crystal::Type? = nil
 
     def initialize(@program)
-      # Build instance variable lookup from program types
-      @known_ivars = Set(String).new
-      collect_ivars(@program.types)
-    end
-
-    private def collect_ivars(types : Hash)
-      types.each_value do |type|
-        begin
-          type.instance_vars.each_key { |name| @known_ivars << name.lstrip('@') }
-        rescue
-        end
-        # Recurse into nested types (e.g., Railcar::Article)
-        if type.responds_to?(:types)
-          begin
-            collect_ivars(type.types)
-          rescue
-          end
-        end
-      end
     end
 
     # ── Statement context: Crystal AST → PyAST nodes ──
@@ -73,9 +54,13 @@ module Cr2Py
         name = node.name.names.last
         superclass = node.superclass.try { |sc| emit_type_name(sc) }
         old_in_class = @in_class
+        old_class_type = @current_class_type
         @in_class = true
+        # Look up the Crystal type for this class
+        @current_class_type = find_type(node.name.names)
         body = body_to_nodes(node.body)
         @in_class = old_in_class
+        @current_class_type = old_class_type
         # Deduplicate methods with same Python name (e.g., create and create!)
         seen_methods = Set(String).new
         body = body.reject do |n|
@@ -343,7 +328,7 @@ module Cr2Py
       # Skip trivial getter methods for known instance variables.
       # Crystal: def attributes; @attributes; end
       # Python doesn't need these — the attribute is accessed directly.
-      if @in_class && node.args.empty? && !node.double_splat && @known_ivars.includes?(node.name)
+      if @in_class && node.args.empty? && !node.double_splat
         body = node.body
         is_trivial_getter = case body
                             when Crystal::InstanceVar
@@ -758,8 +743,8 @@ module Cr2Py
       if obj
         "#{to_expr(obj)}.#{method_name}(#{emit_args(args, named)})"
       elsif @in_class && !PYTHON_BUILTINS.includes?(method_name) && !method_name.starts_with?("test_")
-        # Bare property access (known ivar) → self.name without parens
-        if args.empty? && named.nil? && @known_ivars.includes?(name)
+        # Bare property access → self.name without parens
+        if args.empty? && named.nil? && is_ivar_of_current_class?(name)
           "self.#{name}"
         else
           "self.#{method_name}(#{emit_args(args, named)})"
@@ -922,8 +907,62 @@ module Cr2Py
     end
 
     private def is_property?(node : Crystal::Call) : Bool
-      return false unless node.obj
-      @known_ivars.includes?(node.name)
+      return false unless obj = node.obj
+      # Try type info on the node itself (works with typed AST)
+      if obj_type = obj.type?
+        begin
+          return obj_type.instance_vars.has_key?("@#{node.name}")
+        rescue
+        end
+      end
+      # Fallback: check target_defs (typed call graph)
+      if target_defs = node.target_defs
+        target_defs.each do |d|
+          begin
+            return d.owner.instance_vars.has_key?("@#{node.name}")
+          rescue
+          end
+        end
+      end
+      false
+    end
+
+    private def is_ivar_of_current_class?(name : String) : Bool
+      if ct = @current_class_type
+        begin
+          return ct.instance_vars.has_key?("@#{name}")
+        rescue
+        end
+        # Also check superclasses
+        if ct.responds_to?(:parents)
+          ct.parents.try &.each do |parent|
+            begin
+              return true if parent.instance_vars.has_key?("@#{name}")
+            rescue
+            end
+          end
+        end
+      end
+      false
+    end
+
+    private def find_type(names : Array(String)) : Crystal::Type?
+      # Try Railcar::ClassName first, then just ClassName
+      begin
+        type = @program.types["Railcar"]?
+        if type
+          names.each do |n|
+            if type.responds_to?(:types)
+              type = type.types[n]?
+            else
+              return nil
+            end
+          end
+          return type
+        end
+      rescue
+      end
+      nil
     end
 
     private def emit_type_name(node : Crystal::ASTNode) : String

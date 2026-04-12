@@ -131,18 +131,22 @@ module CrystalAnalyzer
     raw_files = {} of String => Array(Crystal::ASTNode)
     collect_files(result2.node, raw_files)
 
+    # --- Collect typed Defs from program types ---
+    typed_defs = collect_typed_defs(result2.program)
+
     # --- Build import/export info per file ---
     files = {} of String => FileInfo
     tests = {} of String => FileInfo
     expander = ExpandTransformer.new(ecr_methods)
+    substituter = TypedDefSubstituter.new(typed_defs)
 
     raw_files.each do |filename, nodes|
       is_source = app_sources.includes?(filename)
       is_spec = spec_sources.includes?(filename)
       next unless is_source || is_spec
 
-      # Transform to expand macros
-      expanded_nodes = nodes.map { |n| n.transform(expander) }
+      # Substitute typed Defs, then expand macros
+      expanded_nodes = nodes.map { |n| n.transform(substituter).transform(expander) }
 
       exports = [] of String
       imports = [] of String
@@ -437,6 +441,90 @@ module CrystalAnalyzer
       else
         node
       end
+    end
+  end
+
+  # --- Typed Def collection from program types ---
+
+  # Walk program.types recursively and collect typed Defs keyed by
+  # "OwnerType#method_name". These have fully typed bodies from
+  # semantic analysis.
+  private def self.collect_typed_defs(program : Crystal::Program) : Hash(String, Crystal::Def)
+    typed = {} of String => Crystal::Def
+    collect_typed_defs_from(program.types, typed)
+    typed
+  end
+
+  private def self.collect_typed_defs_from(types : Hash, typed : Hash(String, Crystal::Def))
+    types.each do |name, type|
+      begin
+        if type.responds_to?(:defs) && (defs_hash = type.defs)
+          defs_hash.each do |method_name, defs_arr|
+            defs_arr.each do |dwm|
+              d = dwm.def
+              # Only collect defs from app source files
+              if loc = d.location
+                fn = loc.original_filename || loc.filename
+                if fn.is_a?(String) && app_file?(fn)
+                  key = "#{type}##{d.name}"
+                  typed[key] ||= d
+                end
+              end
+            end
+          end
+        end
+      rescue
+      end
+
+      # Recurse into nested types
+      begin
+        if type.responds_to?(:types)
+          collect_typed_defs_from(type.types, typed)
+        end
+      rescue
+      end
+    end
+  end
+
+  # --- Typed Def substituter ---
+
+  # Replaces untyped Def nodes from the parse tree with their typed
+  # counterparts from the program's type hierarchy.
+  class TypedDefSubstituter < Crystal::Transformer
+    getter typed_defs : Hash(String, Crystal::Def)
+    @type_stack = [] of String
+
+    def initialize(@typed_defs)
+    end
+
+    def transform(node : Crystal::ModuleDef)
+      @type_stack.push(node.name.names.join("::"))
+      result = super
+      @type_stack.pop
+      result
+    end
+
+    def transform(node : Crystal::ClassDef)
+      @type_stack.push(node.name.names.join("::"))
+      result = super
+      @type_stack.pop
+      result
+    end
+
+    def transform(node : Crystal::Def)
+      owner = @type_stack.join("::")
+      key = "#{owner}##{node.name}"
+      if typed = @typed_defs[key]?
+        # Return the typed Def (preserves location, args, return_type,
+        # receiver, and has fully typed body)
+        typed
+      else
+        super
+      end
+    end
+
+    def transform(node : Crystal::ASTNode)
+      super
     end
   end
 
