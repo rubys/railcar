@@ -12,6 +12,7 @@
 require "../../../src/semantic"
 require "../../../shards/crystal-analyzer/src/crystal-analyzer"
 require "./py_ast"
+require "./filters/spec_filter"
 
 module Cr2Py
   PYTHON_KEYWORDS = %w[False True None and as assert async await break class
@@ -429,6 +430,11 @@ module Cr2Py
         return block_call_to_nodes(node, block)
       end
 
+      # assert → assert statement
+      if name == "assert" && !obj && args.size == 1
+        return [PyAST::Statement.new("assert #{to_expr(args[0])}")] of PyAST::Node
+      end
+
       # raise → raise
       if name == "raise" && !obj
         expr = args.empty? ? "Exception()" : to_expr(args[0])
@@ -745,7 +751,7 @@ module Cr2Py
     end
 
     private def is_operator?(name : String) : Bool
-      %w[+ - * / % == != < > <= >= && || & | ^ << >>].includes?(name)
+      %w[+ - * / % == != < > <= >= && || & | ^ << >> in is not_in].includes?(name) || name == "is not" || name == "not in"
     end
 
     private def python_operator(name : String) : String
@@ -883,19 +889,30 @@ result.views.each do |ecr_filename, ast|
   puts "  #{py_filename}"
 end
 
-# Emit test files
+# Emit test files (apply SpecFilter first)
+spec_filter = Cr2Py::SpecFilter.new
 result.tests.each do |filename, info|
-  # spec/article_spec.cr → tests/article_spec.py
+  # spec/article_spec.cr → tests/test_article.py
+  # spec/spec_helper.cr → tests/conftest.py
   py_filename = filename
     .sub(/^spec\//, "tests/")
+    .sub(/_spec\.cr$/, ".py")
     .sub(/\.cr$/, ".py")
+  # Rename spec_helper → conftest (pytest convention)
+  py_filename = py_filename.sub("tests/spec_helper.py", "tests/conftest.py")
+  # Ensure test files start with test_
+  unless py_filename.includes?("conftest")
+    py_filename = py_filename.sub(/\/(?!test_)([^\/]+)\.py$/) { "/test_#{$1}.py" }
+  end
 
   out_path = File.join(output_dir, py_filename)
   Dir.mkdir_p(File.dirname(out_path))
 
+  # Transform spec AST → pytest AST, then emit
   nodes = [] of PyAST::Node
   info.nodes.each do |node|
-    nodes.concat(emitter.to_nodes(node))
+    transformed = node.transform(spec_filter)
+    nodes.concat(emitter.to_nodes(transformed))
   end
 
   mod = PyAST::Module.new(nodes)
