@@ -252,11 +252,25 @@ module Cr2Py
         call_to_expr(node)
 
       when Crystal::If
-        # Python ternary
-        then_expr = to_expr(node.then)
-        cond_expr = to_expr(node.cond)
-        else_expr = node.else.is_a?(Crystal::Nop) ? "None" : to_expr(node.else)
-        "(#{then_expr} if #{cond_expr} else #{else_expr})"
+        # Crystal desugars x?.try{|v| v} and || to:
+        #   if __temp = expr; __temp; else nil/default; end
+        # Collapse: else nil → just expr, else default → expr or default
+        if (cond_assign = node.cond.as?(Crystal::Assign)) &&
+           (node.then.is_a?(Crystal::Var) &&
+            node.then.as(Crystal::Var).name == cond_assign.target.to_s)
+          expr = to_expr(cond_assign.value)
+          if node.else.is_a?(Crystal::Nop) || node.else.is_a?(Crystal::NilLiteral)
+            expr
+          else
+            "(#{expr} or #{to_expr(node.else)})"
+          end
+        else
+          # Python ternary
+          then_expr = to_expr(node.then)
+          cond_expr = to_expr(node.cond)
+          else_expr = node.else.is_a?(Crystal::Nop) ? "None" : to_expr(node.else)
+          "(#{then_expr} if #{cond_expr} else #{else_expr})"
+        end
 
       when Crystal::Assign
         # Assignment in expression context — just the target name
@@ -889,7 +903,13 @@ module Cr2Py
       # Regular method call
       method_name = python_name(name)
       if obj
-        "#{to_expr(obj)}.#{method_name}(#{emit_args(args, named)})"
+        obj_str = to_expr(obj)
+        # Drop bare "Railcar" namespace — functions are at module level in Python
+        if obj_str == "Railcar"
+          "#{method_name}(#{emit_args(args, named)})"
+        else
+          "#{obj_str}.#{method_name}(#{emit_args(args, named)})"
+        end
       elsif @in_class && @in_method && !PYTHON_BUILTINS.includes?(method_name) && !method_name.starts_with?("test_")
         # Bare property access → self.name without parens
         if args.empty? && named.nil? && is_ivar_of_current_class?(name)
@@ -1205,11 +1225,20 @@ def generate_imports(content : String, file_imports : Array(String),
     py_module, py_name = entry
     next if py_module == own_module
     next if py_name.includes?(".")
-    next unless py_name[0]?.try(&.uppercase?)
-    if code_lines.includes?("(#{py_name})") ||
-       code_lines.includes?("#{py_name}(") ||
-       code_lines.includes?("#{py_name}.") ||
-       code_lines.includes?(": #{py_name}")
+    is_class = py_name[0]?.try(&.uppercase?)
+    # For classes: check superclass, constructor, method call, type annotation
+    # For functions: check bare function call (name followed by open paren)
+    match = if is_class
+              code_lines.includes?("(#{py_name})") ||
+              code_lines.includes?("#{py_name}(") ||
+              code_lines.includes?("#{py_name}.") ||
+              code_lines.includes?(": #{py_name}")
+            else
+              # Lowercase: only match bare function calls, not method calls
+              # Match "log_sql(" but not ".log_sql(" or "self.log_sql("
+              code_lines.matches?(/(?<![.\w])#{Regex.escape(py_name)}\(/)
+            end
+    if match
       import_stmt = "from #{py_module} import #{py_name}"
       unless seen_modules.includes?(import_stmt)
         imports << import_stmt
