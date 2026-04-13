@@ -159,7 +159,12 @@ module Cr2Py
         "self.#{node.name.lstrip('@')}"
 
       when Crystal::ClassVar
-        node.name.lstrip('@').lstrip('@').upcase
+        attr = node.name.lstrip('@').lstrip('@')
+        if @in_method
+          "self.__class__.#{attr}"
+        else
+          attr
+        end
 
       when Crystal::Path
         names = node.names
@@ -353,14 +358,16 @@ module Cr2Py
 
       name = python_name(name)
 
-      # Skip trivial getter methods for known instance variables.
-      # Crystal: def attributes; @attributes; end
+      # Skip trivial getter methods for instance/class variables.
+      # Crystal: def attributes; @attributes; end  or  def db; @@db; end
       # Python doesn't need these — the attribute is accessed directly.
       if @in_class && node.args.empty? && !node.double_splat
         body = node.body
         is_trivial_getter = case body
                             when Crystal::InstanceVar
                               body.name.lstrip('@') == node.name
+                            when Crystal::ClassVar
+                              body.name.lstrip('@').lstrip('@') == node.name
                             else
                               false
                             end
@@ -569,8 +576,10 @@ module Cr2Py
           var_name = block.args[0].name
           body_expr = to_expr(block.body)
           # Replace block arg references with a temp var
+          # Apply same name mangling as the Var handler
+          mangled_name = var_name.starts_with?("__") && !var_name.ends_with?("__") ? var_name.gsub(/^__/, "_t_") : var_name
           temp = "_try_val"
-          body_expr = body_expr.gsub(var_name, temp)
+          body_expr = body_expr.gsub(mangled_name, temp)
           return [
             PyAST::Assign.new(temp, obj_expr),
             PyAST::Statement.new("(#{body_expr} if #{temp} is not None else None)"),
@@ -869,6 +878,14 @@ module Cr2Py
         return "#{to_expr(obj)}.#{name}"
       end
 
+      # type(self).classvar → access class attribute without parens
+      if args.empty? && named.nil? && !node.block && obj && @in_class
+        stripped = name.rstrip('!').rstrip('?')
+        if obj.is_a?(Crystal::Call) && obj.name == "class" && is_ivar_of_current_class?(stripped)
+          return "#{to_expr(obj)}.#{stripped}"
+        end
+      end
+
       # Regular method call
       method_name = python_name(name)
       if obj
@@ -1039,16 +1056,21 @@ module Cr2Py
 
     private def is_property?(node : Crystal::Call) : Bool
       return false unless obj = node.obj
-      ivar_name = "@#{node.name}"
+      name = node.name
       # Try type info on the node itself (works with typed AST)
       if obj_type = obj.type?
         begin
-          return true if obj_type.all_instance_vars.has_key?(ivar_name)
+          return true if obj_type.all_instance_vars.has_key?("@#{name}")
         rescue
           begin
-            return true if obj_type.instance_vars.has_key?(ivar_name)
+            return true if obj_type.instance_vars.has_key?("@#{name}")
           rescue
           end
+        end
+        # Also check class vars
+        begin
+          return true if obj_type.class_vars.has_key?("@@#{name}")
+        rescue
         end
       end
       false
@@ -1056,14 +1078,18 @@ module Cr2Py
 
     private def is_ivar_of_current_class?(name : String) : Bool
       if ct = @current_class_type
-        ivar_name = "@#{name}"
         begin
-          return true if ct.all_instance_vars.has_key?(ivar_name)
+          return true if ct.all_instance_vars.has_key?("@#{name}")
         rescue
           begin
-            return true if ct.instance_vars.has_key?(ivar_name)
+            return true if ct.instance_vars.has_key?("@#{name}")
           rescue
           end
+        end
+        # Also check class vars
+        begin
+          return true if ct.class_vars.has_key?("@@#{name}")
+        rescue
         end
       end
       false
@@ -1099,6 +1125,7 @@ module Cr2Py
       result = type_str
         # Specific compound types first
         .gsub("DB::Any", "Any")
+        .gsub("SQLite3::Exception", "sqlite3.OperationalError")
         .gsub("DB::Database", "Any")
         .gsub("DB::ResultSet", "Any")
         .gsub("HTTP::Server::Context", "Any")
