@@ -31,6 +31,7 @@ module Cr2Py
     getter program : Crystal::Program
     property in_class : Bool = false
     property in_method : Bool = false
+    property in_classmethod : Bool = false
     property current_class_type : Crystal::Type? = nil
 
     def initialize(@program)
@@ -170,9 +171,10 @@ module Cr2Py
         names = node.names
         names = names[1..] if names.first? == "Railcar" && names.size > 1
         result = names.join(".")
-        # Class constants (UPPERCASE) need self.__class__ prefix inside methods
+        # Class constants (UPPERCASE) need cls/self.__class__ prefix inside methods
         if @in_class && @in_method && names.size == 1 && result == result.upcase && result.size > 1
-          "self.__class__.#{result}"
+          prefix = @in_classmethod ? "cls" : "self.__class__"
+          "#{prefix}.#{result}"
         else
           result
         end
@@ -432,9 +434,12 @@ module Cr2Py
 
       ret = node.return_type.try { |rt| crystal_type_to_python(rt.to_s) }
       old_in_method = @in_method
+      old_in_classmethod = @in_classmethod
       @in_method = true
+      @in_classmethod = is_class_method || false
       body = body_to_nodes(node.body)
       @in_method = old_in_method
+      @in_classmethod = old_in_classmethod
 
       # Crystal implicit return: last expression is the return value.
       # Convert the last Statement to a Return if it looks like a value.
@@ -715,9 +720,13 @@ module Cr2Py
         end
       end
 
-      # .class → type()
+      # .class → type() or cls in classmethods
       if name == "class" && args.empty? && obj
-        return "type(#{to_expr(obj)})"
+        if @in_classmethod
+          return "cls"
+        else
+          return "type(#{to_expr(obj)})"
+        end
       end
 
       # .name on type → __name__
@@ -911,11 +920,13 @@ module Cr2Py
           "#{obj_str}.#{method_name}(#{emit_args(args, named)})"
         end
       elsif @in_class && @in_method && !PYTHON_BUILTINS.includes?(method_name) && !method_name.starts_with?("test_")
-        # Bare property access → self.name without parens
-        if args.empty? && named.nil? && is_ivar_of_current_class?(name)
-          "self.#{name}"
+        prefix = @in_classmethod ? "cls" : "self"
+        # Bare property access → self.name / cls.name without parens
+        stripped_name = name.rstrip('!').rstrip('?')
+        if args.empty? && named.nil? && is_ivar_of_current_class?(stripped_name)
+          "#{prefix}.#{stripped_name}"
         else
-          "self.#{method_name}(#{emit_args(args, named)})"
+          "#{prefix}.#{method_name}(#{emit_args(args, named)})"
         end
       else
         "#{method_name}(#{emit_args(args, named)})"
