@@ -21,6 +21,7 @@ require "../../tools/cr2py/src/py_ast"
 require "../../tools/cr2py/src/cr2py"
 require "../../tools/cr2py/src/filters/db_filter"
 require "../../tools/cr2py/src/filters/pyast_dunder_filter"
+require "../../tools/cr2py/src/filters/pyast_return_filter"
 
 module Railcar
   class Python2Generator
@@ -45,8 +46,9 @@ module Railcar
       serializer = PyAST::Serializer.new
       db_filter = Cr2Py::DbFilter.new
       dunder_filter = Cr2Py::PyAstDunderFilter.new
+      return_filter = Cr2Py::PyAstReturnFilter.new
 
-      emit_runtime(typed_ast, output_dir, emitter, serializer, db_filter, dunder_filter)
+      emit_runtime(typed_ast, output_dir, emitter, serializer, db_filter, dunder_filter, return_filter)
 
       puts "Done! Output in #{output_dir}/"
     end
@@ -143,7 +145,8 @@ module Railcar
                              emitter : Cr2Py::Emitter,
                              serializer : PyAST::Serializer,
                              db_filter : Cr2Py::DbFilter,
-                             dunder_filter : Cr2Py::PyAstDunderFilter)
+                             dunder_filter : Cr2Py::PyAstDunderFilter,
+                             return_filter : Cr2Py::PyAstReturnFilter)
       runtime_dir = File.join(output_dir, "runtime")
       Dir.mkdir_p(runtime_dir)
 
@@ -168,7 +171,7 @@ module Railcar
 
       file_nodes.each do |file, nodes|
         emit_file(nodes, "runtime/#{file}.py", output_dir,
-          emitter, serializer, db_filter, dunder_filter)
+          emitter, serializer, db_filter, dunder_filter, return_filter)
       end
 
       File.write(File.join(runtime_dir, "__init__.py"), "")
@@ -202,13 +205,15 @@ module Railcar
                           emitter : Cr2Py::Emitter,
                           serializer : PyAST::Serializer,
                           db_filter : Cr2Py::DbFilter,
-                          dunder_filter : Cr2Py::PyAstDunderFilter)
+                          dunder_filter : Cr2Py::PyAstDunderFilter,
+                          return_filter : Cr2Py::PyAstReturnFilter)
       py_nodes = [] of PyAST::Node
       nodes.each do |node|
         transformed = node.transform(db_filter)
         py_nodes.concat(emitter.to_nodes(transformed))
       end
       py_nodes = dunder_filter.transform(py_nodes)
+      py_nodes = return_filter.transform(py_nodes)
 
       mod = PyAST::Module.new(py_nodes)
       content = serializer.serialize(mod)

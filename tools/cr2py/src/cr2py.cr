@@ -445,18 +445,6 @@ module Cr2Py
       @in_classmethod = old_in_classmethod
       @current_double_splat = old_double_splat
 
-      # Crystal implicit return: last expression is the return value.
-      # Convert the last Statement to a Return if it looks like a value.
-      if body.size > 0 && ret && ret != "None"
-        last = body.last
-        if last.is_a?(PyAST::Statement)
-          code = last.code
-          # Don't return assignments, prints, or self.x = y
-          unless code.includes?(" = ") || code.starts_with?("self.") && code.includes?(" = ")
-            body[-1] = PyAST::Return.new(code)
-          end
-        end
-      end
 
       decorators = [] of String
       decorators << "classmethod" if is_class_method
