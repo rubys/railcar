@@ -507,6 +507,11 @@ describe "Python runtime emission" do
   source = String.build do |io|
     io << "module DB\n"
     io << "  alias Any = Bool | Float32 | Float64 | Int32 | Int64 | String | Nil\n"
+    io << "  class Database\n"
+    io << "    def exec(sql : String, *args) end\n"
+    io << "    def exec(sql : String, args : Array) end\n"
+    io << "    def scalar(sql : String, *args) : Int64; 0_i64; end\n"
+    io << "  end\n"
     io << "end\n\n"
     runtime_source.lines.each do |line|
       next if line.strip.starts_with?("require ")
@@ -514,9 +519,32 @@ describe "Python runtime emission" do
     end
   end
 
+  # Synthetic calls to force typing of all methods
+  synthetic = <<-CR
+    _ve = Railcar::ValidationErrors.new
+    _ve.add("field", "message")
+    _ve.any?
+    _ve.empty?
+    _ve.full_messages
+    _ve["field"]
+    _ve.clear
+    _ar = Railcar::ApplicationRecord.new
+    _ar.id
+    _ar.persisted?
+    _ar.new_record?
+    _ar.attributes
+    _ar.errors
+    _ar.valid?
+    _ar.save
+    _ar.run_validations
+    Railcar::ApplicationRecord.table_name
+    Railcar::ApplicationRecord.count
+  CR
+
   nodes = Crystal::Expressions.new([
     Crystal::Require.new("prelude").at(location),
     Crystal::Parser.parse(source),
+    Crystal::Parser.parse(synthetic),
   ] of Crystal::ASTNode)
 
   program = Crystal::Program.new
@@ -556,6 +584,18 @@ describe "Python runtime emission" do
   py_nodes = dunder_filter.transform(py_nodes)
   mod = PyAST::Module.new(py_nodes)
   output = serializer.serialize(mod)
+
+  it "has program types for property detection" do
+    # Verify program types are available for smart lookups
+    # (we use program.types instead of node.type? for property detection)
+    ar_type = program.types["Railcar"]?.try(&.types["ApplicationRecord"]?)
+    ar_type.should_not be_nil
+    if ar_type
+      ar_type.all_instance_vars.has_key?("@attributes").should be_true
+      ar_type.all_instance_vars.has_key?("@persisted").should be_true
+      ar_type.all_instance_vars.has_key?("@errors").should be_true
+    end
+  end
 
   it "produces valid Python syntax" do
     # Use Crystal's string matching — can't call python3 from spec

@@ -64,6 +64,12 @@ module Railcar
       source = String.build do |io|
         io << "module DB\n"
         io << "  alias Any = Bool | Float32 | Float64 | Int32 | Int64 | String | Nil\n"
+        io << "  class Database\n"
+        io << "    def exec(sql : String, *args)\n    end\n"
+        io << "    def exec(sql : String, args : Array)\n    end\n"
+        io << "    def scalar(sql : String, *args) : Int64\n      0_i64\n    end\n"
+        io << "    def query_one?(sql : String, *args, &) : Hash(String, DB::Any)?\n      nil\n    end\n"
+        io << "  end\n"
         io << "end\n\n"
         runtime_source.lines.each do |line|
           next if line.strip.starts_with?("require ")
@@ -71,10 +77,16 @@ module Railcar
         end
       end
 
-      nodes = Crystal::Expressions.new([
+      all_nodes = [
         Crystal::Require.new("prelude").at(location),
         Crystal::Parser.parse(source),
-      ] of Crystal::ASTNode)
+      ] of Crystal::ASTNode
+
+      # Append synthetic calls to force the MainVisitor through all methods.
+      # This ensures types are set on every expression in method bodies.
+      all_nodes.concat(build_synthetic_calls)
+
+      nodes = Crystal::Expressions.new(all_nodes)
 
       program = Crystal::Program.new
       compiler = Crystal::Compiler.new
@@ -89,6 +101,40 @@ module Railcar
     rescue ex
       STDERR.puts "  layer 1 failed: #{ex.message}"
       {nil, nil}
+    end
+
+    # Build synthetic calls to exercise every runtime method
+    private def build_synthetic_calls : Array(Crystal::ASTNode)
+      calls = [] of Crystal::ASTNode
+
+      # ValidationErrors: initialize, add, any?, empty?, full_messages, [], clear
+      calls << Crystal::Parser.parse(<<-CR)
+        _ve = Railcar::ValidationErrors.new
+        _ve.add("field", "message")
+        _ve.any?
+        _ve.empty?
+        _ve.full_messages
+        _ve["field"]
+        _ve.clear
+      CR
+
+      # ApplicationRecord: initialize, id, persisted?, new_record?, valid?, save,
+      # destroy, reload, run_validations, find, count, create, do_insert, do_update
+      calls << Crystal::Parser.parse(<<-CR)
+        _ar = Railcar::ApplicationRecord.new
+        _ar.id
+        _ar.persisted?
+        _ar.new_record?
+        _ar.attributes
+        _ar.errors
+        _ar.valid?
+        _ar.save
+        _ar.run_validations
+        Railcar::ApplicationRecord.table_name
+        Railcar::ApplicationRecord.count
+      CR
+
+      calls
     end
 
     # ── Emit runtime Python files ──

@@ -54,14 +54,18 @@ module Railcar
   end
 
   class ApplicationRecord
-    @@db : Nil = nil
+    @@db : DB::Database? = nil
 
     def self.db
       @@db
     end
 
-    def self.db=(v)
+    def self.db=(v : DB::Database)
       @@db = v
+    end
+
+    def self.db! : DB::Database
+      @@db.not_nil!
     end
 
     @attributes : Hash(String, DB::Any)

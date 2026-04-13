@@ -24,7 +24,7 @@ module Cr2Py
 
   PYTHON_BUILTINS = %w[print len int str float bool isinstance hasattr type
     range enumerate zip sorted reversed list dict set tuple super abs min max
-    sum any all map filter open getattr setattr delattr repr hash id input
+    sum any all map filter open getattr setattr delattr repr hash input
     round format]
 
   class Emitter
@@ -948,8 +948,30 @@ module Cr2Py
     end
 
     private def is_hash_type?(node : Crystal::ASTNode) : Bool
+      # Check node type directly (works with typed AST)
       if obj_type = node.type?
         return obj_type.to_s.starts_with?("Hash")
+      end
+      # Check instance variable type from program
+      if node.is_a?(Crystal::InstanceVar) && (ct = @current_class_type)
+        ivar_name = node.name
+        begin
+          if iv = ct.all_instance_vars[ivar_name]?
+            return iv.type.to_s.starts_with?("Hash")
+          end
+        rescue
+        end
+      end
+      # Check if it's a call to a method that returns a Hash (e.g., attributes)
+      if node.is_a?(Crystal::Call) && node.args.empty? && (ct = @current_class_type)
+        begin
+          ct.all_instance_vars.each do |name, iv|
+            if name.lstrip('@') == node.name && iv.type.to_s.starts_with?("Hash")
+              return true
+            end
+          end
+        rescue
+        end
       end
       false
     end
@@ -1098,9 +1120,19 @@ module Cr2Py
           rescue
           end
         end
-        # Also check class vars
         begin
           return true if obj_type.class_vars.has_key?("@@#{name}")
+        rescue
+        end
+      end
+      # Fallback: if obj is self/record and we know the current class type
+      if ct = @current_class_type
+        begin
+          return true if ct.all_instance_vars.has_key?("@#{name}")
+        rescue
+        end
+        begin
+          return true if ct.class_vars.has_key?("@@#{name}")
         rescue
         end
       end
