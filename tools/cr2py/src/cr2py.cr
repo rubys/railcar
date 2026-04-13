@@ -136,7 +136,10 @@ module Cr2Py
     def to_expr(node : Crystal::ASTNode) : String
       case node
       when Crystal::Var
-        python_name(node.name)
+        name = python_name(node.name)
+        # Avoid Python name mangling: __x inside a class becomes _Class__x
+        name = name.lstrip('_').empty? ? name : name.gsub(/^__/, "_t_") if name.starts_with?("__") && !name.ends_with?("__")
+        name
 
       when Crystal::InstanceVar
         "self.#{node.name.lstrip('@')}"
@@ -466,7 +469,16 @@ module Cr2Py
     # ── If ──
 
     private def if_to_nodes(node : Crystal::If) : Array(PyAST::Node)
-      cond = to_expr(node.cond)
+      result = [] of PyAST::Node
+
+      # If condition is an assignment (Crystal: if x = expr), hoist it
+      if cond_assign = node.cond.as?(Crystal::Assign)
+        result.concat(assign_to_nodes(cond_assign))
+        cond = to_expr(cond_assign.target)
+      else
+        cond = to_expr(node.cond)
+      end
+
       body = body_to_nodes(node.then)
 
       else_nodes = if node.else.is_a?(Crystal::Nop)
@@ -477,7 +489,8 @@ module Cr2Py
                      body_to_nodes(node.else)
                    end
 
-      [PyAST::If.new(cond, body, else_nodes)] of PyAST::Node
+      result << PyAST::If.new(cond, body, else_nodes)
+      result
     end
 
     # ── Call (statement context) ──
@@ -524,6 +537,24 @@ module Cr2Py
         n = to_expr(obj)
         body = body_to_nodes(block.body)
         return [PyAST::For.new(var, "range(#{n})", body)] of PyAST::Node
+      end
+
+      # .try { |v| expr } → var = obj; result = expr if var is not None else None
+      if name == "try" && block && obj
+        obj_expr = to_expr(obj)
+        if block.args.size > 0
+          var_name = block.args[0].name
+          body_expr = to_expr(block.body)
+          # Replace block arg references with a temp var
+          temp = "_try_val"
+          body_expr = body_expr.gsub(var_name, temp)
+          return [
+            PyAST::Assign.new(temp, obj_expr),
+            PyAST::Statement.new("(#{body_expr} if #{temp} is not None else None)"),
+          ] of PyAST::Node
+        else
+          return [PyAST::Statement.new("(#{to_expr(block.body)} if #{obj_expr} is not None else None)")] of PyAST::Node
+        end
       end
 
       # General block → call + indented body
