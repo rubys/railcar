@@ -20,6 +20,7 @@ require "./source_parser"
 require "../semantic"
 require "../filters/model_boilerplate_python"
 require "../filters/broadcasts_to"
+require "../filters/minitest_to_pytest"
 require "../../tools/cr2py/src/py_ast"
 require "../../tools/cr2py/src/cr2py"
 require "../../tools/cr2py/src/filters/db_filter"
@@ -60,6 +61,7 @@ module Railcar
       nodes = extract_railcar_nodes(typed_ast)
       emit_runtime(nodes, output_dir, emitter, serializer, filters)
       emit_models(nodes, output_dir, emitter, serializer, filters)
+      emit_tests(output_dir, emitter, serializer, filters)
 
       # __init__.py files
       Dir.glob(File.join(output_dir, "**/*")).each do |path|
@@ -204,9 +206,17 @@ module Railcar
       runtime_dir = File.join(output_dir, "runtime")
       Dir.mkdir_p(runtime_dir)
 
-      runtime_classes = %w[ValidationErrors ApplicationRecord]
+      runtime_classes = %w[ValidationErrors ApplicationRecord CollectionProxy]
       runtime_nodes = nodes.select { |n|
-        n.is_a?(Crystal::ClassDef) && runtime_classes.includes?(n.as(Crystal::ClassDef).name.names.last)
+        case n
+        when Crystal::ClassDef
+          runtime_classes.includes?(n.name.names.last)
+        when Crystal::Assign
+          # Module-level constants like MODEL_REGISTRY
+          true
+        else
+          false
+        end
       }
 
       emit_file(runtime_nodes, "runtime/base.py", output_dir, emitter, serializer, filters)
@@ -222,7 +232,7 @@ module Railcar
       models_dir = File.join(output_dir, "models")
       Dir.mkdir_p(models_dir)
 
-      skip = %w[ValidationErrors ApplicationRecord]
+      skip = %w[ValidationErrors ApplicationRecord CollectionProxy]
       nodes.each do |node|
         next unless node.is_a?(Crystal::ClassDef)
         class_name = node.name.names.last
@@ -233,6 +243,133 @@ module Railcar
       end
 
       File.write(File.join(models_dir, "__init__.py"), "")
+    end
+
+    # ── Layer 3: Tests ──
+
+    private def emit_tests(output_dir : String,
+                           emitter : Cr2Py::Emitter,
+                           serializer : PyAST::Serializer,
+                           filters : Tuple)
+      tests_dir = File.join(output_dir, "tests")
+      Dir.mkdir_p(tests_dir)
+
+      # Generate conftest.py (db setup + fixtures)
+      generate_conftest(tests_dir)
+
+      # Convert model tests
+      test_filter = MinitestToPytest.new
+      model_tests_dir = File.join(rails_dir, "test/models")
+      if Dir.exists?(model_tests_dir)
+        Dir.glob(File.join(model_tests_dir, "*_test.rb")).each do |path|
+          basename = File.basename(path, ".rb")
+          py_name = "test_#{basename.chomp("_test")}.py"
+
+          ast = SourceParser.parse(path)
+          ast = ast.transform(test_filter)
+
+          py_nodes = emitter.to_nodes(ast)
+          db_filter, dunder_filter, return_filter = filters
+          py_nodes = return_filter.transform(py_nodes)
+
+          mod = PyAST::Module.new(py_nodes)
+          content = serializer.serialize(mod)
+
+          # Add test imports
+          imports = String.build do |io|
+            io << "import sys\nimport os\n"
+            io << "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))\n\n"
+            app.models.each_key do |name|
+              io << "from models.#{Inflector.underscore(name)} import #{name}\n"
+            end
+            io << "from tests.conftest import *\n\n"
+          end
+
+          out_path = File.join(tests_dir, py_name)
+          File.write(out_path, imports + content)
+          puts "  tests/#{py_name}"
+        end
+      end
+
+      File.write(File.join(tests_dir, "__init__.py"), "")
+    end
+
+    private def generate_conftest(tests_dir : String)
+      schema_map = {} of String => TableSchema
+      app.schemas.each { |s| schema_map[s.name] = s }
+
+      io = IO::Memory.new
+      io << "import sqlite3\n"
+      io << "import sys\nimport os\n"
+      io << "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))\n\n"
+      io << "from runtime.base import ApplicationRecord\n"
+      app.models.each_key do |name|
+        io << "from models.#{Inflector.underscore(name)} import #{name}\n"
+      end
+      io << "\n"
+
+      # setup_db function
+      io << "def setup_db():\n"
+      io << "    db = sqlite3.connect(':memory:')\n"
+      io << "    db.execute('PRAGMA foreign_keys = ON')\n"
+      app.schemas.each do |schema|
+        cols = schema.columns.map { |c| "#{c.name} #{c.type}" }
+        # Add constraints
+        col_defs = schema.columns.map do |c|
+          parts = "#{c.name} #{c.type}"
+          parts += " PRIMARY KEY AUTOINCREMENT" if c.name == "id"
+          parts += " NOT NULL" unless c.name == "id"
+          parts
+        end
+        io << "    db.execute('''CREATE TABLE IF NOT EXISTS #{schema.name} (\n"
+        io << "        #{col_defs.join(",\n        ")}\n"
+        io << "    )''')\n"
+      end
+      io << "    ApplicationRecord.db = db\n"
+      io << "    return db\n\n"
+
+      # Fixture setup
+      fixture_table_names = app.fixtures.map(&.name).to_set
+      association_fields = Set(String).new
+      app.models.each do |_, model|
+        model.associations.each do |assoc|
+          association_fields << Inflector.singularize(assoc.name) if assoc.kind == :belongs_to
+        end
+      end
+
+      io << "def setup_fixtures():\n"
+      app.fixtures.each do |fixture|
+        model_name = Inflector.classify(Inflector.singularize(fixture.name))
+        fixture.records.each do |record|
+          fields = record.fields.reject { |k, _| k == "id" }
+          field_strs = fields.map do |k, v|
+            if association_fields.includes?(k) && fixture_table_names.includes?(Inflector.pluralize(k))
+              ref_fixture = Inflector.pluralize(k)
+              "#{k}_id=#{ref_fixture}_#{v}.id"
+            else
+              "#{k}=#{v.inspect}"
+            end
+          end
+          io << "    global #{fixture.name}_#{record.label}\n"
+          io << "    #{fixture.name}_#{record.label} = #{model_name}.create(#{field_strs.join(", ")})\n"
+        end
+      end
+      io << "\n"
+
+      # Fixture accessor functions
+      app.fixtures.each do |fixture|
+        model_name = Inflector.classify(Inflector.singularize(fixture.name))
+        io << "def #{fixture.name}(name):\n"
+        io << "    all_records = #{model_name}.all()\n"
+        fixture.records.each_with_index do |record, i|
+          io << "    if name == '#{record.label}':\n"
+          io << "        return all_records[#{i}]\n"
+        end
+        io << "    raise ValueError(f'Unknown fixture: {name}')\n\n"
+      end
+
+      File.write(File.join(tests_dir, "conftest.py"), io.to_s)
+      puts "  tests/conftest.py"
     end
 
     # ── Shared ──
@@ -294,12 +431,8 @@ module Railcar
       if py_path.starts_with?("models/") && !py_path.includes?("__init__")
         imports << "from runtime.base import ApplicationRecord" if code.includes?("ApplicationRecord")
         imports << "from runtime.base import CollectionProxy" if code.includes?("CollectionProxy")
-
-        # Import other models referenced in this file
-        app.models.each_key do |name|
-          next if "models/#{Inflector.underscore(name)}.py" == py_path
-          imports << "from models.#{Inflector.underscore(name)} import #{name}" if code.includes?(name)
-        end
+        imports << "from runtime.base import MODEL_REGISTRY" if code.includes?("MODEL_REGISTRY")
+        # No cross-model imports — models use MODEL_REGISTRY for lazy resolution
       end
 
       imports.empty? ? "" : imports.join("\n") + "\n\n"

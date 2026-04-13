@@ -153,6 +153,10 @@ module Cr2Py
       case node
       when Crystal::Var
         name = python_name(node.name)
+        # In classmethods, Crystal's self refers to the class → Python's cls
+        if name == "self" && @in_classmethod
+          return "cls"
+        end
         # Avoid Python name mangling: __x inside a class becomes _Class__x
         name = name.lstrip('_').empty? ? name : name.gsub(/^__/, "_t_") if name.starts_with?("__") && !name.ends_with?("__")
         name
@@ -173,7 +177,8 @@ module Cr2Py
         names = names[1..] if names.first? == "Railcar" && names.size > 1
         result = names.join(".")
         # Class constants (UPPERCASE) need cls/self.__class__ prefix inside methods
-        if @in_class && @in_method && names.size == 1 && result == result.upcase && result.size > 1
+        # But only if they're defined on the current class, not module-level imports
+        if @in_class && @in_method && names.size == 1 && result == result.upcase && result.size > 1 && is_class_constant?(result)
           prefix = @in_classmethod ? "cls" : "self.__class__"
           "#{prefix}.#{result}"
         else
@@ -721,10 +726,14 @@ module Cr2Py
         end
       end
 
-      # .name on type → __name__
+      # .name on type/class → __name__
       if name == "name" && args.empty? && obj
         if obj.is_a?(Crystal::Call) && obj.name == "class"
           return "type(#{to_expr(obj.obj.not_nil!)}).__name__"
+        end
+        # self.name in classmethod → cls.__name__
+        if obj.is_a?(Crystal::Var) && obj.name == "self" && @in_classmethod
+          return "cls.__name__"
         end
       end
 
@@ -1070,6 +1079,20 @@ module Cr2Py
 
     private def needs_blank_line?(node : Crystal::ASTNode) : Bool
       node.is_a?(Crystal::Def) || node.is_a?(Crystal::ClassDef)
+    end
+
+    # Check if a constant name is defined on the current class (vs module-level)
+    private def is_class_constant?(name : String) : Bool
+      if ct = @current_class_type
+        # Check if the class body defines this constant
+        begin
+          ct.types.has_key?(name)
+        rescue
+          false
+        end
+      else
+        false
+      end
     end
 
     private def is_operator?(name : String) : Bool

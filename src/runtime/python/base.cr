@@ -8,6 +8,8 @@
 # No macros. Avoids patterns that emit poorly (unless, ||=, double negation).
 
 module Railcar
+  MODEL_REGISTRY = {} of String => ApplicationRecord.class
+
   # Helper modules (included by models for broadcast partials)
   module RouteHelpers
   end
@@ -21,7 +23,13 @@ module Railcar
   class CollectionProxy
     @owner : ApplicationRecord
     @foreign_key : String
-    def initialize(@owner : ApplicationRecord, @foreign_key : String, @model_class)
+    @model_name : String
+
+    def initialize(@owner, @foreign_key, @model_name)
+    end
+
+    def model_class
+      MODEL_REGISTRY[@model_name]
     end
 
     def destroy_all
@@ -79,6 +87,10 @@ module Railcar
 
   class ApplicationRecord
     @@db : DB::Database? = nil
+
+    def self.__init_subclass__(**kwargs)
+      MODEL_REGISTRY[self.name] = self
+    end
 
     def self.db
       @@db
