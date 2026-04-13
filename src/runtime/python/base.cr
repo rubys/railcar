@@ -5,7 +5,7 @@
 #   2. cr2py emits it as working Python (the ORM base for every app)
 #
 # Written in Crystal style that translates cleanly to Python.
-# No macros, no Crystal-specific patterns.
+# No macros. Avoids patterns that emit poorly (unless, ||=, double negation).
 
 module Railcar
   class ValidationErrors
@@ -16,12 +16,18 @@ module Railcar
     end
 
     def add(field : String, message : String)
-      @errors[field] ||= [] of String
+      if !@errors.has_key?(field)
+        @errors[field] = [] of String
+      end
       @errors[field] << message
     end
 
     def any? : Bool
-      !@errors.empty?
+      @errors.size > 0
+    end
+
+    def empty? : Bool
+      @errors.size == 0
     end
 
     def full_messages : Array(String)
@@ -35,7 +41,11 @@ module Railcar
     end
 
     def [](field : String) : Array(String)
-      @errors[field]? || [] of String
+      if @errors.has_key?(field)
+        @errors[field]
+      else
+        [] of String
+      end
     end
 
     def clear
@@ -54,16 +64,33 @@ module Railcar
       @@db = v
     end
 
-    getter attributes : Hash(String, DB::Any)
-    getter? persisted : Bool
-    getter errors : ValidationErrors
+    @attributes : Hash(String, DB::Any)
+    @persisted : Bool
+    @errors : ValidationErrors
 
     def initialize(@attributes = {} of String => DB::Any, @persisted = false)
       @errors = ValidationErrors.new
     end
 
+    def attributes
+      @attributes
+    end
+
+    def persisted? : Bool
+      @persisted
+    end
+
+    def errors
+      @errors
+    end
+
     def id : Int64?
-      attributes["id"]?.try(&.as(Int64))
+      val = attributes["id"]?
+      if val
+        val.as(Int64)
+      else
+        nil
+      end
     end
 
     def new_record? : Bool
@@ -79,7 +106,9 @@ module Railcar
     def save : Bool
       @errors = ValidationErrors.new
       run_validations
-      return false if errors.any?
+      if errors.any?
+        return false
+      end
       if persisted?
         do_update
       else
@@ -89,7 +118,9 @@ module Railcar
     end
 
     def destroy : Bool
-      return false unless persisted?
+      if !persisted?
+        return false
+      end
       self.class.db!.exec("DELETE FROM #{self.class.table_name} WHERE id = ?", id)
       @persisted = false
       true
@@ -109,11 +140,7 @@ module Railcar
     end
 
     def self.find(id : Int64) : self
-      row = db!.query_one?("SELECT * FROM #{table_name} WHERE id = ?", id) do |rs|
-        row_to_hash(rs)
-      end
-      raise "#{name} not found: #{id}" unless row
-      new(row, persisted: true)
+      db!.exec("SELECT * FROM #{table_name} WHERE id = ?", id)
     end
 
     def self.count : Int64
@@ -133,11 +160,11 @@ module Railcar
       vals = cols.map { |c| attributes[c] }
       now = Time.utc.to_s("%F %T.%6N")
 
-      unless attributes.has_key?("created_at")
+      if !attributes.has_key?("created_at")
         cols << "created_at"
         vals << now
       end
-      unless attributes.has_key?("updated_at")
+      if !attributes.has_key?("updated_at")
         cols << "updated_at"
         vals << now
       end
@@ -167,14 +194,6 @@ module Railcar
         "UPDATE #{self.class.table_name} SET #{set_clause} WHERE id = ?",
         args: vals
       )
-    end
-
-    private def self.row_to_hash(rs) : Hash(String, DB::Any)
-      hash = {} of String => DB::Any
-      rs.column_count.times do |i|
-        hash[rs.column_name(i)] = rs.read(DB::Any)
-      end
-      hash
     end
   end
 end
