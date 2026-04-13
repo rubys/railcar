@@ -32,6 +32,7 @@ module Cr2Py
     property in_class : Bool = false
     property in_method : Bool = false
     property in_classmethod : Bool = false
+    property current_double_splat : String? = nil
     property current_class_type : Crystal::Type? = nil
 
     def initialize(@program)
@@ -435,11 +436,14 @@ module Cr2Py
       ret = node.return_type.try { |rt| crystal_type_to_python(rt.to_s) }
       old_in_method = @in_method
       old_in_classmethod = @in_classmethod
+      old_double_splat = @current_double_splat
       @in_method = true
       @in_classmethod = is_class_method || false
+      @current_double_splat = node.double_splat.try(&.name)
       body = body_to_nodes(node.body)
       @in_method = old_in_method
       @in_classmethod = old_in_classmethod
+      @current_double_splat = old_double_splat
 
       # Crystal implicit return: last expression is the return value.
       # Convert the last Statement to a Return if it looks like a value.
@@ -951,6 +955,10 @@ module Cr2Py
       # Check node type directly (works with typed AST)
       if obj_type = node.type?
         return obj_type.to_s.starts_with?("Hash")
+      end
+      # Double splat parameter is always a dict
+      if node.is_a?(Crystal::Var) && node.name == @current_double_splat
+        return true
       end
       # Check instance variable type from program
       if node.is_a?(Crystal::InstanceVar) && (ct = @current_class_type)
