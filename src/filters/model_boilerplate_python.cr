@@ -43,6 +43,7 @@ module Railcar
       # Column getters and setters
       schema.columns.each do |col|
         next if col.name == "id"  # inherited from ApplicationRecord
+        crystal_type = SchemaExtractor.crystal_type(col.type)
         default = case col.type.downcase
                   when "integer" then "0_i64"
                   when "boolean" then "false"
@@ -50,10 +51,10 @@ module Railcar
                   else "\"\""
                   end
         class_body << Crystal::Parser.parse(
-          "def #{col.name}\n  attributes[\"#{col.name}\"]? || #{default}\nend"
+          "def #{col.name} : #{crystal_type}\n  (attributes[\"#{col.name}\"]? || #{default}).as(#{crystal_type})\nend"
         )
         class_body << Crystal::Parser.parse(
-          "def #{col.name}=(value)\n  attributes[\"#{col.name}\"] = value\nend"
+          "def #{col.name}=(value : #{crystal_type})\n  attributes[\"#{col.name}\"] = value\nend"
         )
       end
 
@@ -106,7 +107,7 @@ module Railcar
         target = Inflector.classify(Inflector.singularize(assoc.name))
         fk = assoc.options["foreign_key"]? || "#{singular_table}_id"
         Crystal::Parser.parse(
-          "def #{assoc.name}\n  CollectionProxy(#{target}).new(self, \"#{fk}\")\nend"
+          "def #{assoc.name}\n  CollectionProxy.new(self, \"#{fk}\", #{target})\nend"
         )
       when :belongs_to
         target = Inflector.classify(assoc.name)

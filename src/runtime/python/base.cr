@@ -18,8 +18,10 @@ module Railcar
   module Broadcasts
   end
 
-  class CollectionProxy(T)
-    def initialize(@owner : ApplicationRecord, @foreign_key : String)
+  class CollectionProxy
+    @owner : ApplicationRecord
+    @foreign_key : String
+    def initialize(@owner : ApplicationRecord, @foreign_key : String, @model_class)
     end
 
     def destroy_all

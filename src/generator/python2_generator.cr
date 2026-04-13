@@ -148,7 +148,8 @@ module Railcar
       puts "  semantic analysis: OK"
       {program, typed}
     rescue ex
-      STDERR.puts "  semantic analysis failed: #{ex.message}"
+      STDERR.puts "  semantic analysis failed:"
+      STDERR.puts ex.message
       {nil, nil}
     end
 
@@ -182,12 +183,11 @@ module Railcar
         if ast.is_a?(Crystal::ClassDef)
           name = ast.name.names.last
           calls << Crystal::Parser.parse(<<-CR)
-            _m_#{name.downcase} = Railcar::#{name}.create
+            _m_#{name.downcase} = Railcar::#{name}.new
             _m_#{name.downcase}.save
             _m_#{name.downcase}.valid?
-            _m_#{name.downcase}.destroy
+            _m_#{name.downcase}.run_validations
             Railcar::#{name}.table_name
-            Railcar::#{name}.count
           CR
         end
       end
@@ -272,7 +272,7 @@ module Railcar
 
       mod = PyAST::Module.new(py_nodes)
       content = serializer.serialize(mod)
-      imports = generate_imports(content)
+      imports = generate_imports(content, py_path)
 
       out_path = File.join(output_dir, py_path)
       Dir.mkdir_p(File.dirname(out_path))
@@ -280,13 +280,28 @@ module Railcar
       puts "  #{py_path}"
     end
 
-    private def generate_imports(content : String) : String
+    private def generate_imports(content : String, py_path : String = "") : String
       imports = [] of String
       imports << "from __future__ import annotations" if content.includes?("->") || content.includes?(": ")
       imports << "from typing import Any" if content.includes?("Any")
       imports << "import sqlite3" if content.includes?("sqlite3.")
       imports << "import logging" if content.includes?("logging.")
       imports << "from datetime import datetime" if content.includes?("datetime.")
+
+      # Cross-file imports based on content scanning
+      code = content.lines.reject(&.strip.starts_with?("#")).join("\n")
+
+      if py_path.starts_with?("models/") && !py_path.includes?("__init__")
+        imports << "from runtime.base import ApplicationRecord" if code.includes?("ApplicationRecord")
+        imports << "from runtime.base import CollectionProxy" if code.includes?("CollectionProxy")
+
+        # Import other models referenced in this file
+        app.models.each_key do |name|
+          next if "models/#{Inflector.underscore(name)}.py" == py_path
+          imports << "from models.#{Inflector.underscore(name)} import #{name}" if code.includes?(name)
+        end
+      end
+
       imports.empty? ? "" : imports.join("\n") + "\n\n"
     end
   end
