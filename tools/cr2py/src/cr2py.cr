@@ -1254,9 +1254,9 @@ def generate_imports(content : String, file_imports : Array(String),
   end
 end
 
-# --- Main ---
+# --- Main (only when run directly, not when required as library) ---
 
-if (entry = ARGV[0]?) && (output_dir = ARGV[1]?)
+if PROGRAM_NAME.includes?("cr2py") && (entry = ARGV[0]?) && (output_dir = ARGV[1]?)
 
 puts "cr2py: analyzing #{entry}"
 
