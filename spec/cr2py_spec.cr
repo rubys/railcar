@@ -279,6 +279,65 @@ describe "Cr2Py::OverloadFilter" do
   end
 end
 
+describe "Cr2Py::PyAstDunderFilter" do
+  filter = Cr2Py::PyAstDunderFilter.new
+  serializer = PyAST::Serializer.new
+
+  it "adds __bool__ when class has is_any method and __init__" do
+    cls = PyAST::Class.new("Errors", nil, [
+      PyAST::Func.new("__init__", ["self"], [
+        PyAST::Statement.new("self.data = {}"),
+      ] of PyAST::Node),
+      PyAST::Func.new("is_any", ["self"], [
+        PyAST::Return.new("bool(self.data)"),
+      ] of PyAST::Node, "bool"),
+    ] of PyAST::Node)
+    result = filter.transform([cls] of PyAST::Node)
+    mod = PyAST::Module.new(result)
+    output = serializer.serialize(mod)
+    output.should contain "__bool__"
+    output.should contain "bool(self.data)"
+  end
+
+  it "adds __len__ when class has size method" do
+    cls = PyAST::Class.new("Collection", nil, [
+      PyAST::Func.new("size", ["self"], [
+        PyAST::Return.new("len(self.items)"),
+      ] of PyAST::Node, "int"),
+    ] of PyAST::Node)
+    result = filter.transform([cls] of PyAST::Node)
+    mod = PyAST::Module.new(result)
+    output = serializer.serialize(mod)
+    output.should contain "__len__"
+    output.should contain "self.size()"
+  end
+
+  it "does not add __bool__ if already defined" do
+    cls = PyAST::Class.new("MyClass", nil, [
+      PyAST::Func.new("is_any", ["self"], [
+        PyAST::Return.new("True"),
+      ] of PyAST::Node),
+      PyAST::Func.new("__bool__", ["self"], [
+        PyAST::Return.new("False"),
+      ] of PyAST::Node),
+    ] of PyAST::Node)
+    result = filter.transform([cls] of PyAST::Node)
+    mod = PyAST::Module.new(result)
+    output = serializer.serialize(mod)
+    # Should have exactly one __bool__
+    output.scan(/__bool__/).size.should eq 1
+  end
+
+  it "leaves non-class nodes unchanged" do
+    func = PyAST::Func.new("standalone", [] of String, [
+      PyAST::Return.new("42"),
+    ] of PyAST::Node)
+    result = filter.transform([func] of PyAST::Node)
+    result.size.should eq 1
+    result[0].should be_a(PyAST::Func)
+  end
+end
+
 describe "Cr2Py::Emitter" do
   blog_entry = "build/crystal-blog/src/app.cr"
 
@@ -358,9 +417,11 @@ describe "Cr2Py::Emitter" do
     it "emits bare ivar access as self.name without parens" do
       call = Crystal::Call.new(nil, "attributes")
       emitter.in_class = true
+      emitter.in_method = true
       emitter.current_class_type = ar_type
       expr = emitter.to_expr(call)
       emitter.in_class = false
+      emitter.in_method = false
       emitter.current_class_type = nil
       expr.should eq "self.attributes"
     end

@@ -15,6 +15,7 @@ require "./py_ast"
 require "./filters/spec_filter"
 require "./filters/db_filter"
 require "./filters/overload_filter"
+require "./filters/pyast_dunder_filter"
 
 module Cr2Py
   PYTHON_KEYWORDS = %w[False True None and as assert async await break class
@@ -29,6 +30,7 @@ module Cr2Py
   class Emitter
     getter program : Crystal::Program
     property in_class : Bool = false
+    property in_method : Bool = false
     property current_class_type : Crystal::Type? = nil
 
     def initialize(@program)
@@ -92,6 +94,18 @@ module Cr2Py
         body = body_to_nodes(node.body)
         [PyAST::While.new(cond, body)] of PyAST::Node
 
+      when Crystal::ExceptionHandler
+        body_nodes = body_to_nodes(node.body)
+        if rescues = node.rescues
+          if r = rescues.first?
+            rescue_body = body_to_nodes(r.body)
+            exc_type = r.types.try(&.first.try(&.to_s)) || "Exception"
+            exc_var = r.name || "e"
+            return [PyAST::Try.new(body_nodes, crystal_type_to_python(exc_type), exc_var, rescue_body)] of PyAST::Node
+          end
+        end
+        body_nodes
+
       when Crystal::Call
         call_to_nodes(node)
 
@@ -150,7 +164,13 @@ module Cr2Py
       when Crystal::Path
         names = node.names
         names = names[1..] if names.first? == "Railcar" && names.size > 1
-        names.join(".")
+        result = names.join(".")
+        # Class constants (UPPERCASE) need self.__class__ prefix inside methods
+        if @in_class && @in_method && names.size == 1 && result == result.upcase && result.size > 1
+          "self.__class__.#{result}"
+        else
+          result
+        end
 
       when Crystal::Generic
         base = crystal_type_to_python(node.name.to_s)
@@ -390,7 +410,10 @@ module Cr2Py
       end
 
       ret = node.return_type.try { |rt| crystal_type_to_python(rt.to_s) }
+      old_in_method = @in_method
+      @in_method = true
       body = body_to_nodes(node.body)
+      @in_method = old_in_method
 
       # Crystal implicit return: last expression is the return value.
       # Convert the last Statement to a Return if it looks like a value.
@@ -659,9 +682,11 @@ module Cr2Py
         block = node.block.not_nil!
         obj_expr = to_expr(obj)
         if block.args.size > 0
-          # Replace block arg with obj in the body
-          block_body = block.body.to_s.gsub(block.args[0].name, obj_expr)
-          return "(#{block_body} if #{obj_expr} is not None else None)"
+          body_expr = to_expr(block.body)
+          temp = "_try_val"
+          body_expr = body_expr.gsub(block.args[0].name, temp)
+          # Inline: assign temp, then ternary
+          return "(#{body_expr.gsub(temp, obj_expr)} if #{obj_expr} is not None else None)"
         else
           return "(#{to_expr(block.body)} if #{obj_expr} is not None else None)"
         end
@@ -692,6 +717,45 @@ module Cr2Py
       # .includes? → in
       if name == "includes?" && args.size == 1 && obj
         return "#{to_expr(args[0])} in #{to_expr(obj)}"
+      end
+
+      # .has_key? → in
+      if name == "has_key?" && args.size == 1 && obj
+        return "#{to_expr(args[0])} in #{to_expr(obj)}"
+      end
+
+      # .keys → .keys()
+      if name == "keys" && args.empty? && obj
+        return "#{to_expr(obj)}.keys()"
+      end
+
+      # .reject { |x| expr } → [x for x in list if not expr]
+      if name == "reject" && obj && node.block
+        block = node.block.not_nil!
+        if block.args.size > 0
+          var = block.args[0].name
+          cond = to_expr(block.body)
+          return "[#{var} for #{var} in #{to_expr(obj)} if not (#{cond})]"
+        end
+      end
+
+      # .map { |x| expr } → [expr for x in list]
+      if name == "map" && obj && node.block
+        block = node.block.not_nil!
+        if block.args.size > 0
+          var = block.args[0].name
+          expr = to_expr(block.body)
+          return "[#{expr} for #{var} in #{to_expr(obj)}]"
+        else
+          # map without block args → [expr for _ in list]
+          expr = to_expr(block.body)
+          return "[#{expr} for _ in #{to_expr(obj)}]"
+        end
+      end
+
+      # .join(sep) → sep.join(list)
+      if name == "join" && args.size == 1 && obj
+        return "#{to_expr(args[0])}.join(#{to_expr(obj)})"
       end
 
       # .is_a? → isinstance
@@ -763,6 +827,11 @@ module Cr2Py
         return to_expr(obj)
       end
 
+      # .to_set → set()
+      if name == "to_set" && args.empty? && obj
+        return "set(#{to_expr(obj)})"
+      end
+
       # .capitalize / .downcase / .upcase / .strip / .chomp → Python equivalents
       if name == "downcase" && args.empty? && obj
         return "#{to_expr(obj)}.lower()"
@@ -804,7 +873,7 @@ module Cr2Py
       method_name = python_name(name)
       if obj
         "#{to_expr(obj)}.#{method_name}(#{emit_args(args, named)})"
-      elsif @in_class && !PYTHON_BUILTINS.includes?(method_name) && !method_name.starts_with?("test_")
+      elsif @in_class && @in_method && !PYTHON_BUILTINS.includes?(method_name) && !method_name.starts_with?("test_")
         # Bare property access → self.name without parens
         if args.empty? && named.nil? && is_ivar_of_current_class?(name)
           "self.#{name}"
@@ -1171,6 +1240,7 @@ emitter = Cr2Py::Emitter.new(result.program)
 serializer = PyAST::Serializer.new
 overload_filter = Cr2Py::OverloadFilter.new(result.program, result.typed_defs)
 db_filter = Cr2Py::DbFilter.new
+dunder_filter = Cr2Py::PyAstDunderFilter.new
 
 # Create __init__.py for each subdirectory to make them Python packages
 created_dirs = Set(String).new
@@ -1189,6 +1259,7 @@ result.files.each do |filename, info|
     nodes.concat(emitter.to_nodes(node.transform(overload_filter).transform(db_filter)))
   end
 
+  nodes = dunder_filter.transform(nodes)
   mod = PyAST::Module.new(nodes)
   content = serializer.serialize(mod)
   own_module = py_filename.sub(/\.py$/, "").gsub("/", ".")
@@ -1207,6 +1278,7 @@ result.views.each do |ecr_filename, ast|
   Dir.mkdir_p(File.dirname(out_path))
 
   nodes = emitter.to_nodes(ast.transform(overload_filter).transform(db_filter))
+  nodes = dunder_filter.transform(nodes)
   mod = PyAST::Module.new(nodes)
   content = serializer.serialize(mod)
   imports = generate_imports(content, [] of String, export_map)
@@ -1240,6 +1312,7 @@ result.tests.each do |filename, info|
     nodes.concat(emitter.to_nodes(transformed))
   end
 
+  nodes = dunder_filter.transform(nodes)
   mod = PyAST::Module.new(nodes)
   content = serializer.serialize(mod)
   is_test = !py_filename.includes?("conftest")

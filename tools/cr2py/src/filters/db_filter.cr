@@ -42,6 +42,14 @@ module Cr2Py
                    else
                      args.map { |a| a.transform(self).as(Crystal::ASTNode) }
                    end
+        # Convert named "args:" to positional (sqlite3.execute takes positional params)
+        if named = node.named_args
+          named.each do |na|
+            if na.name == "args"
+              new_args << na.value.transform(self)
+            end
+          end
+        end
         return Crystal::Call.new(obj.transform(self), "execute", new_args)
       end
 

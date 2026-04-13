@@ -40,6 +40,15 @@ module PyAST
     def initialize(@cond, @body); end
   end
 
+  # try: body except Type as var: rescue_body
+  class Try < Node
+    getter body : Array(Node)
+    getter rescue_type : String
+    getter rescue_var : String
+    getter rescue_body : Array(Node)
+    def initialize(@body, @rescue_type, @rescue_var, @rescue_body); end
+  end
+
   # variable = value
   class Assign < Node
     getter target : String
@@ -173,6 +182,12 @@ module PyAST
       when While
         io << indent << "while " << node.cond << ":\n"
         emit_body(node.body, io, depth + 1)
+
+      when Try
+        io << indent << "try:\n"
+        emit_body(node.body, io, depth + 1)
+        io << indent << "except " << node.rescue_type << " as " << node.rescue_var << ":\n"
+        emit_body(node.rescue_body, io, depth + 1)
 
       when For
         io << indent << "for " << node.var << " in " << node.collection << ":\n"
