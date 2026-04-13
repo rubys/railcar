@@ -1,23 +1,25 @@
 # Python2Generator — generates Python from typed Crystal AST via PyAST.
 #
 # Pipeline:
-#   1. AppModel.extract() — Rails metadata
-#   2. SemanticAnalyzer — builds clean Crystal AST, runs program.semantic()
-#   3. This generator — walks typed AST, applies filters, emits Python via PyAST
+#   1. Parse Crystal-for-Python runtime (src/runtime/python/base.cr)
+#   2. Feed to program.semantic() → typed AST
+#   3. Emit Python via cr2py's emitter/PyAST pipeline
 #
-# Unlike the original PythonGenerator which re-parses from Prism and ignores
-# types, this uses the typed AST directly. The Cr2Py emitter handles
-# Crystal→Python translation with type-aware property detection.
+# Built layer by layer:
+#   Layer 1: Runtime (ApplicationRecord, ValidationErrors)
+#   Layer 2: Models (Article, Comment — from Rails metadata + filters)
+#   Layer 3: Tests
+#   Layer 4: Controllers
+#   Layer 5: Views
+#   Layer 6: App (server, routing, static files)
 
 require "./app_model"
 require "./schema_extractor"
-require "./semantic_analyzer"
 require "./inflector"
+require "../semantic"
 require "../../tools/cr2py/src/py_ast"
 require "../../tools/cr2py/src/cr2py"
-require "../../tools/cr2py/src/filters/spec_filter"
 require "../../tools/cr2py/src/filters/db_filter"
-require "../../tools/cr2py/src/filters/overload_filter"
 require "../../tools/cr2py/src/filters/pyast_dunder_filter"
 
 module Railcar
@@ -30,84 +32,103 @@ module Railcar
 
     def generate(output_dir : String)
       puts "Generating Python (v2) from #{rails_dir}..."
+      Dir.mkdir_p(output_dir)
 
-      # Run semantic analysis — builds Crystal AST and types it
-      semantic = SemanticAnalyzer.new(app, rails_dir)
-      semantic.analyze
-
-      program = semantic.program
-      typed_ast = semantic.typed_ast
-
+      # Layer 1: Runtime
+      program, typed_ast = compile_layer1
       unless program && typed_ast
-        STDERR.puts "Semantic analysis failed — no typed AST"
-        exit 1
+        STDERR.puts "Cannot generate Python without typed AST"
+        return
       end
 
-      # Set up cr2py emitter and filters
       emitter = Cr2Py::Emitter.new(program)
       serializer = PyAST::Serializer.new
       db_filter = Cr2Py::DbFilter.new
-      overload_filter = Cr2Py::OverloadFilter.new(program)
       dunder_filter = Cr2Py::PyAstDunderFilter.new
 
-      # Create output directories
-      Dir.mkdir_p(output_dir)
-      %w[models controllers views runtime tests].each do |dir|
-        Dir.mkdir_p(File.join(output_dir, dir))
-      end
-
-      # Walk the typed AST and emit Python files
-      # The typed AST has: prelude requires, model stubs, controller ASTs, call sites
-      # We need to extract the Railcar module contents and emit per-file
-
-      emit_from_typed_ast(typed_ast, output_dir, emitter, serializer,
-        db_filter, overload_filter, dunder_filter)
+      emit_runtime(typed_ast, output_dir, emitter, serializer, db_filter, dunder_filter)
 
       puts "Done! Output in #{output_dir}/"
     end
 
-    private def emit_from_typed_ast(ast : Crystal::ASTNode, output_dir : String,
-                                     emitter : Cr2Py::Emitter,
-                                     serializer : PyAST::Serializer,
-                                     db_filter : Cr2Py::DbFilter,
-                                     overload_filter : Cr2Py::OverloadFilter,
-                                     dunder_filter : Cr2Py::PyAstDunderFilter)
-      # Collect all top-level nodes from the Railcar module
-      railcar_nodes = extract_railcar_nodes(ast)
+    # ── Layer 1: Compile runtime ──
 
-      # Group by type: models, controllers, etc.
-      railcar_nodes.each do |node|
-        case node
-        when Crystal::ClassDef
-          class_name = node.name.names.last
-          if class_name.ends_with?("Controller")
-            emit_file(node, "controllers/#{Inflector.underscore(class_name)}.py",
-              output_dir, emitter, serializer, db_filter, overload_filter, dunder_filter)
-          elsif class_name == "ApplicationRecord" || class_name == "Router"
-            emit_file(node, "runtime/#{Inflector.underscore(class_name)}.py",
-              output_dir, emitter, serializer, db_filter, overload_filter, dunder_filter)
-          else
-            # Model or runtime class
-            emit_file(node, "models/#{Inflector.underscore(class_name)}.py",
-              output_dir, emitter, serializer, db_filter, overload_filter, dunder_filter)
-          end
-        when Crystal::Def
-          # Top-level functions (helpers, etc.)
-          # Collect and emit later
-        when Crystal::ModuleDef
-          # Nested module — recurse
-          mod_name = node.name.names.last
-          body_stmts = case node.body
-                       when Crystal::Expressions then node.body.as(Crystal::Expressions).expressions
-                       else [node.body]
-                       end
-          body_stmts.each do |s|
-            next unless s.is_a?(Crystal::ClassDef) || s.is_a?(Crystal::Def)
-            railcar_nodes << s
-          end
+    private def compile_layer1 : {Crystal::Program?, Crystal::ASTNode?}
+      location = Crystal::Location.new("src/app.cr", 1, 1)
+
+      # Read the Crystal-for-Python runtime
+      runtime_path = File.join(File.dirname(__FILE__), "..", "runtime", "python", "base.cr")
+      runtime_source = File.read(runtime_path)
+
+      # Strip require lines, add DB stub
+      source = String.build do |io|
+        io << "module DB\n"
+        io << "  alias Any = Bool | Float32 | Float64 | Int32 | Int64 | String | Nil\n"
+        io << "end\n\n"
+        runtime_source.lines.each do |line|
+          next if line.strip.starts_with?("require ")
+          io << line << "\n"
         end
       end
+
+      nodes = Crystal::Expressions.new([
+        Crystal::Require.new("prelude").at(location),
+        Crystal::Parser.parse(source),
+      ] of Crystal::ASTNode)
+
+      program = Crystal::Program.new
+      compiler = Crystal::Compiler.new
+      compiler.no_codegen = true
+      program.compiler = compiler
+
+      normalized = program.normalize(nodes)
+      typed = program.semantic(normalized)
+
+      puts "  layer 1 (runtime): OK"
+      {program, typed}
+    rescue ex
+      STDERR.puts "  layer 1 failed: #{ex.message}"
+      {nil, nil}
     end
+
+    # ── Emit runtime Python files ──
+
+    private def emit_runtime(typed_ast : Crystal::ASTNode, output_dir : String,
+                             emitter : Cr2Py::Emitter,
+                             serializer : PyAST::Serializer,
+                             db_filter : Cr2Py::DbFilter,
+                             dunder_filter : Cr2Py::PyAstDunderFilter)
+      runtime_dir = File.join(output_dir, "runtime")
+      Dir.mkdir_p(runtime_dir)
+
+      file_map = {
+        "ValidationErrors"  => "base",
+        "ApplicationRecord" => "base",
+      }
+
+      # Collect nodes grouped by output file
+      file_nodes = {} of String => Array(Crystal::ASTNode)
+      extract_railcar_nodes(typed_ast).each do |node|
+        name = case node
+               when Crystal::ClassDef then node.name.names.last
+               else nil
+               end
+        next unless name
+        if file = file_map[name]?
+          file_nodes[file] ||= [] of Crystal::ASTNode
+          file_nodes[file] << node
+        end
+      end
+
+      file_nodes.each do |file, nodes|
+        emit_file(nodes, "runtime/#{file}.py", output_dir,
+          emitter, serializer, db_filter, dunder_filter)
+      end
+
+      File.write(File.join(runtime_dir, "__init__.py"), "")
+    end
+
+    # ── Shared helpers ──
 
     private def extract_railcar_nodes(ast : Crystal::ASTNode) : Array(Crystal::ASTNode)
       nodes = [] of Crystal::ASTNode
@@ -130,21 +151,21 @@ module Railcar
       nodes
     end
 
-    private def emit_file(node : Crystal::ASTNode, py_path : String,
+    private def emit_file(nodes : Array(Crystal::ASTNode), py_path : String,
                           output_dir : String,
                           emitter : Cr2Py::Emitter,
                           serializer : PyAST::Serializer,
                           db_filter : Cr2Py::DbFilter,
-                          overload_filter : Cr2Py::OverloadFilter,
                           dunder_filter : Cr2Py::PyAstDunderFilter)
-      transformed = node.transform(overload_filter).transform(db_filter)
-      py_nodes = emitter.to_nodes(transformed)
+      py_nodes = [] of PyAST::Node
+      nodes.each do |node|
+        transformed = node.transform(db_filter)
+        py_nodes.concat(emitter.to_nodes(transformed))
+      end
       py_nodes = dunder_filter.transform(py_nodes)
 
       mod = PyAST::Module.new(py_nodes)
       content = serializer.serialize(mod)
-
-      # Generate imports
       imports = generate_imports(content)
 
       out_path = File.join(output_dir, py_path)
@@ -157,16 +178,10 @@ module Railcar
       imports = [] of String
       imports << "from __future__ import annotations" if content.includes?("->") || content.includes?(": ")
       imports << "from typing import Any" if content.includes?("Any")
-      imports << "from typing import Self" if content.includes?("Self")
       imports << "import sqlite3" if content.includes?("sqlite3.")
       imports << "import logging" if content.includes?("logging.")
       imports << "from datetime import datetime" if content.includes?("datetime.")
-
-      if imports.empty?
-        ""
-      else
-        imports.join("\n") + "\n\n"
-      end
+      imports.empty? ? "" : imports.join("\n") + "\n\n"
     end
   end
 end
