@@ -107,7 +107,7 @@ module Railcar
         target = Inflector.classify(Inflector.singularize(assoc.name))
         fk = assoc.options["foreign_key"]? || "#{singular_table}_id"
         Crystal::Parser.parse(
-          "def #{assoc.name}\n  CollectionProxy.new(self, \"#{fk}\", \"#{target}\")\nend"
+          "def #{assoc.name} : CollectionProxy\n  CollectionProxy.new(self, \"#{fk}\", \"#{target}\")\nend"
         )
       when :belongs_to
         target = Inflector.classify(assoc.name)
@@ -130,10 +130,18 @@ module Railcar
       stmts = [] of String
 
       belongs_to_assocs.each do |a|
+        target = Inflector.classify(a.name)
         fk = a.options["foreign_key"]? || "#{a.name}_id"
         stmts << <<-CR
-          if attributes["#{fk}"]?.nil?
+          fk_val = attributes["#{fk}"]?
+          if fk_val.nil?
             errors.add("#{a.name}", "must exist")
+          else
+            begin
+              MODEL_REGISTRY["#{target}"].find(fk_val.as(Int64))
+            rescue
+              errors.add("#{a.name}", "must exist")
+            end
           end
         CR
       end

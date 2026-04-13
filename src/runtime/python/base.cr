@@ -32,6 +32,19 @@ module Railcar
       return MODEL_REGISTRY[@model_name]
     end
 
+    def build(**attrs)
+      hash = {} of String => DB::Any
+      attrs.each { |k, v| hash[k.to_s] = v }
+      hash[@foreign_key] = @owner.id
+      return model_class.new(hash)
+    end
+
+    def create(**attrs)
+      record = build(**attrs)
+      record.save
+      return record
+    end
+
     def destroy_all
       @owner.class.db!.exec(
         "DELETE FROM #{model_class.table_name} WHERE #{@foreign_key} = ?",
