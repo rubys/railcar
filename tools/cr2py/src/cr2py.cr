@@ -908,18 +908,14 @@ module Cr2Py
 
     private def is_property?(node : Crystal::Call) : Bool
       return false unless obj = node.obj
+      ivar_name = "@#{node.name}"
       # Try type info on the node itself (works with typed AST)
       if obj_type = obj.type?
         begin
-          return obj_type.instance_vars.has_key?("@#{node.name}")
+          return true if obj_type.all_instance_vars.has_key?(ivar_name)
         rescue
-        end
-      end
-      # Fallback: check target_defs (typed call graph)
-      if target_defs = node.target_defs
-        target_defs.each do |d|
           begin
-            return d.owner.instance_vars.has_key?("@#{node.name}")
+            return true if obj_type.instance_vars.has_key?(ivar_name)
           rescue
           end
         end
@@ -929,17 +925,13 @@ module Cr2Py
 
     private def is_ivar_of_current_class?(name : String) : Bool
       if ct = @current_class_type
+        ivar_name = "@#{name}"
         begin
-          return ct.instance_vars.has_key?("@#{name}")
+          return true if ct.all_instance_vars.has_key?(ivar_name)
         rescue
-        end
-        # Also check superclasses
-        if ct.responds_to?(:parents)
-          ct.parents.try &.each do |parent|
-            begin
-              return true if parent.instance_vars.has_key?("@#{name}")
-            rescue
-            end
+          begin
+            return true if ct.instance_vars.has_key?(ivar_name)
+          rescue
           end
         end
       end

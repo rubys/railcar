@@ -111,28 +111,25 @@ module CrystalAnalyzer
     source2 = Crystal::Compiler::Source.new(relative_entry, source_text + synthetic)
     result2 = compiler2.compile(source2, "analyzer_pass2")
 
-    # --- Collect expanded ECR method bodies ---
-    body_collector = TypedBodyCollector.new
-    result2.node.accept(body_collector)
+    # --- Collect files from pass 2 AST ---
+    raw_files = {} of String => Array(Crystal::ASTNode)
+    collect_files(result2.node, raw_files)
 
+    # --- Collect typed Defs from call graph ---
+    typed_defs = collect_typed_defs(result2.node)
+
+    # --- Collect expanded ECR view bodies from typed defs ---
     ecr_methods = {} of String => Crystal::ASTNode
     ecr_views = {} of String => Crystal::ASTNode
 
     finder.found.each do |ecr|
       key = "#{ecr.type_name}##{ecr.def_node.name}"
-      if body = body_collector.bodies[key]?
+      if candidates = typed_defs[key]?
+        body = candidates.first.body
         ecr_methods[key] = body
-        # Map ECR filename → expanded body (deduplicated)
         ecr_views[ecr.ecr_filename] ||= body
       end
     end
-
-    # --- Collect files from pass 2 AST ---
-    raw_files = {} of String => Array(Crystal::ASTNode)
-    collect_files(result2.node, raw_files)
-
-    # --- Collect typed Defs from program types ---
-    typed_defs = collect_typed_defs(result2.program)
 
     # --- Build import/export info per file ---
     files = {} of String => FileInfo
@@ -257,24 +254,6 @@ module CrystalAnalyzer
             )
           end
         end
-      end
-      true
-    end
-
-    def visit(node)
-      true
-    end
-  end
-
-  # --- Typed body collector (pass 2) ---
-
-  class TypedBodyCollector < Crystal::Visitor
-    getter bodies = {} of String => Crystal::ASTNode
-
-    def visit(node : Crystal::Call)
-      node.target_defs.try &.each do |d|
-        key = "#{d.owner}##{d.name}"
-        @bodies[key] ||= d.body
       end
       true
     end
@@ -444,54 +423,75 @@ module CrystalAnalyzer
     end
   end
 
-  # --- Typed Def collection from program types ---
+  # --- Typed Def collection from call graph ---
 
-  # Walk program.types recursively and collect typed Defs keyed by
-  # "OwnerType#method_name". These have fully typed bodies from
-  # semantic analysis.
-  private def self.collect_typed_defs(program : Crystal::Program) : Hash(String, Crystal::Def)
-    typed = {} of String => Crystal::Def
-    collect_typed_defs_from(program.types, typed)
+  # Walk the call graph starting from the top-level AST to collect typed
+  # Defs.  Unlike program.types (which holds untyped definitions), the
+  # call graph's target_defs have fully typed bodies — the compiler
+  # instantiates inherited methods per-type, so `Article#save` appears
+  # with owner `Railcar::Article` and a typed body, even though the
+  # source definition lives in `ApplicationRecord`.
+  private def self.collect_typed_defs(node : Crystal::ASTNode) : Hash(String, Array(Crystal::Def))
+    typed = {} of String => Array(Crystal::Def)
+    visited = Set(UInt64).new
+
+    # Seed: collect target_defs from top-level calls
+    queue = [] of Crystal::Def
+    seed = CallGraphWalker.new
+    node.accept(seed)
+    queue.concat(seed.defs)
+
+    # Walk the call graph recursively
+    while d = queue.pop?
+      next if visited.includes?(d.object_id)
+      visited << d.object_id
+
+      if loc = d.location
+        fn = loc.original_filename || loc.filename
+        if fn.is_a?(String)
+          # Normalize absolute paths to relative (e.g. /abs/path/src/foo.cr → src/foo.cr)
+          if !fn.starts_with?("src/") && !fn.starts_with?("spec/")
+            if idx = fn.index("/src/")
+              fn = fn[(idx + 1)..]
+            elsif idx = fn.index("/spec/")
+              fn = fn[(idx + 1)..]
+            end
+          end
+          if app_file?(fn)
+            key = "#{d.owner}##{d.name}"
+            list = typed[key] ||= [] of Crystal::Def
+            list << d unless list.any? { |existing| existing.object_id == d.object_id }
+          end
+        end
+      end
+
+      walker = CallGraphWalker.new
+      d.body.accept(walker)
+      queue.concat(walker.defs)
+    end
+
     typed
   end
 
-  private def self.collect_typed_defs_from(types : Hash, typed : Hash(String, Crystal::Def))
-    types.each do |name, type|
-      begin
-        if type.responds_to?(:defs) && (defs_hash = type.defs)
-          defs_hash.each do |method_name, defs_arr|
-            defs_arr.each do |dwm|
-              d = dwm.def
-              # Only collect defs from app source files
-              if loc = d.location
-                fn = loc.original_filename || loc.filename
-                if fn.is_a?(String) && app_file?(fn)
-                  key = "#{type}##{d.name}"
-                  typed[key] ||= d
-                end
-              end
-            end
-          end
-        end
-      rescue
-      end
+  private class CallGraphWalker < Crystal::Visitor
+    getter defs = [] of Crystal::Def
 
-      # Recurse into nested types
-      begin
-        if type.responds_to?(:types)
-          collect_typed_defs_from(type.types, typed)
-        end
-      rescue
-      end
+    def visit(node : Crystal::Call)
+      node.target_defs.try &.each { |d| @defs << d }
+      true
+    end
+
+    def visit(node)
+      true
     end
   end
 
   # --- Typed Def substituter ---
 
   # Replaces untyped Def nodes from the parse tree with their typed
-  # counterparts from the program's type hierarchy.
+  # counterparts from the call graph.
   class TypedDefSubstituter < Crystal::Transformer
-    getter typed_defs : Hash(String, Crystal::Def)
+    getter typed_defs : Hash(String, Array(Crystal::Def))
     @type_stack = [] of String
 
     def initialize(@typed_defs)
@@ -514,17 +514,15 @@ module CrystalAnalyzer
     def transform(node : Crystal::Def)
       owner = @type_stack.join("::")
       key = "#{owner}##{node.name}"
-      if typed = @typed_defs[key]?
-        # Return the typed Def (preserves location, args, return_type,
-        # receiver, and has fully typed body)
+      # Try instance method key, then class method key (.class suffix)
+      candidates = @typed_defs[key]? || @typed_defs["#{owner}.class##{node.name}"]?
+      if candidates
+        # Match by arity for overloaded methods
+        typed = candidates.find { |d| d.args.size == node.args.size } || candidates.first
         typed
       else
         super
       end
-    end
-
-    def transform(node : Crystal::ASTNode)
-      super
     end
   end
 
