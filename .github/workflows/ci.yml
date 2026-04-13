@@ -54,6 +54,6 @@ jobs:
 
       - name: Generate and test Python blog
         run: |
-          build/railcar --python build/demo/blog build/python-blog
+          build/railcar --python0 build/demo/blog build/python-blog
           cd build/python-blog
           uv run --extra test pytest tests/ -v

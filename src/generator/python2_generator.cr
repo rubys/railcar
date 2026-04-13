@@ -35,12 +35,13 @@ module Railcar
       semantic = SemanticAnalyzer.new(app, rails_dir)
       semantic.analyze
 
-      unless program = semantic.program
-        STDERR.puts "Semantic analysis failed — no program"
+      program = semantic.program
+      typed_ast = semantic.typed_ast
+
+      unless program && typed_ast
+        STDERR.puts "Semantic analysis failed — no typed AST"
         exit 1
       end
-
-      typed_ast = semantic.typed_ast
 
       # Set up cr2py emitter and filters
       emitter = Cr2Py::Emitter.new(program)

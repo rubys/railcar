@@ -76,28 +76,42 @@ module Railcar
       end
 
       # Combine: prelude + db stub + http + ecr + stubs + controllers + call sites
+      # Require nodes need a location for relative require resolution
+      location = Crystal::Location.new("src/app.cr", 1, 1)
       nodes = [
-        Crystal::Require.new("prelude"),
-        Crystal::Require.new("http"),
-        Crystal::Require.new("ecr"),
+        Crystal::Require.new("prelude").at(location),
+        Crystal::Require.new("http/server").at(location),
+        Crystal::Require.new("ecr").at(location),
       ] of Crystal::ASTNode
       nodes << stubs
       nodes.concat(controller_asts)
       nodes.concat(call_sites)
 
-      STDERR.puts "  CRYSTAL_PATH=#{ENV["CRYSTAL_PATH"]?}"
-      STDERR.puts "  default_paths=#{Crystal::CrystalPath.default_paths}"
-      # Check if http/server is findable
-      cp = Crystal::CrystalPath.new
-      begin
-        found = cp.find("http/server")
-        STDERR.puts "  http/server: #{found}"
-      rescue ex
-        STDERR.puts "  http/server: NOT FOUND (#{ex.message.try(&.lines.first)})"
-      end
       @program = prog = Crystal::Program.new
+      # Assign a compiler so stdlib codegen stubs are available
+      compiler = Crystal::Compiler.new
+      compiler.no_codegen = true
+      prog.compiler = compiler
+
+      # Try with all controllers first; if that fails, retry with just models
       normalized = prog.normalize(Crystal::Expressions.new(nodes))
-      @typed_ast = prog.semantic(normalized)
+      begin
+        @typed_ast = prog.semantic(normalized)
+      rescue
+        # Retry without controllers — models may still type successfully
+        STDERR.puts "  retrying without controllers..."
+        model_nodes = [
+          Crystal::Require.new("prelude").at(location),
+          Crystal::Require.new("http/server").at(location),
+          Crystal::Require.new("ecr").at(location),
+        ] of Crystal::ASTNode
+        model_nodes << stubs
+        prog2 = Crystal::Program.new
+        prog2.compiler = compiler
+        normalized2 = prog2.normalize(Crystal::Expressions.new(model_nodes))
+        @typed_ast = prog2.semantic(normalized2)
+        @program = prog2
+      end
 
       # Count typed methods
       typed_count = 0
@@ -109,7 +123,12 @@ module Railcar
       puts "  semantic analysis: #{typed_count} of #{call_sites.size} methods typed"
       true
     rescue ex
-      STDERR.puts "  semantic analysis failed: #{ex.message.try(&.lines.reject(&.empty?).first(3).join(" | "))}"
+      full_msg = ex.message || ""
+      STDERR.puts "  semantic analysis failed: #{full_msg}"
+      STDERR.puts "  exception class: #{ex.class}"
+      if ex.responds_to?(:to_s)
+        STDERR.puts "  full: #{ex.to_s.lines.first(15).join("\n    ")}"
+      end
       false
     end
 
@@ -262,12 +281,14 @@ module Railcar
 
     # Build call arguments matching ControllerSignature's method signatures
     private def build_call_args(action_name : String, before_actions : Array(BeforeAction)) : Array(Crystal::ASTNode)
-      args = [Crystal::Call.new(Crystal::Path.new("HTTP::Server::Response"), "new")] of Crystal::ASTNode
+      args = [Crystal::Call.new(Crystal::Path.new(["HTTP", "Server", "Response"]), "new",
+        [Crystal::Call.new(Crystal::Path.new(["IO", "Memory"]), "new")] of Crystal::ASTNode
+      )] of Crystal::ASTNode
 
       # ID parameter for show/edit/update/destroy
       needs_id = %w[show edit update destroy].includes?(action_name)
       if needs_id
-        args << Crystal::NumberLiteral.new("1")
+        args << Crystal::NumberLiteral.new("1", :i64)
       end
 
       # Params for create/update
@@ -275,6 +296,11 @@ module Railcar
       if needs_params
         args << Crystal::HashLiteral.new([] of Crystal::HashLiteral::Entry,
           of: Crystal::HashLiteral::Entry.new(Crystal::Path.new("String"), Crystal::Path.new("String")))
+      end
+
+      # Nested resource parent ID (e.g., article_id for comments)
+      if before_actions.any? { |ba| ba.method_name.includes?("set_") || ba.method_name.includes?("find_") }
+        args << Crystal::NumberLiteral.new("1", :i64)
       end
 
       args
