@@ -387,9 +387,11 @@ describe "Cr2Py::Emitter" do
       defn = Crystal::Def.new("validate", body: Crystal::Call.new(nil, "check"))
       emitter.in_class = true
       emitter.current_class_type = ar_type
+      emitter.current_class_name = ar_type.to_s
       nodes = emitter.to_nodes(defn)
       emitter.in_class = false
       emitter.current_class_type = nil
+      emitter.current_class_name = nil
       func = nodes.first.as(PyAST::Func)
       func.args.first.should eq "self"
     end
@@ -420,10 +422,12 @@ describe "Cr2Py::Emitter" do
       emitter.in_class = true
       emitter.in_method = true
       emitter.current_class_type = ar_type
+      emitter.current_class_name = ar_type.to_s
       expr = emitter.to_expr(call)
       emitter.in_class = false
       emitter.in_method = false
       emitter.current_class_type = nil
+      emitter.current_class_name = nil
       expr.should eq "self.attributes"
     end
 

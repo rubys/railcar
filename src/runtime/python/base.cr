@@ -29,10 +29,14 @@ module Railcar
     end
 
     def model_class
-      MODEL_REGISTRY[@model_name]
+      return MODEL_REGISTRY[@model_name]
     end
 
     def destroy_all
+      @owner.class.db!.exec(
+        "DELETE FROM #{model_class.table_name} WHERE #{@foreign_key} = ?",
+        @owner.id
+      )
     end
 
     def size : Int32
@@ -108,7 +112,10 @@ module Railcar
     @persisted : Bool
     @errors : ValidationErrors
 
-    def initialize(@attributes = {} of String => DB::Any, @persisted = false)
+    def initialize(@attributes = {} of String => DB::Any, @persisted = false, **kwargs)
+      if kwargs.size > 0
+        kwargs.each { |k, v| @attributes[k.to_s] = v }
+      end
       @errors = ValidationErrors.new
     end
 
@@ -180,11 +187,28 @@ module Railcar
     end
 
     def self.find(id : Int64) : self
-      db!.exec("SELECT * FROM #{table_name} WHERE id = ?", id)
+      row = db!.query_one("SELECT * FROM #{table_name} WHERE id = ?", id)
+      if !row
+        raise "#{self.name} not found: #{id}"
+      end
+      from_row(row)
+    end
+
+    def self.all : Array(self)
+      rows = db!.query_all("SELECT * FROM #{table_name} ORDER BY id")
+      rows.map { |row| from_row(row) }
     end
 
     def self.count : Int64
       db!.scalar("SELECT COUNT(*) FROM #{table_name}").as(Int64)
+    end
+
+    def self.from_row(row) : self
+      hash = {} of String => DB::Any
+      row.keys.each do |key|
+        hash[key] = row[key]
+      end
+      new(hash, persisted: true)
     end
 
     def self.create(**attrs) : self

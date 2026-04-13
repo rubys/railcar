@@ -14,6 +14,7 @@ require "../../../shards/crystal-analyzer/src/crystal-analyzer"
 require "./py_ast"
 require "./filters/spec_filter"
 require "./filters/db_filter"
+require "./type_index"
 require "./filters/overload_filter"
 require "./filters/pyast_dunder_filter"
 
@@ -29,13 +30,27 @@ module Cr2Py
 
   class Emitter
     getter program : Crystal::Program
+    getter type_index : TypeIndex
     property in_class : Bool = false
     property in_method : Bool = false
     property in_classmethod : Bool = false
     property current_double_splat : String? = nil
     property current_class_type : Crystal::Type? = nil
+    property current_class_name : String? = nil
 
-    def initialize(@program)
+    getter debug_target : String?
+
+    def initialize(@program, @type_index = TypeIndex.build(program))
+      @debug_target = ENV["CR2PY_DEBUG"]?
+    end
+
+    private def debug?(context : String) : Bool
+      return false unless dt = @debug_target
+      dt == "all" || context.includes?(dt)
+    end
+
+    private def debug(msg : String)
+      STDERR.puts "  CR2PY_DEBUG: #{msg}"
     end
 
     # ── Statement context: Crystal AST → PyAST nodes ──
@@ -59,12 +74,14 @@ module Cr2Py
         superclass = node.superclass.try { |sc| emit_type_name(sc) }
         old_in_class = @in_class
         old_class_type = @current_class_type
+        old_class_name = @current_class_name
         @in_class = true
-        # Look up the Crystal type for this class
         @current_class_type = find_type(node.name.names)
+        @current_class_name = @current_class_type.try(&.to_s)
         body = body_to_nodes(node.body)
         @in_class = old_in_class
         @current_class_type = old_class_type
+        @current_class_name = old_class_name
         # Deduplicate methods with same Python name (e.g., create and create!)
         seen_methods = Set(String).new
         body = body.reject do |n|
@@ -380,16 +397,16 @@ module Cr2Py
 
       name = python_name(name)
 
-      # Skip trivial getter methods for instance/class variables.
-      # Crystal: def attributes; @attributes; end  or  def db; @@db; end
+      # Skip trivial getter methods for instance variables.
+      # Crystal: def attributes; @attributes; end
       # Python doesn't need these — the attribute is accessed directly.
+      # Note: class var getters (@@db) are kept — they may be called from
+      # outside the class where direct attribute access doesn't work.
       if @in_class && node.args.empty? && !node.double_splat
         body = node.body
         is_trivial_getter = case body
                             when Crystal::InstanceVar
                               body.name.lstrip('@') == node.name
-                            when Crystal::ClassVar
-                              body.name.lstrip('@').lstrip('@') == node.name
                             else
                               false
                             end
@@ -445,6 +462,12 @@ module Cr2Py
       @in_method = true
       @in_classmethod = is_class_method || false
       @current_double_splat = node.double_splat.try(&.name)
+
+      method_ctx = "#{@current_class_name || "?"}##{name}"
+      if debug?(method_ctx)
+        debug "#{method_ctx}: in_class=#{@in_class} classmethod=#{@in_classmethod} class_name=#{@current_class_name}"
+      end
+
       body = body_to_nodes(node.body)
       @in_method = old_in_method
       @in_classmethod = old_in_classmethod
@@ -583,6 +606,14 @@ module Cr2Py
         n = to_expr(obj)
         body = body_to_nodes(block.body)
         return [PyAST::For.new(var, "range(#{n})", body)] of PyAST::Node
+      end
+
+      # .map { |x| expr } → [expr for x in collection] (statement context)
+      if name == "map" && block && obj && block.args.size > 0
+        var = block.args[0].name
+        expr = to_expr(block.body)
+        collection = to_expr(obj)
+        return [PyAST::Statement.new("[#{expr} for #{var} in #{collection}]")] of PyAST::Node
       end
 
       # .try { |v| expr } → var = obj; result = expr if var is not None else None
@@ -899,7 +930,8 @@ module Cr2Py
 
       # Property access (type-checked)
       if args.empty? && named.nil? && !node.block && obj && is_property?(node)
-        return "#{to_expr(obj)}.#{name}"
+        prop_name = name.rstrip('!').rstrip('?')
+        return "#{to_expr(obj)}.#{prop_name}"
       end
 
       # type(self).classvar → access class attribute without parens
@@ -949,7 +981,7 @@ module Cr2Py
     end
 
     private def is_hash_type?(node : Crystal::ASTNode) : Bool
-      # Check node type directly (works with typed AST)
+      # Direct type on node
       if obj_type = node.type?
         return obj_type.to_s.starts_with?("Hash")
       end
@@ -957,25 +989,16 @@ module Cr2Py
       if node.is_a?(Crystal::Var) && node.name == @current_double_splat
         return true
       end
-      # Check instance variable type from program
-      if node.is_a?(Crystal::InstanceVar) && (ct = @current_class_type)
-        ivar_name = node.name
-        begin
-          if iv = ct.all_instance_vars[ivar_name]?
-            return iv.type.to_s.starts_with?("Hash")
-          end
-        rescue
+      # Instance var — look up type in index
+      if node.is_a?(Crystal::InstanceVar) && (cn = @current_class_name)
+        if t = @type_index.ivar_type(cn, node.name)
+          return @type_index.is_hash_type?(t)
         end
       end
-      # Check if it's a call to a method that returns a Hash (e.g., attributes)
-      if node.is_a?(Crystal::Call) && node.args.empty? && (ct = @current_class_type)
-        begin
-          ct.all_instance_vars.each do |name, iv|
-            if name.lstrip('@') == node.name && iv.type.to_s.starts_with?("Hash")
-              return true
-            end
-          end
-        rescue
+      # Call to a getter that returns a Hash (e.g., attributes)
+      if node.is_a?(Crystal::Call) && node.args.empty? && (cn = @current_class_name)
+        if t = @type_index.ivar_type(cn, "@#{node.name}")
+          return @type_index.is_hash_type?(t)
         end
       end
       false
@@ -1128,51 +1151,80 @@ module Cr2Py
 
     private def is_property?(node : Crystal::Call) : Bool
       return false unless obj = node.obj
-      name = node.name
-      # Try type info on the node itself (works with typed AST)
+      name = node.name.rstrip('!').rstrip('?')
+      ctx = "#{@current_class_name || "?"}#is_property?(#{name})"
+      do_debug = debug?(ctx) || debug?(name)
+
+      # Check obj's type directly (works when typed nodes are available)
       if obj_type = obj.type?
-        begin
-          return true if obj_type.all_instance_vars.has_key?("@#{name}")
-        rescue
-          begin
-            return true if obj_type.instance_vars.has_key?("@#{name}")
-          rescue
+        obj_type_name = obj_type.to_s.rstrip('+')
+        if @type_index.has_instance_var?(obj_type_name, "@#{name}")
+          debug "#{ctx}: found ivar @#{name} on obj type #{obj_type_name}" if do_debug
+          return true
+        end
+        if @type_index.has_class_var?(obj_type_name, "@@#{name}")
+          debug "#{ctx}: found cvar @@#{name} on obj type #{obj_type_name}" if do_debug
+          return true
+        end
+      end
+
+      # Check current class's ivars and cvars
+      if cn = @current_class_name
+        if @type_index.has_instance_var?(cn, "@#{name}")
+          debug "#{ctx}: found ivar @#{name} on #{cn}" if do_debug
+          return true
+        end
+        if @type_index.has_class_var?(cn, "@@#{name}")
+          debug "#{ctx}: found cvar @@#{name} on #{cn}" if do_debug
+          return true
+        end
+      end
+
+      # obj.class.method — resolve obj's type and check its class vars
+      if obj.is_a?(Crystal::Call) && obj.name == "class"
+        if inner_obj = obj.obj
+          resolved = resolve_type_name(inner_obj)
+          debug "#{ctx}: .class chain, inner=#{inner_obj.class.name.split("::").last}(#{inner_obj}), resolved=#{resolved}" if do_debug
+          if resolved
+            if @type_index.has_class_var?(resolved, "@@#{name}")
+              debug "#{ctx}: found cvar @@#{name} on #{resolved} via .class" if do_debug
+              return true
+            end
+            if @type_index.has_instance_var?(resolved, "@#{name}")
+              debug "#{ctx}: found ivar @#{name} on #{resolved} via .class" if do_debug
+              return true
+            end
           end
         end
-        begin
-          return true if obj_type.class_vars.has_key?("@@#{name}")
-        rescue
-        end
       end
-      # Fallback: if obj is self/record and we know the current class type
-      if ct = @current_class_type
-        begin
-          return true if ct.all_instance_vars.has_key?("@#{name}")
-        rescue
-        end
-        begin
-          return true if ct.class_vars.has_key?("@@#{name}")
-        rescue
-        end
-      end
+
+      debug "#{ctx}: NOT a property (cn=#{@current_class_name})" if do_debug
       false
     end
 
+    # Resolve the type name of an expression using the type index
+    private def resolve_type_name(node : Crystal::ASTNode) : String?
+      result = nil
+      # Direct type on node
+      if t = node.type?
+        result = t.to_s
+      end
+      # Instance var — look up in current class
+      if result.nil? && node.is_a?(Crystal::InstanceVar) && (cn = @current_class_name)
+        result = @type_index.ivar_type(cn, node.name)
+      end
+      # Var named "self" — it's the current class
+      if result.nil? && node.is_a?(Crystal::Var) && node.name == "self"
+        result = @current_class_name
+      end
+      # Strip Crystal union suffix (+) for index lookup
+      result.try(&.rstrip('+'))
+    end
+
     private def is_ivar_of_current_class?(name : String) : Bool
-      if ct = @current_class_type
-        begin
-          return true if ct.all_instance_vars.has_key?("@#{name}")
-        rescue
-          begin
-            return true if ct.instance_vars.has_key?("@#{name}")
-          rescue
-          end
-        end
-        # Also check class vars
-        begin
-          return true if ct.class_vars.has_key?("@@#{name}")
-        rescue
-        end
+      if cn = @current_class_name
+        return true if @type_index.has_instance_var?(cn, "@#{name}")
+        return true if @type_index.has_class_var?(cn, "@@#{name}")
       end
       false
     end

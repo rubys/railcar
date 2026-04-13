@@ -112,6 +112,8 @@ module Railcar
         io << "    def exec(sql : String, *args) end\n"
         io << "    def exec(sql : String, args : Array) end\n"
         io << "    def scalar(sql : String, *args) : Int64; 0_i64; end\n"
+        io << "    def query_one(sql : String, *args); nil; end\n"
+        io << "    def query_all(sql : String, *args) : Array(Hash(String, DB::Any)); [] of Hash(String, DB::Any); end\n"
         io << "  end\n"
         io << "end\n\n"
         # Runtime source (strip requires)
@@ -178,6 +180,12 @@ module Railcar
         _ar.run_validations
         Railcar::ApplicationRecord.table_name
         Railcar::ApplicationRecord.count
+        Railcar::ApplicationRecord.all
+        Railcar::ApplicationRecord.find(1_i64)
+        _cp = Railcar::CollectionProxy.new(_ar, "fk", "Test")
+        _cp.model_class
+        _cp.destroy_all
+        _cp.size
       CR
 
       # Model methods — call create, save, find, count on each model
@@ -311,11 +319,14 @@ module Railcar
       # setup_db function
       io << "def setup_db():\n"
       io << "    db = sqlite3.connect(':memory:')\n"
+      io << "    db.row_factory = sqlite3.Row\n"
       io << "    db.execute('PRAGMA foreign_keys = ON')\n"
       app.schemas.each do |schema|
         cols = schema.columns.map { |c| "#{c.name} #{c.type}" }
         # Add constraints
-        col_defs = schema.columns.map do |c|
+        # Always add id column (Rails makes it implicit)
+        all_cols = [Column.new("id", "INTEGER")] + schema.columns
+        col_defs = all_cols.map do |c|
           parts = "#{c.name} #{c.type}"
           parts += " PRIMARY KEY AUTOINCREMENT" if c.name == "id"
           parts += " NOT NULL" unless c.name == "id"
@@ -327,6 +338,15 @@ module Railcar
       end
       io << "    ApplicationRecord.db = db\n"
       io << "    return db\n\n"
+
+      # Pytest fixture that auto-runs setup for every test
+      io << "import pytest\n\n"
+      io << "@pytest.fixture(autouse=True)\n"
+      io << "def _setup_test_db():\n"
+      io << "    db = setup_db()\n"
+      io << "    setup_fixtures()\n"
+      io << "    yield\n"
+      io << "    db.close()\n\n"
 
       # Fixture setup
       fixture_table_names = app.fixtures.map(&.name).to_set
@@ -345,7 +365,7 @@ module Railcar
           field_strs = fields.map do |k, v|
             if association_fields.includes?(k) && fixture_table_names.includes?(Inflector.pluralize(k))
               ref_fixture = Inflector.pluralize(k)
-              "#{k}_id=#{ref_fixture}_#{v}.id"
+              "#{k}_id=#{ref_fixture}_#{v}.id()"
             else
               "#{k}=#{v.inspect}"
             end

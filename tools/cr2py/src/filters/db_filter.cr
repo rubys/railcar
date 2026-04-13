@@ -53,6 +53,28 @@ module Cr2Py
         return Crystal::Call.new(obj.transform(self), "execute", new_args)
       end
 
+      # db.query_one(sql, ...) → db.execute(sql, [...]).fetchone()
+      if name == "query_one" && obj
+        execute_args = if args.size > 1
+                         [args[0].transform(self), Crystal::ArrayLiteral.new(args[1..].map { |a| a.transform(self).as(Crystal::ASTNode) })] of Crystal::ASTNode
+                       else
+                         args.map { |a| a.transform(self).as(Crystal::ASTNode) }
+                       end
+        execute_call = Crystal::Call.new(obj.transform(self), "execute", execute_args)
+        return Crystal::Call.new(execute_call, "fetchone")
+      end
+
+      # db.query_all(sql, ...) → db.execute(sql, [...]).fetchall()
+      if name == "query_all" && obj
+        execute_args = if args.size > 1
+                         [args[0].transform(self), Crystal::ArrayLiteral.new(args[1..].map { |a| a.transform(self).as(Crystal::ASTNode) })] of Crystal::ASTNode
+                       else
+                         args.map { |a| a.transform(self).as(Crystal::ASTNode) }
+                       end
+        execute_call = Crystal::Call.new(obj.transform(self), "execute", execute_args)
+        return Crystal::Call.new(execute_call, "fetchall")
+      end
+
       # db.scalar(sql, ...) → db.execute(sql, [...]).fetchone()[0]
       if name == "scalar" && obj
         execute_args = if args.size > 1
