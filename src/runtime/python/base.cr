@@ -8,6 +8,28 @@
 # No macros. Avoids patterns that emit poorly (unless, ||=, double negation).
 
 module Railcar
+  # Helper modules (included by models for broadcast partials)
+  module RouteHelpers
+  end
+
+  module ViewHelpers
+  end
+
+  module Broadcasts
+  end
+
+  class CollectionProxy(T)
+    def initialize(@owner : ApplicationRecord, @foreign_key : String)
+    end
+
+    def destroy_all
+    end
+
+    def size : Int32
+      0
+    end
+  end
+
   class ValidationErrors
     @errors : Hash(String, Array(String))
 
