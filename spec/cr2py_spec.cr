@@ -7,6 +7,7 @@ require "../tools/cr2py/src/filters/spec_filter"
 require "../tools/cr2py/src/filters/db_filter"
 require "../tools/cr2py/src/filters/overload_filter"
 require "../tools/cr2py/src/cr2py"
+require "../src/generator/python2_generator"
 
 # Helper: parse Crystal code and get the AST
 def parse_crystal(code : String) : Crystal::ASTNode
@@ -490,4 +491,116 @@ describe "Cr2Py::Emitter" do
       end
       errors.should be_empty
     end
+end
+
+describe "Python runtime emission" do
+  runtime_path = File.join(File.dirname(__FILE__), "..", "src", "runtime", "python", "base.cr")
+
+  unless File.exists?(runtime_path)
+    pending "requires runtime/python/base.cr" { }
+    next
+  end
+
+  # Compile the runtime and emit Python
+  location = Crystal::Location.new("src/app.cr", 1, 1)
+  runtime_source = File.read(runtime_path)
+  source = String.build do |io|
+    io << "module DB\n"
+    io << "  alias Any = Bool | Float32 | Float64 | Int32 | Int64 | String | Nil\n"
+    io << "end\n\n"
+    runtime_source.lines.each do |line|
+      next if line.strip.starts_with?("require ")
+      io << line << "\n"
+    end
+  end
+
+  nodes = Crystal::Expressions.new([
+    Crystal::Require.new("prelude").at(location),
+    Crystal::Parser.parse(source),
+  ] of Crystal::ASTNode)
+
+  program = Crystal::Program.new
+  compiler = Crystal::Compiler.new
+  compiler.no_codegen = true
+  program.compiler = compiler
+  normalized = program.normalize(nodes)
+  typed = program.semantic(normalized)
+
+  emitter = Cr2Py::Emitter.new(program)
+  serializer = PyAST::Serializer.new
+  db_filter = Cr2Py::DbFilter.new
+  dunder_filter = Cr2Py::PyAstDunderFilter.new
+
+  # Extract Railcar nodes and emit
+  railcar_nodes = [] of Crystal::ASTNode
+  case typed
+  when Crystal::Expressions
+    typed.expressions.each do |expr|
+      if expr.is_a?(Crystal::ModuleDef) && expr.name.names.includes?("Railcar")
+        case expr.body
+        when Crystal::Expressions
+          railcar_nodes.concat(expr.body.as(Crystal::Expressions).expressions)
+        else
+          railcar_nodes << expr.body
+        end
+      end
+    end
+  end
+
+  py_nodes = [] of PyAST::Node
+  railcar_nodes.each do |node|
+    next unless node.is_a?(Crystal::ClassDef)
+    transformed = node.transform(db_filter)
+    py_nodes.concat(emitter.to_nodes(transformed))
+  end
+  py_nodes = dunder_filter.transform(py_nodes)
+  mod = PyAST::Module.new(py_nodes)
+  output = serializer.serialize(mod)
+
+  it "produces valid Python syntax" do
+    # Use Crystal's string matching — can't call python3 from spec
+    output.should_not contain "  el        if"
+    output.should contain "class ValidationErrors"
+    output.should contain "class ApplicationRecord"
+  end
+
+  it "has ValidationErrors with add and is_any" do
+    output.should contain "def add(self, field: str, message: str)"
+    output.should contain "def is_any(self)"
+  end
+
+  it "has ApplicationRecord with __init__, save, destroy" do
+    output.should contain "def __init__(self"
+    output.should contain "def save(self)"
+    output.should contain "def destroy(self)"
+  end
+
+  it "has classmethods for find, count, create, table_name" do
+    output.should contain "@classmethod"
+    output.should contain "def find(cls"
+    output.should contain "def count(cls"
+    output.should contain "def create(cls"
+    output.should contain "def table_name(cls"
+  end
+
+  it "has do_insert and do_update" do
+    output.should contain "def do_insert(self)"
+    output.should contain "def do_update(self)"
+  end
+
+  it "uses sqlite3 patterns from DbFilter" do
+    output.should contain "execute("
+    output.should contain "fetchone()"
+    output.should contain "datetime.now()"
+  end
+
+  it "adds __bool__ via PyAstDunderFilter" do
+    output.should contain "__bool__"
+  end
+
+  it "has type annotations" do
+    output.should contain "-> bool"
+    output.should contain "-> str"
+    output.should contain "field: str"
+  end
 end

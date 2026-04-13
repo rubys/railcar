@@ -31,12 +31,12 @@ module Cr2Py
           when PyAST::Assign
             if stmt.target.starts_with?("self.")
               attr = stmt.target.sub("self.", "")
-              return attr unless %w[persisted destroyed errors].includes?(attr)
+              return attr unless %w[persisted destroyed].includes?(attr)
             end
           when PyAST::Statement
             if stmt.code.starts_with?("self.") && stmt.code.includes?(" = ")
               attr = stmt.code.split(" = ").first.sub("self.", "")
-              return attr unless %w[persisted destroyed errors].includes?(attr)
+              return attr unless %w[persisted destroyed].includes?(attr)
             end
           end
         end
