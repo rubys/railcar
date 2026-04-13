@@ -213,7 +213,12 @@ module Cr2Py
         "#{to_expr(node.left)} or #{to_expr(node.right)}"
 
       when Crystal::IsA
-        "isinstance(#{to_expr(node.obj)}, #{crystal_type_to_python(node.const.to_s)})"
+        py_type = crystal_type_to_python(node.const.to_s)
+        if py_type == "None"
+          "(#{to_expr(node.obj)} is None)"
+        else
+          "isinstance(#{to_expr(node.obj)}, #{py_type})"
+        end
 
       when Crystal::Call
         call_to_expr(node)
@@ -383,6 +388,19 @@ module Cr2Py
 
       ret = node.return_type.try { |rt| crystal_type_to_python(rt.to_s) }
       body = body_to_nodes(node.body)
+
+      # Crystal implicit return: last expression is the return value.
+      # Convert the last Statement to a Return if it looks like a value.
+      if body.size > 0 && ret && ret != "None"
+        last = body.last
+        if last.is_a?(PyAST::Statement)
+          code = last.code
+          # Don't return assignments, prints, or self.x = y
+          unless code.includes?(" = ") || code.starts_with?("self.") && code.includes?(" = ")
+            body[-1] = PyAST::Return.new(code)
+          end
+        end
+      end
 
       decorators = [] of String
       decorators << "classmethod" if is_class_method
@@ -603,6 +621,19 @@ module Cr2Py
       # .not_nil! → obj
       if name == "not_nil!" && args.empty? && obj
         return to_expr(obj)
+      end
+
+      # .try { |v| expr } → (expr if obj is not None else None)
+      if name == "try" && obj && node.block
+        block = node.block.not_nil!
+        obj_expr = to_expr(obj)
+        if block.args.size > 0
+          # Replace block arg with obj in the body
+          block_body = block.body.to_s.gsub(block.args[0].name, obj_expr)
+          return "(#{block_body} if #{obj_expr} is not None else None)"
+        else
+          return "(#{to_expr(block.body)} if #{obj_expr} is not None else None)"
+        end
       end
 
       # .class → type()
@@ -1107,7 +1138,7 @@ end
 Dir.mkdir_p(output_dir)
 emitter = Cr2Py::Emitter.new(result.program)
 serializer = PyAST::Serializer.new
-overload_filter = Cr2Py::OverloadFilter.new(result.program)
+overload_filter = Cr2Py::OverloadFilter.new(result.program, result.typed_defs)
 db_filter = Cr2Py::DbFilter.new
 
 # Create __init__.py for each subdirectory to make them Python packages

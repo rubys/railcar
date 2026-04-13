@@ -412,7 +412,7 @@ describe "Cr2Py::Emitter" do
 
     pending "generates all 27 files with valid Python syntax (routes.py elif issue)" do
       db_filter = Cr2Py::DbFilter.new
-      overload_filter = Cr2Py::OverloadFilter.new(result.program)
+      overload_filter = Cr2Py::OverloadFilter.new(result.program, result.typed_defs)
 
       errors = [] of String
       result.files.each do |filename, info|

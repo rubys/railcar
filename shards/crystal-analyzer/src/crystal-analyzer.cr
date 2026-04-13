@@ -35,8 +35,11 @@ module CrystalAnalyzer
     getter views : Hash(String, Crystal::ASTNode)
     getter tests : Hash(String, FileInfo)
     getter program : Crystal::Program
+    getter typed_defs : Hash(String, Array(Crystal::Def))
 
-    def initialize(@files, @views, @program, @tests = {} of String => FileInfo)
+    def initialize(@files, @views, @program,
+                   @tests = {} of String => FileInfo,
+                   @typed_defs = {} of String => Array(Crystal::Def))
     end
   end
 
@@ -197,7 +200,7 @@ module CrystalAnalyzer
 
     Dir.cd(saved_dir)
 
-    Result.new(files, ecr_views, result2.program, tests)
+    Result.new(files, ecr_views, result2.program, tests, typed_defs)
   end
 
   # --- ECR Finder (pass 1) ---
@@ -517,9 +520,13 @@ module CrystalAnalyzer
       # Try instance method key, then class method key (.class suffix)
       candidates = @typed_defs[key]? || @typed_defs["#{owner}.class##{node.name}"]?
       if candidates
-        # Match by arity for overloaded methods
-        typed = candidates.find { |d| d.args.size == node.args.size } || candidates.first
-        typed
+        # Match by exact arity — don't fall back to first, as that would
+        # replace a kwargs overload with a positional one
+        if typed = candidates.find { |d| d.args.size == node.args.size }
+          typed
+        else
+          super  # keep original (untyped) if no arity match
+        end
       else
         super
       end

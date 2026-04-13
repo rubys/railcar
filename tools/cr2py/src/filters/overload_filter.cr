@@ -8,14 +8,15 @@
 # are provided instead, convert them to a dict and run the same body.
 # isinstance() dispatch on the first arg's type restriction.
 #
-# Synthetic nodes get proper types set so downstream checks (e.g. is_hash_type?)
-# work correctly.
+# Bodies are pulled from the typed call graph when available, so all
+# expressions inside carry their resolved types.
 
 module Cr2Py
   class OverloadFilter < Crystal::Transformer
     getter program : Crystal::Program
+    getter typed_defs : Hash(String, Array(Crystal::Def))
 
-    def initialize(@program)
+    def initialize(@program, @typed_defs = {} of String => Array(Crystal::Def))
     end
 
     def transform(node : Crystal::ClassDef) : Crystal::ASTNode
@@ -27,6 +28,7 @@ module Cr2Py
               end
 
       # Group Defs by Crystal name
+      owner = node.name.names.join("::")
       groups = {} of String => Array(Crystal::Def)
       stmts.each do |stmt|
         if stmt.is_a?(Crystal::Def)
@@ -40,7 +42,7 @@ module Cr2Py
       merged = {} of String => Crystal::Def
       groups.each do |key, defs|
         next if defs.size < 2
-        merged[key] = merge_overloads(defs)
+        merged[key] = merge_overloads(defs, owner)
       end
 
       return node if merged.empty?
@@ -75,7 +77,7 @@ module Cr2Py
       super
     end
 
-    private def merge_overloads(defs : Array(Crystal::Def)) : Crystal::Def
+    private def merge_overloads(defs : Array(Crystal::Def), owner : String) : Crystal::Def
       # If all defs have identical signatures (same arg count, no kwargs), keep first
       if defs.all?(&.double_splat.nil?) && defs.map(&.args.size).uniq.size == 1
         return defs[0]
@@ -89,6 +91,9 @@ module Cr2Py
       primary = positional_defs.first? || kwargs_defs.first.not_nil!
       has_kwargs = !kwargs_defs.empty?
       max_args = defs.map(&.args.size).max
+
+      # Try to get the typed body from the call graph
+      primary_body = lookup_typed_body(primary, owner) || primary.body
 
       # Build merged parameter list: _ov_arg0=None, ..., **_ov_kwargs
       merged_args = [] of Crystal::Arg
@@ -106,7 +111,7 @@ module Cr2Py
         first_arg_name = primary.args[0].name
         cond = build_type_check(primary.args[0])
 
-        # Both branches assign a typed variable so downstream checks work
+        # Both branches assign a typed variable
         then_var = Crystal::Var.new(first_arg_name)
         if arg_type = resolve_arg_type(primary.args[0])
           then_var.set_type(arg_type)
@@ -116,7 +121,7 @@ module Cr2Py
           Crystal::Var.new("_ov_arg0")
         )
 
-        # kwargs → dict via .copy() (kwargs is already a dict in Python)
+        # kwargs → dict via .copy()
         kwargs_var = Crystal::Var.new("_ov_kwargs")
         kwargs_var.set_type(hash_type)
         else_var = Crystal::Var.new(first_arg_name)
@@ -139,6 +144,7 @@ module Cr2Py
       elsif positional_defs.size > 1 && positional_defs.map(&.args.size).uniq.size > 1
         # Multiple positional overloads with different arg counts
         primary = positional_defs.max_by(&.args.size)
+        primary_body = lookup_typed_body(primary, owner) || primary.body
         cond = build_type_check(primary.args[0])
 
         then_stmts = primary.args.map_with_index { |arg, i|
@@ -147,17 +153,18 @@ module Cr2Py
             Crystal::Var.new("_ov_arg#{i}")
           ).as(Crystal::ASTNode)
         }
-        then_stmts << primary.body
+        then_stmts << primary_body
         then_body = Crystal::Expressions.new(then_stmts)
 
         shorter = positional_defs.min_by(&.args.size)
+        shorter_body = lookup_typed_body(shorter, owner) || shorter.body
         else_stmts = shorter.args.map_with_index { |arg, i|
           Crystal::Assign.new(
             Crystal::Var.new(arg.name),
             Crystal::Var.new("_ov_arg#{i}")
           ).as(Crystal::ASTNode)
         }
-        else_stmts << shorter.body
+        else_stmts << shorter_body
         else_body = Crystal::Expressions.new(else_stmts)
 
         body_stmts << Crystal::If.new(cond, then_body, else_body)
@@ -177,9 +184,7 @@ module Cr2Py
         end
       end
 
-      # Type the body's parameter references so downstream checks work
-      typed_body = type_body_vars(primary)
-      body_stmts << typed_body
+      body_stmts << primary_body
       final_body = Crystal::Expressions.new(body_stmts)
 
       merged = Crystal::Def.new(first.name, merged_args, final_body)
@@ -190,6 +195,20 @@ module Cr2Py
         merged.double_splat = Crystal::Arg.new("_ov_kwargs")
       end
       merged
+    end
+
+    # Look up the typed body for a Def from the call graph
+    private def lookup_typed_body(d : Crystal::Def, owner : String) : Crystal::ASTNode?
+      # Try instance method key, then class method key
+      key = "Railcar::#{owner}##{d.name}"
+      class_key = "Railcar::#{owner}.class##{d.name}"
+
+      candidates = @typed_defs[key]? || @typed_defs[class_key]?
+      return nil unless candidates
+
+      # Match by arity
+      typed = candidates.find { |td| td.args.size == d.args.size }
+      typed.try(&.body)
     end
 
     private def build_type_check(arg : Crystal::Arg) : Crystal::ASTNode
@@ -214,35 +233,6 @@ module Cr2Py
 
     private def hash_type : Crystal::Type
       @program.types["Hash"]
-    end
-
-    # Walk the body of a Def and set types on Var nodes matching parameter names
-    private def type_body_vars(d : Crystal::Def) : Crystal::ASTNode
-      param_types = {} of String => Crystal::Type
-      d.args.each do |arg|
-        if t = resolve_arg_type(arg)
-          param_types[arg.name] = t
-        end
-      end
-      return d.body if param_types.empty?
-      typer = VarTyper.new(param_types)
-      d.body.transform(typer)
-    end
-
-    private class VarTyper < Crystal::Transformer
-      def initialize(@param_types : Hash(String, Crystal::Type))
-      end
-
-      def transform(node : Crystal::Var) : Crystal::ASTNode
-        if t = @param_types[node.name]?
-          node.set_type(t)
-        end
-        node
-      end
-
-      def transform(node : Crystal::ASTNode) : Crystal::ASTNode
-        super
-      end
     end
 
     private def resolve_arg_type(arg : Crystal::Arg) : Crystal::Type?
