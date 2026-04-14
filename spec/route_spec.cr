@@ -121,6 +121,39 @@ describe Railcar::RouteSet do
     )
     route_set.nested_parent_for("nonexistent").should be_nil
   end
+
+  it "computes route helpers with names, paths, and params" do
+    route_set = Railcar::RouteExtractor.extract_file(
+      File.join(BLOG_DIR, "config/routes.rb")
+    )
+    helpers = route_set.helpers
+    helper_names = helpers.map(&.name)
+
+    # Top-level resource helpers
+    helper_names.should contain "articles"
+    helper_names.should contain "article"
+    helper_names.should contain "new_article"
+    helper_names.should contain "edit_article"
+
+    # Nested resource helpers
+    helper_names.should contain "article_comments"
+    helper_names.should contain "article_comment"
+
+    # Parameterless helpers have empty params
+    articles = helpers.find { |h| h.name == "articles" }.not_nil!
+    articles.params.should be_empty
+    articles.path.should eq "/articles"
+
+    # Parameterized helpers carry their params
+    article = helpers.find { |h| h.name == "article" }.not_nil!
+    article.params.should eq ["id"]
+    article.path.should eq "/articles/:id"
+
+    # Nested helpers carry both parent and child params
+    article_comment = helpers.find { |h| h.name == "article_comment" }.not_nil!
+    article_comment.params.should eq ["article_id", "id"]
+    article_comment.path.should eq "/articles/:article_id/comments/:id"
+  end
 end
 
 describe Railcar::RouteGenerator do

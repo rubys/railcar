@@ -353,34 +353,28 @@ module Railcar
     end
 
     private def append_route_helpers(f : IO)
-      app.models.each_key do |name|
-        singular = Inflector.underscore(name)
-        plural = Inflector.pluralize(singular)
-
-        f << "def #{singular}_path(model):\n"
-        f << "    return f'/#{plural}/{model.id}'\n\n"
-        f << "def edit_#{singular}_path(model):\n"
-        f << "    return f'/#{plural}/{model.id}/edit'\n\n"
-        f << "def #{plural}_path():\n"
-        f << "    return '/#{plural}'\n\n"
-        f << "def new_#{singular}_path():\n"
-        f << "    return '/#{plural}/new'\n\n"
-      end
-
-      # Nested resource helpers
-      app.models.each do |name, model|
-        model.associations.each do |assoc|
-          if assoc.kind == :has_many
-            child = Inflector.singularize(assoc.name)
-            child_plural = assoc.name
-            parent = Inflector.underscore(name)
-            parent_plural = Inflector.pluralize(parent)
-
-            f << "def #{parent}_#{child_plural}_path(parent):\n"
-            f << "    return f'/#{parent_plural}/{parent.id}/#{child_plural}'\n\n"
-            f << "def #{parent}_#{child}_path(parent, child):\n"
-            f << "    return f'/#{parent_plural}/{parent.id}/#{child_plural}/{child.id}'\n\n"
+      app.routes.helpers.each do |helper|
+        if helper.params.empty?
+          f << "def #{helper.name}_path():\n"
+          f << "    return '#{helper.path}'\n\n"
+        else
+          # Map route params to Python function params that accept model objects.
+          # :id → "model" (callers pass the model itself, we access .id)
+          # :article_id → "parent" for first param in nested routes
+          param_names = helper.params.map_with_index do |p, i|
+            if p == "id"
+              i == 0 ? "model" : "child"
+            else
+              p.chomp("_id")
+            end
           end
+          f << "def #{helper.name}_path(#{param_names.join(", ")}):\n"
+          # Build f-string path, replacing :param with {obj.id}
+          path_expr = helper.path
+          helper.params.each_with_index do |p, i|
+            path_expr = path_expr.gsub(":#{p}", "{#{param_names[i]}.id}")
+          end
+          f << "    return f'#{path_expr}'\n\n"
         end
       end
     end

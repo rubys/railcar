@@ -19,6 +19,12 @@ module Railcar
     action : String,           # "show"
     name : String?             # route helper name, e.g. "article"
 
+  # A route path helper — language-agnostic data for generating helper functions.
+  record RouteHelper,
+    name : String,               # "article", "articles", "new_article", "article_comment"
+    path : String,               # "/articles/:id", "/articles/:article_id/comments/:id"
+    params : Array(String)       # ["id"], ["article_id", "id"], []
+
   # Extracted routes with helper info
   class RouteSet
     getter routes : Array(Route) = [] of Route
@@ -42,6 +48,28 @@ module Railcar
         end
       end
       nil
+    end
+
+    # Compute the set of unique route helpers from this route set.
+    # Returns language-agnostic data that each target formats into its own syntax.
+    def helpers : Array(RouteHelper)
+      seen = Set(String).new
+      result = [] of RouteHelper
+
+      routes.each do |route|
+        next unless route.name
+        next if seen.includes?(route.name.not_nil!)
+        seen << route.name.not_nil!
+
+        params = route.path.scan(/:(\w+)/).map { |m| m[1] }
+        result << RouteHelper.new(
+          name: route.name.not_nil!,
+          path: route.path,
+          params: params
+        )
+      end
+
+      result
     end
   end
 
@@ -207,29 +235,17 @@ module Railcar
       io << "# Generated route helpers from config/routes.rb\n\n"
       io << "module Railcar::RouteHelpers\n"
 
-      # Collect unique helper names with their paths
-      helpers = {} of String => {path: String, params: Array(String)}
-      route_set.routes.each do |route|
-        next unless route.name
-        next if helpers.has_key?(route.name.not_nil!)
-
-        # Extract param names from path
-        params = route.path.scan(/:(\w+)/).map { |m| m[1] }
-        helpers[route.name.not_nil!] = {path: route.path, params: params}
-      end
-
-      helpers.each do |name, info|
-        if info[:params].empty?
-          io << "  def #{name}_path : String\n"
-          io << "    #{info[:path].inspect}\n"
+      route_set.helpers.each do |helper|
+        if helper.params.empty?
+          io << "  def #{helper.name}_path : String\n"
+          io << "    #{helper.path.inspect}\n"
           io << "  end\n\n"
         else
-          # Generate method with typed parameters
-          param_list = info[:params].map { |p| p }.join(", ")
-          io << "  def #{name}_path(#{param_list}) : String\n"
-          # Build interpolated path
-          path_expr = info[:path]
-          info[:params].each do |p|
+          param_list = helper.params.join(", ")
+          io << "  def #{helper.name}_path(#{param_list}) : String\n"
+          # Build interpolated path — resolve model objects to their id
+          path_expr = helper.path
+          helper.params.each do |p|
             path_expr = path_expr.gsub(":#{p}", "\#{#{p}.is_a?(Railcar::ApplicationRecord) ? #{p}.id : #{p}}")
           end
           io << "    #{path_expr.inspect.gsub("\\#", "#")}\n"
