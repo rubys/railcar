@@ -661,6 +661,44 @@ module Railcar
         end
       end
 
+      # Convert controller tests
+      controller_tests_dir = File.join(rails_dir, "test/controllers")
+      if Dir.exists?(controller_tests_dir)
+        Dir.glob(File.join(controller_tests_dir, "*_test.rb")).each do |path|
+          basename = File.basename(path, ".rb")
+          py_name = "test_#{basename.chomp("_test")}.py"
+
+          ast = SourceParser.parse(path)
+          ast = ast.transform(InstanceVarToLocal.new)
+          ast = ast.transform(test_filter)
+
+          py_nodes = emitter.to_nodes(ast)
+          db_filter, dunder_filter, return_filter = filters
+          py_nodes = return_filter.transform(py_nodes)
+
+          mod = PyAST::Module.new(py_nodes)
+          content = serializer.serialize(mod)
+
+          imports = String.build do |io|
+            io << "import pytest\n"
+            io << "import sys\nimport os\n"
+            io << "sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))\n\n"
+            io << "from aiohttp import web\n"
+            io << "from aiohttp.test_utils import TestClient, TestServer\n"
+            io << "import app as app_module\n"
+            app.models.each_key do |name|
+              io << "from models.#{Inflector.underscore(name)} import #{name}\n"
+            end
+            io << "from helpers import *\n"
+            io << "from tests.conftest import *\n\n"
+          end
+
+          out_path = File.join(tests_dir, py_name)
+          File.write(out_path, imports + content)
+          puts "  tests/#{py_name}"
+        end
+      end
+
       File.write(File.join(tests_dir, "__init__.py"), "")
     end
 

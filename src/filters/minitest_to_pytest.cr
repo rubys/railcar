@@ -33,11 +33,28 @@ module Railcar
               else [body]
               end
 
+      # Collect setup block body
+      setup_stmts = [] of Crystal::ASTNode
+      exprs.each do |expr|
+        if expr.is_a?(Crystal::Call) && expr.name == "setup" && expr.block
+          setup_body = expr.block.not_nil!.body
+          case setup_body
+          when Crystal::Expressions
+            setup_body.expressions.each { |e| setup_stmts << transform_stmt(e) unless e.is_a?(Crystal::Nop) }
+          when Crystal::Nop
+          else
+            setup_stmts << transform_stmt(setup_body)
+          end
+        end
+      end
+
+      # Check if this is an integration test
+      is_integration = node.superclass.to_s.includes?("IntegrationTest")
+
       exprs.each do |expr|
         if expr.is_a?(Crystal::Call) && expr.name == "test" && expr.block
-          stmts << transform_test_block(expr)
+          stmts << transform_test_block(expr, setup_stmts, is_integration)
         end
-        # Skip setup/teardown for now — fixtures handled by conftest
       end
 
       Crystal::Expressions.new(stmts)
@@ -65,9 +82,9 @@ module Railcar
       sc.to_s.includes?("TestCase") || sc.to_s.includes?("IntegrationTest")
     end
 
-    # Transform: test("name") do ... end → def test_name(): ...
-    private def transform_test_block(call : Crystal::Call) : Crystal::Def
-      # Extract test name
+    private def transform_test_block(call : Crystal::Call,
+                                      setup_stmts : Array(Crystal::ASTNode),
+                                      is_integration : Bool) : Crystal::Def
       raw_name = if call.args.first?.is_a?(Crystal::StringLiteral)
                    call.args.first.as(Crystal::StringLiteral).value
                  else
@@ -75,11 +92,47 @@ module Railcar
                  end
       func_name = "test_" + raw_name.downcase.gsub(/[^a-z0-9]+/, "_").strip('_')
 
-      # Transform block body
       block = call.block.not_nil!
       body = transform_test_body(block.body)
 
-      Crystal::Def.new(func_name, body: body)
+      # Build function body: setup + test body
+      all_stmts = [] of Crystal::ASTNode
+
+      # For integration tests, add client setup
+      if is_integration
+        all_stmts << Crystal::Parser.parse("client = app_client()")
+      end
+
+      # Inline setup block
+      setup_stmts.each { |s| all_stmts << s }
+
+      # Add test body
+      case body
+      when Crystal::Expressions
+        body.as(Crystal::Expressions).expressions.each { |e| all_stmts << e unless e.is_a?(Crystal::Nop) }
+      when Crystal::Nop
+      else
+        all_stmts << body
+      end
+
+      # For integration tests, add body extraction after response
+      if is_integration
+        # Find first assert after a get/post and add body = response.text
+        needs_body = all_stmts.any? { |s| s.to_s.includes?("body") }
+        if needs_body
+          # Insert body extraction after the first response assignment
+          idx = all_stmts.index { |s| s.is_a?(Crystal::Assign) && s.target.to_s == "response" }
+          if idx
+            all_stmts.insert(idx + 1, Crystal::Assign.new(
+              Crystal::Var.new("body"),
+              Crystal::Call.new(Crystal::Var.new("response"), "text")
+            ))
+          end
+        end
+      end
+
+      args = is_integration ? [Crystal::Arg.new("app_client")] : [] of Crystal::Arg
+      Crystal::Def.new(func_name, args, Crystal::Expressions.new(all_stmts))
     end
 
     # Transform test body expressions
@@ -140,23 +193,116 @@ module Railcar
         transform_assert_difference(node)
 
       when "assert_no_difference"
-        # assert_no_difference("Model.count") { ... } →
-        #   before = Model.count(); ...; assert Model.count() == before
         transform_assert_no_difference(node)
 
+      # --- Integration test patterns ---
+
+      when "get"
+        # get(url) → response = await client.get(url)
+        url = transform_stmt(args[0])
+        Crystal::Assign.new(Crystal::Var.new("response"),
+          Crystal::Call.new(Crystal::Var.new("client"), "get", [url] of Crystal::ASTNode))
+
+      when "post"
+        # post(url, params: {article: {title: "x"}}) → response = await client.post(url, data=...)
+        url = transform_stmt(args[0])
+        post_args = [url] of Crystal::ASTNode
+        if named = node.named_args
+          named.each do |na|
+            if na.name == "params"
+              post_args << Crystal::Call.new(nil, "encode_params", [na.value] of Crystal::ASTNode)
+            end
+          end
+        end
+        Crystal::Assign.new(Crystal::Var.new("response"),
+          Crystal::Call.new(Crystal::Var.new("client"), "post", post_args))
+
+      when "patch"
+        url = transform_stmt(args[0])
+        patch_args = [url] of Crystal::ASTNode
+        if named = node.named_args
+          named.each do |na|
+            if na.name == "params"
+              patch_args << Crystal::Call.new(nil, "encode_params", [na.value] of Crystal::ASTNode)
+            end
+          end
+        end
+        Crystal::Assign.new(Crystal::Var.new("response"),
+          Crystal::Call.new(Crystal::Var.new("client"), "patch", patch_args))
+
+      when "delete"
+        url = transform_stmt(args[0])
+        Crystal::Assign.new(Crystal::Var.new("response"),
+          Crystal::Call.new(Crystal::Var.new("client"), "delete", [url] of Crystal::ASTNode))
+
+      when "assert_response"
+        # assert_response(:success) → assert response.status == 200
+        status = case args[0].to_s.strip(':').strip('"')
+                 when "success"              then "200"
+                 when "unprocessable_entity" then "422"
+                 when "redirect"             then "302"
+                 else "200"
+                 end
+        Crystal::Call.new(nil, "assert",
+          [Crystal::Call.new(
+            Crystal::Call.new(Crystal::Var.new("response"), "status"),
+            "==",
+            [Crystal::NumberLiteral.new(status)] of Crystal::ASTNode
+          )] of Crystal::ASTNode)
+
+      when "assert_redirected_to"
+        # assert_redirected_to(url) → assert response.status in [301, 302, 303]
+        Crystal::Call.new(nil, "assert",
+          [Crystal::Call.new(
+            Crystal::Call.new(Crystal::Var.new("response"), "status"),
+            "in",
+            [Crystal::ArrayLiteral.new([
+              Crystal::NumberLiteral.new("301"),
+              Crystal::NumberLiteral.new("302"),
+              Crystal::NumberLiteral.new("303"),
+            ] of Crystal::ASTNode)] of Crystal::ASTNode
+          )] of Crystal::ASTNode)
+
+      when "assert_select"
+        # assert_select("selector", "text") → assert "text" in body
+        if args.size >= 2 && args[1].is_a?(Crystal::StringLiteral)
+          text = args[1].as(Crystal::StringLiteral).value
+          Crystal::Call.new(nil, "assert",
+            [Crystal::Call.new(
+              Crystal::StringLiteral.new(text), "in",
+              [Crystal::Var.new("body")] of Crystal::ASTNode
+            )] of Crystal::ASTNode)
+        elsif args.size == 1
+          # assert_select("selector") → assert "selector-fragment" in body
+          selector = args[0].to_s.strip('"')
+          # Convert CSS selector to a string fragment to search for
+          fragment = if selector.starts_with?("#")
+                       "id=\"#{selector.lstrip('#')}\""
+                     elsif selector.starts_with?(".")
+                       "class=\"#{selector.lstrip('.')}"
+                     else
+                       "<#{selector}"
+                     end
+          Crystal::Call.new(nil, "assert",
+            [Crystal::Call.new(
+              Crystal::StringLiteral.new(fragment), "in",
+              [Crystal::Var.new("body")] of Crystal::ASTNode
+            )] of Crystal::ASTNode)
+        else
+          node  # pass through
+        end
+
       else
+        # Transform _url to _path
+        call_name = name.ends_with?("_url") ? name.chomp("_url") + "_path" : name
+
         # Transform fixture references: articles(:one) → articles("one")
         new_args = args.map { |a| transform_fixture_arg(a) }
         new_obj = obj ? transform_stmt(obj).as(Crystal::ASTNode) : nil
 
-        # Transform named args (keyword args like title: "x")
         named = node.named_args
 
-        if new_obj || new_args != args || named
-          Crystal::Call.new(new_obj, name, new_args, named_args: named, block: node.block)
-        else
-          node
-        end
+        Crystal::Call.new(new_obj, call_name, new_args, named_args: named, block: node.block)
       end
     end
 
