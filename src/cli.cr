@@ -1,6 +1,7 @@
 require "./generator/app_generator"
 require "./generator/rbs_generator"
 require "./generator/python2_generator"
+require "./generator/typescript_generator"
 
 # Ensure Crystal stdlib is findable at runtime for semantic analysis.
 # CRYSTAL_STDLIB is set as an env var during `make` and baked in via macro.
@@ -70,8 +71,8 @@ when "python"
   app = Railcar::AppModel.extract(rails_dir)
   Railcar::Python2Generator.new(app, rails_dir).generate(output_dir)
 when "typescript"
-  STDERR.puts "TypeScript target is not yet implemented."
-  exit 1
+  app = Railcar::AppModel.extract(rails_dir)
+  Railcar::TypeScriptGenerator.new(app, rails_dir).generate(output_dir)
 when "rbs"
   app = Railcar::AppModel.extract(rails_dir)
   Railcar::RbsGenerator.new(app, rails_dir).generate(output_dir)
