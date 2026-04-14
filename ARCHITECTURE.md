@@ -96,19 +96,27 @@ Each filter is a `Crystal::Transformer` subclass that pattern-matches on AST nod
 | `BroadcastsTo` | Converts `broadcasts_to`/`after_*_commit` to broadcast calls |
 | `ModelBoilerplate` | Wraps body in `model("table") { columns + declarations }`, adds validations |
 
-**Python controller filters** (applied after shared filters instead of Crystal-specific ones):
+**Python controller filter** (applied after shared filters instead of Crystal-specific ones):
 
 | Filter | What it does |
 |--------|-------------|
+| `ControllerBoilerplatePython` | Transforms Rails controller class into async handler functions: inlines before_actions (using shared `ControllerExtractor` records), transforms redirects to `web.HTTPFound`, renders to `web.Response`, handles nested resources |
+
+**Python view filters** (applied to ERB-compiled AST):
+
+| Filter | What it does |
+|--------|-------------|
+| `FormToHTML` | `form_with model: @article` → HTML form tags with `_buf` operations |
 | `PythonConstructor` | `Article.new(...)` → `Article(...)` |
-| `PythonRedirect` | `redirect_to @article` → `raise web.HTTPFound(article_path(article))` |
-| `PythonRender` | `render :new` → `return web.Response(text=layout(render_new(...)))` |
+| `PythonView` | Bare calls → vars, `.size` → `len()`, `.any?`/`.present?` → truthy, `content_for` → assignment, `button_to` data hash flattening |
+| `ViewCleanup` | `_buf.append= expr.to_s` → `_buf += str(expr)`, extracts `.each` blocks from `_buf` wrappers |
+| `BufToInterpolation` | Consolidates consecutive `_buf +=` into f-string interpolation, strips redundant `str()` |
 
-**Python view filter:**
+**Python test filter:**
 
 | Filter | What it does |
 |--------|-------------|
-| `PythonView` | Converts `_buf` patterns, bare calls → vars, `.size` → `len()`, `.any?`/`.present?` → truthy, `content_for` → assignment, `button_to` data hash flattening |
+| `MinitestToPytest` | Rails Minitest → pytest: `test "name"` → `def test_name`, `assert_equal` → `assert ==`, integration test patterns (aiohttp client) |
 
 **View filters** (shared, applied to template AST before ERBConverter or PythonEmitter):
 
@@ -129,37 +137,46 @@ Converts ERB/ECR templates to Crystal ECR output. After view filters have transf
 
 The `ErbCompiler` extracts code from `<% %>` tags into Ruby/Crystal source. This works identically for `.erb` and `.ecr` input since the tag syntax is the same.
 
-### PythonEmitter (`src/generator/python_emitter.cr`)
+### Python Emitter (`src/emitter/python/`)
 
-Serializes Crystal AST to Python source. The Python counterpart of Crystal's built-in `.to_s()`. Handles:
-- Indentation-based blocks (no `end`)
-- `_buf` string-building patterns for views (`_buf.append=` → `_buf += str(...)`)
-- Property vs method access (type-aware: uses semantic analysis `.type?` or AppModel metadata)
-- Python reserved word handling (`class` → `class_`)
-- f-strings for string interpolation
-- `raise` as statement (not function)
+A two-stage Crystal AST → Python pipeline:
 
-### AppGenerator / PythonGenerator
+1. **Cr2Py Emitter** (`cr2py.cr`) -- walks typed Crystal AST nodes and produces PyAST nodes. Two-method approach: `to_nodes()` for statement context, `to_expr()` for expression context. Uses TypeIndex for property detection (method vs attribute access) and `model_columns` for untyped variable fallback.
 
-**AppGenerator** (`src/generator/app_generator.cr`) orchestrates Crystal output. **PythonGenerator** (`src/generator/python_generator.cr`) orchestrates Python output, delegating to:
-- **PythonControllerGenerator** -- transpiles controllers through shared + Python filters, handles structural transformation (class → async functions, routing, before_action inlining)
-- **PythonViewGenerator** -- transpiles ERB through ErbCompiler → shared filters → PythonView filter → PythonEmitter, producing string-building functions
-- **PythonTestGenerator** -- converts Minitest to pytest (fixtures, assertions, async HTTP client)
+2. **PyAST** (`py_ast.cr`) -- minimal Python AST with structural indentation: `Func`, `Class`, `If`, `For`, `While`, `Try`, `BufLiteral`, `BufAppend`, `Assign`, `Statement`, `Return`. The serializer handles Python-correct indentation without `end` keywords.
 
-For each file type, the generator:
-1. Parses the source
-2. Applies the appropriate filter chain
-3. Wraps in target-specific structure
-4. Serializes and writes the output
+3. **PyAST Filters** (`filters/`) -- post-emission transforms:
+   - `ReturnFilter` -- adds implicit returns to function bodies
+   - `DunderFilter` -- adds `__bool__`/`__len__` methods
+   - `AsyncFilter` -- marks controller/test functions as `async`, adds `await`
+   - `DbFilter` -- Crystal DB API → Python sqlite3 patterns
 
-### Runtime (`src/runtime/`)
+4. **TypeIndex** (`type_index.cr`) -- flat lookup table built from `program.types` after semantic analysis, providing instance var and class var resolution with inheritance.
 
-A Crystal ORM that mirrors ActiveRecord, used by the generated application:
+### AppGenerator / Python2Generator
 
-- **ApplicationRecord** -- base model class with CRUD, validations, associations via macros
-- **Relation** -- chainable query builder (where, order, limit, includes)
-- **CollectionProxy** -- has_many association proxy (build, create, destroy_all)
-- **Helpers** -- route path helpers, view helpers (link_to, form tags), parameter parsing
+**AppGenerator** (`src/generator/app_generator.cr`) orchestrates Crystal output.
+
+**Python2Generator** (`src/generator/python2_generator.cr`) orchestrates Python output layer by layer:
+1. **Build** -- parse Rails models, apply ModelBoilerplatePython filter
+2. **Compile** -- combine Crystal runtime + models, run `program.semantic()` for type info
+3. **Emit** -- extract typed nodes, emit each layer through Cr2Py emitter + PyAST filters:
+   - Runtime (hand-written Python, not transpiled)
+   - Helpers (transpiled Crystal + hand-written route/form helpers)
+   - Models (transpiled with COLUMNS/TABLE constants)
+   - Controllers (Crystal AST filters → emitter → async filter)
+   - Views (ERB → Crystal AST → view filter chain → emitter)
+   - Tests (MinitestToPytest → emitter → async filter)
+   - App entry point, static assets (hand-written)
+
+### Runtime
+
+**Crystal** (`src/runtime/`): A Crystal ORM mirroring ActiveRecord -- base model class with macros, Relation query builder, CollectionProxy, view helpers.
+
+**Python** (`src/runtime/python/`):
+- `base.cr` -- Crystal source used only for `program.semantic()` type checking (not emitted)
+- `base_runtime.py` -- hand-written Python runtime using COLUMNS + `setattr` for direct attribute access. Includes ApplicationRecord, ValidationErrors, CollectionProxy, MODEL_REGISTRY.
+- `helpers.cr` -- Crystal source for helper functions, transpiled to Python via emitter
 
 ### RBS Generator (`src/generator/rbs_generator.cr`)
 
@@ -242,26 +259,30 @@ This enables runtime dispatch for abstract-typed children. It's a minimal, non-b
 
 ## Adding a new target language
 
-To add a new target (e.g., Go, Elixir):
+To add a new target (e.g., TypeScript, Go):
 
-1. **Write an emitter** (`src/generator/go_emitter.cr`) -- serialize Crystal AST to the target syntax
-2. **Write language-specific filters** (`src/filters/go_*.cr`) -- handle constructor syntax, error handling, redirect/render patterns
-3. **Write a generator** (`src/generator/go_generator.cr`) -- orchestrate the pipeline: parse → shared filters → language filters → emitter → output
-4. **Write infrastructure generators** -- HTTP server, routing, ORM, WebSocket support
+1. **Write an emitter** (`src/emitter/typescript/`) -- serialize Crystal AST to the target syntax (optionally via an intermediate AST like PyAST)
+2. **Write language-specific filters** (`src/filters/typescript_*.cr`) -- handle constructor syntax, error handling, redirect/render patterns
+3. **Write a generator** (`src/generator/typescript_generator.cr`) -- orchestrate the pipeline: parse → shared filters → language filters → emitter → output
+4. **Write a hand-written runtime** -- HTTP server, ORM, WebSocket (the Crystal runtime provides types for semantic analysis; each target gets its own idiomatic runtime)
 5. **Write a test adapter** -- convert Minitest assertions to the target test framework
 
-The shared filters (InstanceVarToLocal, ParamsExpect, RespondToHTML, StrongParams, RenderToPartial, LinkToPathHelper, ButtonToPathHelper) handle Rails-specific normalization and are reusable across all targets. They provide ~50% of the transformation work.
+The shared infrastructure:
+- **9 Crystal AST filters** (InstanceVarToLocal, ParamsExpect, RespondToHTML, StrongParams, RailsHelpers, LinkToPathHelper, ButtonToPathHelper, RenderToPartial, BroadcastsTo) handle Rails normalization and are reusable across all targets
+- **Rails DSL detection** (`src/filters/rails_dsl.cr`) -- shared set of Rails model/controller DSL call names
+- **ControllerExtractor** -- extracts BeforeAction records, consumed by both Crystal and Python controller filters
+- **AppModel** -- language-agnostic IR (schemas, models, controllers, routes, fixtures)
 
 Semantic type information from Crystal's type checker can inform the emitter (see `spec/python_semantic_spec.cr` for the proven approach).
 
 ## Testing
 
 ```bash
-make test     # runs all Crystal specs (~247)
+make test     # runs all Crystal specs (321)
 crystal spec spec/filters_spec.cr   # run a specific spec file
 ```
 
-CI also generates the Python blog and runs its 20 pytest tests.
+CI also generates the Python blog and runs its 21 pytest tests.
 
 Crystal tests are organized by component:
 

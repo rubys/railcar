@@ -92,7 +92,7 @@ end
 make test
 ```
 
-Downloads a sample Rails blog app and runs the 240-test spec suite.
+Downloads a sample Rails blog app and runs the spec suite (321 Crystal specs). CI also generates and tests the Python blog (21 pytest tests).
 
 ## What works
 
@@ -107,7 +107,7 @@ The blog demo exercises these patterns across both Crystal and Python targets:
 
 **Crystal:** 243 specs passing, compiled binary, full ActiveRecord-like runtime with macros.
 
-**Python:** 20 tests passing (4 model + 5 model + 8 controller + 3 controller), aiohttp async server, SQLite ORM with validations.
+**Python:** 21 tests passing (9 model + 9 article controller + 3 comment controller), aiohttp async server, hand-written ORM runtime with direct attribute access, Tailwind CSS, Turbo Streams with ActionCable WebSocket.
 
 ## Status
 
