@@ -160,8 +160,8 @@ module Railcar
     private def emit_view_stmt(node : Crystal::ASTNode, io : IO, singular : String, indent : String = "  ")
       case node
       when Crystal::Assign
-        target = emitter.emit_expr(node.target)
-        value = emitter.emit_expr(node.value)
+        target = emit_view_value(node.target)
+        value = emit_view_value(node.value)
         io << "#{indent}let #{target} = #{value};\n"
 
       when Crystal::OpAssign
@@ -255,8 +255,24 @@ module Railcar
           else
             "#{ts_name}(#{args.join(", ")})"
           end
+        elsif name == "form_with_open_tag" || name == "form_submit_tag"
+          ts_name = name.gsub(/_([a-z])/) { |_, m| m[1].upcase }
+          # First named arg (model) becomes positional, rest become opts object
+          if named = node.named_args
+            model_arg = named.find { |na| na.name == "model" }
+            other_args = named.reject { |na| na.name == "model" }
+            args = [] of String
+            args << emit_view_value(model_arg.value) if model_arg
+            unless other_args.empty?
+              opts = other_args.map { |na| "#{na.name}: #{emit_view_value(na.value)}" }
+              args << "{ #{opts.join(", ")} }"
+            end
+            "helpers.#{ts_name}(#{args.join(", ")})"
+          else
+            "helpers.#{ts_name}()"
+          end
         elsif {"link_to", "button_to", "truncate", "dom_id", "pluralize",
-               "turbo_stream_from", "form_with_open_tag", "form_submit_tag"}.includes?(name)
+               "turbo_stream_from"}.includes?(name)
           ts_name = name.gsub(/_([a-z])/) { |_, m| m[1].upcase }
           args = node.args.map { |a| emit_view_value(a) }
           if named = node.named_args
@@ -268,6 +284,11 @@ module Railcar
             args << "{ #{opts.join(", ")} }"
           end
           "helpers.#{ts_name}(#{args.join(", ")})"
+        elsif name == "new" && obj
+          # Model.new() → new Model()
+          obj_str = emit_view_value(obj)
+          args = node.args.map { |a| emit_view_value(a) }
+          "new #{obj_str}(#{args.join(", ")})"
         elsif name == "length" && obj
           "#{emit_view_value(obj)}.length"
         elsif name == "[]" && obj
@@ -276,11 +297,21 @@ module Railcar
           obj_str = emit_view_value(obj)
           args = node.args.map { |a| emit_view_value(a) }
           ts_name = name.gsub(/_([a-z])/) { |_, m| m[1].upcase }
-          if args.empty? && !node.block
+          # Known properties: access without parens. Everything else: method call.
+          if args.empty? && !node.block && {"length", "title", "body", "commenter", "id",
+                                             "name", "errors", "createdAt", "updatedAt"}.includes?(ts_name)
             "#{obj_str}.#{ts_name}"
           else
             "#{obj_str}.#{ts_name}(#{args.join(", ")})"
           end
+        elsif name.ends_with?("_path")
+          # Path helpers → helpers.namePath()
+          args = node.args.map { |a| emit_view_value(a) }
+          ts_name = name.gsub(/_([a-z])/) { |_, m| m[1].upcase }
+          "helpers.#{ts_name}(#{args.join(", ")})"
+        elsif name == "new" && !obj && node.args.empty?
+          # Bare new() — shouldn't normally reach here
+          "new Object()"
         else
           args = node.args.map { |a| emit_view_value(a) }
           ts_name = name.gsub(/_([a-z])/) { |_, m| m[1].upcase }
@@ -307,6 +338,14 @@ module Railcar
 
       when Crystal::SymbolLiteral
         node.value.inspect
+
+      when Crystal::NamedTupleLiteral
+        entries = node.entries.map { |e| "#{e.key}: #{emit_view_value(e.value)}" }
+        "{ #{entries.join(", ")} }"
+
+      when Crystal::HashLiteral
+        entries = node.entries.map { |e| "#{emit_view_value(e.key)}: #{emit_view_value(e.value)}" }
+        "{ #{entries.join(", ")} }"
 
       when Crystal::Not
         "!(#{emit_view_value(node.exp)})"

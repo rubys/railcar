@@ -114,7 +114,10 @@ module Railcar
       when Crystal::Assign
         target = emit_value(node.target)
         value = emit_value(node.value)
-        io << "#{indent}const #{target} = #{value};\n"
+        # Don't redeclare function parameters (e.g., data)
+        target_name = node.target.is_a?(Crystal::Var) ? node.target.as(Crystal::Var).name : ""
+        keyword = {"data", "req", "res"}.includes?(target_name) ? "" : "const "
+        io << "#{indent}#{keyword}#{target} = #{value};\n"
 
       when Crystal::If
         cond = emit_condition(node.cond)
@@ -183,6 +186,14 @@ module Railcar
       when "nil?"
         obj_str = obj ? emit_value(obj) : "this"
         return "#{obj_str} == null"
+      when "params", "body"
+        # Express: req.params, req.body are properties not methods
+        obj_str = obj ? emit_value(obj) : "req"
+        return "#{obj_str}.#{name}"
+      when "read"
+        # request.read → req.body (Express uses body, not read)
+        obj_str = obj ? emit_value(obj) : "req"
+        return "#{obj_str}.body"
       when "Number"
         return "Number(#{args.join(", ")})"
       when "[]"
@@ -234,6 +245,13 @@ module Railcar
       # View render functions → views.renderName()
       if name.starts_with?("render")
         return "views.#{name}(#{args.join(", ")})"
+      end
+
+      # Association calls need cast (article.comments() etc.)
+      if obj && {"comments", "articles", "build", "destroy_all"}.includes?(name)
+        obj_str = emit_value(obj)
+        ts_name = name.gsub(/_([a-z])/) { |_, m| m[1].upcase }
+        return "(#{obj_str} as any).#{ts_name}(#{args.join(", ")})"
       end
 
       # Generic call

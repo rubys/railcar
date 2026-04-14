@@ -206,7 +206,7 @@ module Railcar
       io << "// Route helpers\n"
       app.routes.helpers.each do |helper|
         if helper.params.empty?
-          io << "export function #{helper.name}Path(): string {\n"
+          io << "export function #{helper.name.gsub(/_([a-z])/) { |_, m| m[1].upcase }}Path(): string {\n"
           io << "  return #{helper.path.inspect};\n"
           io << "}\n\n"
         else
@@ -218,7 +218,7 @@ module Railcar
             end
           end
           param_list = param_names.map { |n| "#{n}: { id: number | null }" }.join(", ")
-          io << "export function #{helper.name}Path(#{param_list}): string {\n"
+          io << "export function #{helper.name.gsub(/_([a-z])/) { |_, m| m[1].upcase }}Path(#{param_list}): string {\n"
           path_expr = helper.path
           helper.params.each_with_index do |p, i|
             path_expr = path_expr.gsub(":#{p}", "${#{param_names[i]}.id}")
@@ -536,48 +536,47 @@ module Railcar
       # Routes
       routes_by_path = {} of String => Hash(String, {String, String})
       app.routes.routes.each do |route|
-        express_path = route.path.gsub(/:(\w+)/, ":$1")
-        routes_by_path[express_path] ||= {} of String => {String, String}
-        routes_by_path[express_path][route.method.upcase] = {route.controller, route.action}
+        routes_by_path[route.path] ||= {} of String => {String, String}
+        routes_by_path[route.path][route.method.upcase] = {route.controller, route.action}
       end
 
       routes_by_path.each do |route_path, methods|
         if get = methods["GET"]?
-          controller = Inflector.singularize(get[0])
+          controller = get[0]
           action = get[1] == "new" ? "newAction" : get[1]
           io << "  app.get(\"#{route_path}\", #{controller}Controller.#{action});\n"
         end
 
         has_dispatch = methods.has_key?("PATCH") || methods.has_key?("PUT") || methods.has_key?("DELETE")
         if post = methods["POST"]?
-          controller = Inflector.singularize(post[0])
+          controller = post[0]
           if has_dispatch
             io << "  app.post(\"#{route_path}\", (req, res) => {\n"
             io << "    const data = helpers.parseForm(req.body?.toString() ?? \"\");\n"
             io << "    const method = (data._method?.[0] ?? \"POST\").toUpperCase();\n"
             if del = methods["DELETE"]?
-              del_ctrl = Inflector.singularize(del[0])
+              del_ctrl = del[0]
               io << "    if (method === \"DELETE\") return #{del_ctrl}Controller.destroy(req, res, data);\n"
             end
             if patch = (methods["PATCH"]? || methods["PUT"]?)
-              patch_ctrl = Inflector.singularize(patch[0])
+              patch_ctrl = patch[0]
               io << "    if (method === \"PATCH\" || method === \"PUT\") return #{patch_ctrl}Controller.update(req, res, data);\n"
             end
             io << "    #{controller}Controller.#{post[1]}(req, res, data);\n"
             io << "  });\n"
           else
-            io << "  app.post(\"#{route_path}\", #{controller}Controller.#{post[1]});\n"
+            io << "  app.post(\"#{route_path}\", (req, res) => #{controller}Controller.#{post[1]}(req, res));\n"
           end
         elsif has_dispatch
           io << "  app.post(\"#{route_path}\", (req, res) => {\n"
           io << "    const data = helpers.parseForm(req.body?.toString() ?? \"\");\n"
           io << "    const method = (data._method?.[0] ?? \"POST\").toUpperCase();\n"
           if del = methods["DELETE"]?
-            del_ctrl = Inflector.singularize(del[0])
+            del_ctrl = del[0]
             io << "    if (method === \"DELETE\") return #{del_ctrl}Controller.destroy(req, res, data);\n"
           end
           if patch = (methods["PATCH"]? || methods["PUT"]?)
-            patch_ctrl = Inflector.singularize(patch[0])
+            patch_ctrl = patch[0]
             io << "    if (method === \"PATCH\" || method === \"PUT\") return #{patch_ctrl}Controller.update(req, res, data);\n"
           end
           io << "    res.status(404).send(\"Not found\");\n"
@@ -587,7 +586,7 @@ module Railcar
 
       if root_ctrl = app.routes.root_controller
         root_action = app.routes.root_action || "index"
-        ctrl = Inflector.singularize(root_ctrl)
+        ctrl = root_ctrl
         io << "  app.get(\"/\", #{ctrl}Controller.#{root_action});\n"
       end
 
