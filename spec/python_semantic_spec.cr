@@ -8,7 +8,6 @@ require "../src/generator/model_extractor"
 require "../src/generator/controller_extractor"
 require "../src/generator/route_extractor"
 require "../src/generator/inflector"
-require "../src/generator/python_emitter"
 require "../src/filters/respond_to_html"
 require "../src/filters/instance_var_to_local"
 
