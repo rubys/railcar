@@ -93,6 +93,15 @@ module Railcar
       model_prefix = model_var || child_class || "item"
       stmts = [] of Crystal::ASTNode
 
+      # Initialize empty model for nested resource forms (e.g., Comment.new)
+      if parent_var && child_class
+        class_name = Inflector.classify(child_class)
+        stmts << Crystal::Assign.new(
+          Crystal::Var.new(child_class),
+          Crystal::Call.new(Crystal::Path.new(class_name), "new")
+        )
+      end
+
       # Opening <form> tag
       css_attr = css_class ? " class=\"#{css_class}\"" : ""
       if parent_var && child_class
