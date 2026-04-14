@@ -25,6 +25,13 @@ require "./erb_compiler"
 require "../filters/instance_var_to_local"
 require "../filters/view_cleanup"
 require "../filters/buf_to_interpolation"
+require "../filters/rails_helpers"
+require "../filters/link_to_path_helper"
+require "../filters/button_to_path_helper"
+require "../filters/render_to_partial"
+require "../filters/form_to_html"
+require "../filters/python_constructor"
+require "../filters/python_view"
 require "../filters/params_expect"
 require "../filters/respond_to_html"
 require "../filters/strong_params"
@@ -473,11 +480,20 @@ module Railcar
 
           begin
             ast = SourceParser.parse_source(ruby_code)
+            # Same filter chain as --python0
             ast = ast.transform(InstanceVarToLocal.new)
+            ast = ast.transform(RailsHelpers.new)
+            ast = ast.transform(LinkToPathHelper.new)
+            ast = ast.transform(ButtonToPathHelper.new)
+            ast = ast.transform(RenderToPartial.new)
+            ast = ast.transform(FormToHTML.new)
+            ast = ast.transform(PythonConstructor.new)
+            locals = [singular]
+            ast = ast.transform(PythonView.new(locals))
             ast = ast.transform(ViewCleanup.new)
             # Convert bare calls matching parameter names to Var nodes
             plural = Inflector.pluralize(singular)
-            ast = ViewCleanup.calls_to_vars(ast, [singular, plural, "_buf", "notice", "flash"])
+            ast = ViewCleanup.calls_to_vars(ast, [singular, plural, "_buf", "notice", "flash", "form"])
             ast = ast.transform(BufToInterpolation.new)
 
             # Strip def render wrapper (kept for BufToInterpolation to process)
