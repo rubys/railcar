@@ -21,6 +21,7 @@ require "../semantic"
 require "../filters/model_boilerplate_python"
 require "../filters/broadcasts_to"
 require "../filters/controller_boilerplate_python"
+require "./erb_compiler"
 require "../filters/instance_var_to_local"
 require "../filters/params_expect"
 require "../filters/respond_to_html"
@@ -68,6 +69,7 @@ module Railcar
       emit_helpers(nodes, output_dir, emitter, serializer, filters)
       emit_models(nodes, output_dir, emitter, serializer, filters)
       emit_controllers(output_dir, emitter, serializer, filters)
+      emit_views(output_dir, emitter, serializer, filters)
       emit_tests(output_dir, emitter, serializer, filters)
 
       # __init__.py files
@@ -394,6 +396,81 @@ module Railcar
         end
       end
       nil
+    end
+
+    # ── Emit views ──
+
+    private def emit_views(output_dir : String,
+                           emitter : Cr2Py::Emitter,
+                           serializer : PyAST::Serializer,
+                           filters : Tuple)
+      views_dir = File.join(output_dir, "views")
+      Dir.mkdir_p(views_dir)
+
+      rails_views = File.join(rails_dir, "app/views")
+
+      # Group templates by controller
+      app.controllers.each do |info|
+        controller_name = Inflector.underscore(info.name).chomp("_controller")
+        template_dir = File.join(rails_views, Inflector.pluralize(controller_name))
+        next unless Dir.exists?(template_dir)
+
+        model_name = Inflector.classify(Inflector.singularize(controller_name))
+        singular = Inflector.singularize(controller_name)
+        view_nodes = [] of PyAST::Node
+
+        Dir.glob(File.join(template_dir, "*.html.erb")).sort.each do |erb_path|
+          basename = File.basename(erb_path, ".html.erb")
+          func_name = if basename.starts_with?("_")
+                        "render_#{basename.lstrip('_')}_partial"
+                      else
+                        "render_#{basename}"
+                      end
+
+          # ERB → Ruby _buf code → Crystal AST
+          erb_source = File.read(erb_path)
+          ruby_code = ErbCompiler.new(erb_source).src
+
+          begin
+            ast = SourceParser.parse_source(ruby_code)
+            ast = ast.transform(InstanceVarToLocal.new)
+
+            # Wrap in a function
+            arg = Crystal::Arg.new(singular)
+            func_def = Crystal::Def.new(func_name, [arg] of Crystal::Arg,
+              ast, return_type: Crystal::Path.new("String"))
+
+            py_func_nodes = emitter.to_nodes(func_def)
+            view_nodes.concat(py_func_nodes)
+          rescue ex
+            # If ERB compilation fails, emit a stub
+            view_nodes << PyAST::Func.new(func_name, [singular], [
+              PyAST::Return.new("f'<!-- #{basename} template -->'"),
+            ] of PyAST::Node, "str")
+          end
+        end
+
+        next if view_nodes.empty?
+
+        # Apply filters
+        db_filter, dunder_filter, return_filter = filters
+        view_nodes = return_filter.transform(view_nodes)
+
+        mod = PyAST::Module.new(view_nodes)
+        content = serializer.serialize(mod)
+
+        imports = "from helpers import *\n"
+        app.models.each_key do |name|
+          imports += "from models.#{Inflector.underscore(name)} import #{name}\n"
+        end
+        imports += "\n"
+
+        out_path = File.join(views_dir, "#{Inflector.pluralize(controller_name)}.py")
+        File.write(out_path, imports + content)
+        puts "  views/#{Inflector.pluralize(controller_name)}.py"
+      end
+
+      File.write(File.join(views_dir, "__init__.py"), "")
     end
 
     # ── Layer 3: Tests ──
