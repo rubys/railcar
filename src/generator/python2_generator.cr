@@ -256,8 +256,6 @@ module Railcar
       File.write(File.join(runtime_dir, "__init__.py"), "")
     end
 
-    # ── Emit models ──
-
     # ── Emit helpers ──
 
     private def emit_helpers(nodes : Array(Crystal::ASTNode), output_dir : String,

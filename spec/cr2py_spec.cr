@@ -1,11 +1,8 @@
 require "spec"
 require "compiler/crystal/syntax"
 require "../src/semantic"
-require "../shards/crystal-analyzer/src/crystal-analyzer"
 require "../tools/cr2py/src/py_ast"
-require "../tools/cr2py/src/filters/spec_filter"
 require "../tools/cr2py/src/filters/db_filter"
-require "../tools/cr2py/src/filters/overload_filter"
 require "../tools/cr2py/src/cr2py"
 require "../src/generator/python2_generator"
 
@@ -88,85 +85,6 @@ describe "PyAST::Serializer" do
   end
 end
 
-describe "Cr2Py::SpecFilter" do
-  filter = Cr2Py::SpecFilter.new
-
-  it "transforms describe/it into def test_*" do
-    code = <<-CR
-    describe("Article") do
-      it("should create") do
-        x = 1
-      end
-    end
-    CR
-    ast = parse_crystal(code)
-    result = ast.transform(filter)
-    output = result.to_s
-    output.should contain "test_should_create"
-  end
-
-  it "transforms should(eq(...)) into assert ==" do
-    code = <<-CR
-    describe("Math") do
-      it("adds numbers") do
-        (1 + 1).should(eq(2))
-      end
-    end
-    CR
-    ast = parse_crystal(code)
-    result = ast.transform(filter)
-    output = result.to_s
-    output.should contain "assert"
-    output.should contain "=="
-  end
-
-  it "transforms should_not(be_nil) into assert is not None" do
-    code = <<-CR
-    describe("Obj") do
-      it("exists") do
-        x.should_not(be_nil)
-      end
-    end
-    CR
-    ast = parse_crystal(code)
-    result = ast.transform(filter)
-    output = result.to_s
-    output.should contain "is not"
-  end
-
-  it "transforms should(contain(...)) into assert in" do
-    code = <<-CR
-    describe("String") do
-      it("contains substring") do
-        "hello world".should(contain("world"))
-      end
-    end
-    CR
-    ast = parse_crystal(code)
-    result = ast.transform(filter)
-    output = result.to_s
-    output.should contain "in"
-  end
-
-  it "inlines before_each into each test" do
-    code = <<-CR
-    describe("Setup") do
-      before_each do
-        db = setup()
-      end
-      it("test one") do
-        x = 1
-      end
-    end
-    CR
-    ast = parse_crystal(code)
-    result = ast.transform(filter)
-    output = result.to_s
-    output.should contain "test_test_one"
-    output.should contain "setup()"
-  end
-end
-
 describe "Cr2Py::DbFilter" do
   filter = Cr2Py::DbFilter.new
 
@@ -214,69 +132,6 @@ describe "Cr2Py::DbFilter" do
     output = result.to_s
     output.should contain "logging"
     output.should contain "getLogger"
-  end
-end
-
-describe "Cr2Py::OverloadFilter" do
-  # Need a program for the overload filter
-  program = Crystal::Program.new
-
-  it "merges positional + kwargs overloads" do
-    code = <<-CR
-    class Foo
-      def self.create(attrs : Hash(String, String))
-        new(attrs)
-      end
-      def self.create(**attrs)
-        hash = {} of String => String
-        attrs.each { |k, v| hash[k.to_s] = v }
-        create(hash)
-      end
-    end
-    CR
-    ast = parse_crystal(code)
-    filter = Cr2Py::OverloadFilter.new(program)
-    result = ast.transform(filter)
-    output = result.to_s
-
-    # Should have only one create method
-    output.scan(/def self\.create/).size.should eq 1
-    # Should have isinstance dispatch
-    output.should contain "isinstance"
-  end
-
-  it "keeps single methods unchanged" do
-    code = <<-CR
-    class Foo
-      def bar(x : Int32)
-        x + 1
-      end
-    end
-    CR
-    ast = parse_crystal(code)
-    filter = Cr2Py::OverloadFilter.new(program)
-    result = ast.transform(filter)
-    output = result.to_s
-    output.should contain "def bar"
-    output.should_not contain "isinstance"
-  end
-
-  it "deduplicates identical-signature methods" do
-    code = <<-CR
-    class Foo
-      def name
-        @name
-      end
-      def name
-        @name
-      end
-    end
-    CR
-    ast = parse_crystal(code)
-    filter = Cr2Py::OverloadFilter.new(program)
-    result = ast.transform(filter)
-    output = result.to_s
-    output.scan(/def name/).size.should eq 1
   end
 end
 
@@ -340,26 +195,49 @@ describe "Cr2Py::PyAstDunderFilter" do
 end
 
 describe "Cr2Py::Emitter" do
-  blog_entry = "build/crystal-blog/src/app.cr"
-
-  unless File.exists?(blog_entry)
-    pending "requires crystal blog (run: make && build/railcar build/demo/blog build/crystal-blog)" { }
-    next
+  # Build a typed program from the runtime for emitter tests
+  _emitter_location = Crystal::Location.new("src/app.cr", 1, 1)
+  _emitter_runtime_path = File.join(File.dirname(__FILE__), "..", "src", "runtime", "python", "base.cr")
+  _emitter_runtime_source = File.read(_emitter_runtime_path)
+  _emitter_source = String.build do |io|
+    io << "module DB\n"
+    io << "  alias Any = Bool | Float32 | Float64 | Int32 | Int64 | String | Nil\n"
+    io << "  class Database\n"
+    io << "    def exec(sql : String, *args) end\n"
+    io << "    def exec(sql : String, args : Array) end\n"
+    io << "    def scalar(sql : String, *args) : Int64; 0_i64; end\n"
+    io << "  end\n"
+    io << "end\n\n"
+    _emitter_runtime_source.lines.each do |line|
+      next if line.strip.starts_with?("require ")
+      io << line << "\n"
+    end
   end
+  _emitter_synthetic = <<-CR
+    _ar = Railcar::ApplicationRecord.new
+    _ar.id
+    _ar.persisted?
+    _ar.attributes
+    _ar.errors
+    _ar.save
+  CR
+  _emitter_nodes = Crystal::Expressions.new([
+    Crystal::Require.new("prelude").at(_emitter_location),
+    Crystal::Parser.parse(_emitter_source),
+    Crystal::Parser.parse(_emitter_synthetic),
+  ] of Crystal::ASTNode)
+  _emitter_program = Crystal::Program.new
+  _emitter_compiler = Crystal::Compiler.new
+  _emitter_compiler.no_codegen = true
+  _emitter_program.compiler = _emitter_compiler
+  _emitter_normalized = _emitter_program.normalize(_emitter_nodes)
+  _emitter_program.semantic(_emitter_normalized)
 
-  result = CrystalAnalyzer.analyze(blog_entry)
-  emitter = Cr2Py::Emitter.new(result.program)
+  emitter = Cr2Py::Emitter.new(_emitter_program)
   serializer = PyAST::Serializer.new
 
-    it "detects properties via type info on typed AST nodes" do
-      # With typed def substitution, obj.type? should be available
-      # Create a typed call to test is_property?
-      # This is implicitly tested by the property access tests below
-      true.should be_true  # placeholder — real test is the emit behavior
-    end
-
     # Helper to set up class context for property tests
-    ar_type = result.program.types["Railcar"].types["ApplicationRecord"]
+    ar_type = _emitter_program.types["Railcar"].types["ApplicationRecord"]
 
     it "emits property access without parens" do
       # record.attributes → record.attributes (not record.attributes())
@@ -476,25 +354,6 @@ describe "Cr2Py::Emitter" do
       func.return_type.should eq "bool"
     end
 
-    pending "generates all 27 files with valid Python syntax (routes.py elif issue)" do
-      db_filter = Cr2Py::DbFilter.new
-      overload_filter = Cr2Py::OverloadFilter.new(result.program, result.typed_defs)
-
-      errors = [] of String
-      result.files.each do |filename, info|
-        nodes = [] of PyAST::Node
-        info.nodes.each do |node|
-          nodes.concat(emitter.to_nodes(node.transform(overload_filter).transform(db_filter)))
-        end
-        mod = PyAST::Module.new(nodes)
-        content = serializer.serialize(mod)
-        # Basic syntax check: balanced parens, no bare elif
-        if content.includes?("el        if")
-          errors << "#{filename}: malformed elif"
-        end
-      end
-      errors.should be_empty
-    end
 end
 
 describe "Python runtime emission" do
