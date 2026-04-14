@@ -488,8 +488,12 @@ module Railcar
 
             # Index templates use plural (articles), others use singular (article)
             param_name = basename == "index" ? Inflector.pluralize(singular) : singular
-            arg = Crystal::Arg.new(param_name)
-            func_def = Crystal::Def.new(func_name, [arg] of Crystal::Arg,
+            args = [Crystal::Arg.new(param_name)]
+            # Add notice parameter with default None for templates that use flash
+            notice_arg = Crystal::Arg.new("notice")
+            notice_arg.default_value = Crystal::NilLiteral.new
+            args << notice_arg
+            func_def = Crystal::Def.new(func_name, args,
               body, return_type: Crystal::Path.new("String"))
 
             py_func_nodes = emitter.to_nodes(func_def)
@@ -596,8 +600,10 @@ module Railcar
           io << "    application.router.add_get('#{path}', #{controller}_controller.#{action})\n"
         when "POST"
           io << "    application.router.add_post('#{path}', #{controller}_controller.#{action})\n"
-        when "PATCH", "PUT", "DELETE"
-          # These come through POST with _method override — handled by dispatch
+        when "PATCH", "PUT"
+          io << "    application.router.add_patch('#{path}', #{controller}_controller.#{action})\n"
+        when "DELETE"
+          io << "    application.router.add_delete('#{path}', #{controller}_controller.#{action})\n"
         end
       end
 

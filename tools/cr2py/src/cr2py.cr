@@ -727,6 +727,11 @@ module Cr2Py
         return "not #{to_expr(obj)}"
       end
 
+      # .present? → bool(obj) (truthy check)
+      if name == "present?" && args.empty? && obj
+        return to_expr(obj)
+      end
+
       # .nil? → (obj is None)
       if name == "nil?" && args.empty? && obj
         return "(#{to_expr(obj)} is None)"

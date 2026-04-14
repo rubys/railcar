@@ -69,6 +69,10 @@ module Cr2Py
       AWAIT_METHODS.each do |method|
         result = result.gsub(/(\w+)\.#{method}\(/) { "await #{$1}.#{method}(" }
       end
+      # client.post(url, data) → client.post(url, data=data) for aiohttp
+      result = result.gsub(/await client\.(post|patch|put)\(([^,]+), ([^)]+)\)/) {
+        "await client.#{$1}(#{$2}, data=#{$3})"
+      }
       # response.text (property) → await response.text() (coroutine in aiohttp)
       result = result.gsub(/(\w+)\.text(?!\()/) { "await #{$1}.text()" }
       # await function(...) calls

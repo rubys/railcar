@@ -24,7 +24,8 @@ module Railcar
     head + content + LAYOUT_TAIL
   end
 
-  def self.link_to(text : String, url : String, css : String = "") : String
+  def self.link_to(text : String, url : String, **kwargs) : String
+    css = kwargs["class_"]? || kwargs["class"]? || ""
     if css.empty?
       "<a href=\"#{url}\">#{text}</a>"
     else
@@ -32,7 +33,10 @@ module Railcar
     end
   end
 
-  def self.button_to(text : String, url : String, method : String = "post", css : String = "", confirm : String = "") : String
+  def self.button_to(text : String, url : String, **kwargs) : String
+    method = kwargs["method"]? || "post"
+    css = kwargs["class_"]? || kwargs["class"]? || ""
+    confirm = kwargs["data_turbo_confirm"]? || ""
     confirm_attr = confirm.empty? ? "" : " data-turbo-confirm=\"#{confirm}\""
     cls_attr = css.empty? ? "" : " class=\"#{css}\""
     "<form method=\"post\" action=\"#{url}\"#{confirm_attr}>" \
@@ -65,11 +69,11 @@ module Railcar
   def self.content_for(name : String, value : String)
   end
 
-  def self.form_with(model, css : String = "") : String
+  def self.form_with(**kwargs) : String
     ""
   end
 
-  def self.render(partial) : String
+  def self.render(partial, **kwargs) : String
     ""
   end
 

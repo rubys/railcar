@@ -144,6 +144,11 @@ module Railcar
       @errors
     end
 
+    def update(attrs : Hash(String, DB::Any)) : Bool
+      attrs.each { |k, v| @attributes[k] = v }
+      save
+    end
+
     def id : Int64?
       val = attributes["id"]?
       if val
