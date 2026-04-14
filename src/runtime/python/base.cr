@@ -149,13 +149,10 @@ module Railcar
       save
     end
 
+    @id : Int64? = nil
+
     def id : Int64?
-      val = attributes["id"]?
-      if val
-        val.as(Int64)
-      else
-        nil
-      end
+      @id
     end
 
     def new_record? : Bool

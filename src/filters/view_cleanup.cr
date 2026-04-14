@@ -44,6 +44,17 @@ module Railcar
       if target.is_a?(Crystal::Call) && target.name == "append=" &&
          target.obj.is_a?(Crystal::Var) && target.obj.as(Crystal::Var).name == "_buf"
         expr = strip_to_s(value)
+
+        # .each { |x| partial(x) } → standalone loop: each { |x| _buf += partial(x) }
+        if expr.is_a?(Crystal::Call) && expr.name == "each" && expr.block
+          block = expr.block.not_nil!
+          block.body = Crystal::OpAssign.new(
+            Crystal::Var.new("_buf"), "+",
+            block.body.transform(self)
+          )
+          return expr.transform(self)
+        end
+
         return Crystal::OpAssign.new(
           Crystal::Var.new("_buf"), "+",
           Crystal::Call.new(nil, "str", [expr.transform(self)] of Crystal::ASTNode)
@@ -70,6 +81,17 @@ module Railcar
       if node.name == "append=" && node.obj.is_a?(Crystal::Var) &&
          node.obj.as(Crystal::Var).name == "_buf" && node.args.size == 1
         expr = strip_to_s(node.args[0])
+
+        # .each { |x| partial(x) } → standalone loop
+        if expr.is_a?(Crystal::Call) && expr.name == "each" && expr.block
+          block = expr.block.not_nil!
+          block.body = Crystal::OpAssign.new(
+            Crystal::Var.new("_buf"), "+",
+            block.body.transform(self)
+          )
+          return expr.transform(self)
+        end
+
         return Crystal::OpAssign.new(
           Crystal::Var.new("_buf"), "+",
           Crystal::Call.new(nil, "str", [expr.transform(self)] of Crystal::ASTNode)

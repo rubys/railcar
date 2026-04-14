@@ -18,7 +18,7 @@ module Cr2Py
     lambda nonlocal not or pass raise return try while with yield]
 
   # Properties known to be attributes (not methods) on framework objects
-  KNOWN_PROPERTIES = %w[match_info status headers body text method path]
+  KNOWN_PROPERTIES = %w[id match_info status headers body text method path]
 
   PYTHON_BUILTINS = %w[print len int str float bool isinstance hasattr type
     range enumerate zip sorted reversed list dict set tuple super abs min max
@@ -35,6 +35,10 @@ module Cr2Py
     property current_double_splat : String? = nil
     property current_class_type : Crystal::Type? = nil
     property current_class_name : String? = nil
+
+    # Model column names — used for property detection on untyped variables.
+    # Maps model name → set of column names (e.g. "Article" → {"title", "body", ...})
+    property model_columns : Hash(String, Set(String)) = {} of String => Set(String)
 
     getter debug_target : String?
 
@@ -1203,6 +1207,17 @@ module Cr2Py
               debug "#{ctx}: found ivar @#{name} on #{resolved} via .class" if do_debug
               return true
             end
+          end
+        end
+      end
+
+      # Fallback: check model_columns for untyped variables (views, tests, helpers)
+      if !@model_columns.empty? && obj.is_a?(Crystal::Var)
+        model_name = obj.name.capitalize.gsub(/_([a-z])/) { $1.upcase }
+        if props = @model_columns[model_name]?
+          if props.includes?(name)
+            debug "#{ctx}: found model column #{name} on #{model_name}" if do_debug
+            return true
           end
         end
       end

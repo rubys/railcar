@@ -70,16 +70,25 @@ module Cr2Py
         result = result.gsub(/(\w+)\.#{method}\(/) { "await #{$1}.#{method}(" }
       end
       # Add allow_redirects=False to POST/PATCH/PUT/DELETE calls
-      # and data= keyword for body data
-      if result.includes?("await client.post(") || result.includes?("await client.patch(") ||
-         result.includes?("await client.put(") || result.includes?("await client.delete(")
-        # Find the client call and add allow_redirects before closing paren
-        result = result.gsub(/await client\.(post|patch|put|delete)\((.+)\)\s*$/) do |match|
-          method = $1
-          inner = $2
-          if inner.includes?(",")
-            parts = inner.split(", ", 2)
-            "await client.#{method}(#{parts[0]}, data=#{parts[1]}, allow_redirects=False)"
+      # and data= keyword for body data (not for DELETE which has no body)
+      %w[post patch put delete].each do |method|
+        next unless result.includes?("await client.#{method}(")
+        result = result.gsub(/await client\.#{method}\((.+)\)\s*$/) do |match|
+          inner = $1
+          # Count parens to find the real end of the client call args
+          depth = 0
+          split_pos = nil
+          inner.each_char_with_index do |c, i|
+            depth += 1 if c == '('
+            depth -= 1 if c == ')'
+            if c == ',' && depth == 0 && split_pos.nil?
+              split_pos = i
+            end
+          end
+          if split_pos && method != "delete"
+            url = inner[0...split_pos]
+            body = inner[split_pos + 2..]  # skip ", "
+            "await client.#{method}(#{url}, data=#{body}, allow_redirects=False)"
           else
             "await client.#{method}(#{inner}, allow_redirects=False)"
           end

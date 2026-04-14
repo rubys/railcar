@@ -1,7 +1,7 @@
 # Filter: Transform a Rails model class into macro-free Crystal for Python emission.
 #
-# Like ModelBoilerplate but produces explicit methods instead of macro calls.
-# The output is plain Crystal that program.semantic can type and cr2py can emit.
+# Produces declarative COLUMNS/property declarations that program.semantic can type.
+# The Python runtime uses COLUMNS + setattr for direct attribute access.
 #
 # Input (translated from Rails via Prism):
 #   class Article < ApplicationRecord
@@ -11,10 +11,11 @@
 #
 # Output:
 #   class Article < ApplicationRecord
+#     COLUMNS = ["title", "body", "created_at", "updated_at"]
+#     property title : String = ""
+#     property body : String = ""
 #     def self.table_name : String; "articles"; end
-#     def title; attributes["title"]? || ""; end
-#     def title=(value); attributes["title"] = value; end
-#     def comments; CollectionProxy(Comment).new(self, "article_id"); end
+#     def comments; CollectionProxy.new(self, "article_id", "Comment"); end
 #     def run_validations; ...; end
 #     def destroy : Bool; comments.destroy_all; super; end
 #   end
@@ -35,27 +36,35 @@ module Railcar
     def transform(node : Crystal::ClassDef) : Crystal::ASTNode
       class_body = [] of Crystal::ASTNode
 
-      # table_name class method
+      # TABLE and table_name — TABLE is used by Python runtime, table_name for Crystal compat
+      class_body << Crystal::Parser.parse("TABLE = \"#{schema.name}\"")
       class_body << Crystal::Parser.parse(
         "def self.table_name : String\n  \"#{schema.name}\"\nend"
       )
 
-      # Column getters and setters
+      # COLUMNS constant — used by Python runtime for direct attribute access
+      col_names = schema.columns.reject { |c| c.name == "id" }.map { |c| "\"#{c.name}\"" }
+      class_body << Crystal::Parser.parse(
+        "COLUMNS = [#{col_names.join(", ")}] of String"
+      )
+
+      # Instance variable declarations — for program.semantic type checking only.
+      # The emitter emits these as comments (TypeDeclaration → "# name: type").
+      # The Python runtime uses COLUMNS + setattr for direct attribute access.
       schema.columns.each do |col|
-        next if col.name == "id"  # inherited from ApplicationRecord
-        crystal_type = SchemaExtractor.crystal_type(col.type)
+        next if col.name == "id"
+        # Use String for datetime columns (Python stores as ISO string)
+        crystal_type = case col.type.downcase
+                       when "datetime", "date", "time" then "String"
+                       else SchemaExtractor.crystal_type(col.type)
+                       end
         default = case col.type.downcase
                   when "integer" then "0_i64"
                   when "boolean" then "false"
                   when "float", "real", "double" then "0.0"
                   else "\"\""
                   end
-        class_body << Crystal::Parser.parse(
-          "def #{col.name} : #{crystal_type}\n  (attributes[\"#{col.name}\"]? || #{default}).as(#{crystal_type})\nend"
-        )
-        class_body << Crystal::Parser.parse(
-          "def #{col.name}=(value : #{crystal_type})\n  attributes[\"#{col.name}\"] = value\nend"
-        )
+        class_body << Crystal::Parser.parse("@#{col.name} : #{crystal_type} = #{default}")
       end
 
       # Association methods
@@ -113,7 +122,7 @@ module Railcar
         target = Inflector.classify(assoc.name)
         fk = assoc.options["foreign_key"]? || "#{assoc.name}_id"
         Crystal::Parser.parse(
-          "def #{assoc.name}\n  MODEL_REGISTRY[\"#{target}\"].find(attributes[\"#{fk}\"]?.as(Int64))\nend"
+          "def #{assoc.name}\n  MODEL_REGISTRY[\"#{target}\"].find(@#{fk}.as(Int64))\nend"
         )
       else
         Crystal::Nop.new
@@ -133,12 +142,11 @@ module Railcar
         target = Inflector.classify(a.name)
         fk = a.options["foreign_key"]? || "#{a.name}_id"
         stmts << <<-CR
-          fk_val = attributes["#{fk}"]?
-          if fk_val.nil?
+          if @#{fk}.nil?
             errors.add("#{a.name}", "must exist")
           else
             begin
-              MODEL_REGISTRY["#{target}"].find(fk_val.as(Int64))
+              MODEL_REGISTRY["#{target}"].find(@#{fk}.as(Int64))
             rescue
               errors.add("#{a.name}", "must exist")
             end
@@ -148,8 +156,7 @@ module Railcar
 
       presence_validations.each do |v|
         stmts << <<-CR
-          val = attributes["#{v.field}"]?
-          if val.nil? || (val.is_a?(String) && val.as(String).empty?)
+          if @#{v.field}.nil? || (@#{v.field}.is_a?(String) && @#{v.field}.as(String).empty?)
             errors.add("#{v.field}", "can't be blank")
           end
         CR
@@ -158,8 +165,7 @@ module Railcar
       length_validations.each do |v|
         if min = v.options["minimum"]?
           stmts << <<-CR
-            val = attributes["#{v.field}"]?
-            if val.is_a?(String) && val.as(String).size < #{min}
+            if @#{v.field}.is_a?(String) && @#{v.field}.as(String).size < #{min}
               errors.add("#{v.field}", "is too short (minimum is #{min} characters)")
             end
           CR

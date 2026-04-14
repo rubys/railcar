@@ -117,6 +117,13 @@ module Railcar
           else
             parts << Crystal::StringLiteral.new(value.value)
           end
+        when Crystal::Call
+          # Strip str() wrapper — f-strings auto-convert to string
+          if value.name == "str" && value.args.size == 1 && !value.obj
+            parts << value.args[0]
+          else
+            parts << value
+          end
         else
           parts << value
         end

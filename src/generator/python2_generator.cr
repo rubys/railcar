@@ -73,6 +73,21 @@ module Railcar
       return_filter = Cr2Py::PyAstReturnFilter.new
       filters = {db_filter, dunder_filter, return_filter}
 
+      # Build model_columns for property detection on untyped variables
+      schema_map = {} of String => TableSchema
+      app.schemas.each { |s| schema_map[s.name] = s }
+      cols = {} of String => Set(String)
+      app.models.each_key do |name|
+        table = Inflector.pluralize(Inflector.underscore(name))
+        if schema = schema_map[table]?
+          props = Set(String).new
+          schema.columns.each { |c| props << c.name }
+          props << "id"
+          cols[name] = props
+        end
+      end
+      emitter.model_columns = cols
+
       # Emit
       nodes = extract_railcar_nodes(typed_ast)
       emit_runtime(nodes, output_dir, emitter, serializer, filters)
@@ -177,8 +192,8 @@ module Railcar
       puts "  semantic analysis: OK"
       {program, typed}
     rescue ex
-      STDERR.puts "  semantic analysis failed:"
-      STDERR.puts ex.message
+      STDERR.puts "  semantic analysis failed: #{ex.message}"
+      STDERR.puts ex.backtrace.first(15).join("\n")
       {nil, nil}
     end
 
@@ -239,21 +254,12 @@ module Railcar
       runtime_dir = File.join(output_dir, "runtime")
       Dir.mkdir_p(runtime_dir)
 
-      runtime_classes = %w[ValidationErrors ApplicationRecord CollectionProxy]
-      runtime_nodes = nodes.select { |n|
-        case n
-        when Crystal::ClassDef
-          runtime_classes.includes?(n.name.names.last)
-        when Crystal::Assign
-          # Module-level constants like MODEL_REGISTRY
-          true
-        else
-          false
-        end
-      }
-
-      emit_file(runtime_nodes, "runtime/base.py", output_dir, emitter, serializer, filters)
+      # Emit the hand-written Python runtime (not transpiled from Crystal).
+      # Crystal base.cr is used only for program.semantic() type checking.
+      runtime_source = File.join(File.dirname(__FILE__), "..", "runtime", "python", "base_runtime.py")
+      File.copy(runtime_source, File.join(runtime_dir, "base.py"))
       File.write(File.join(runtime_dir, "__init__.py"), "")
+      puts "  runtime/base.py"
     end
 
     # ── Emit helpers ──
@@ -266,15 +272,18 @@ module Railcar
       helper_nodes = nodes.select { |n| n.is_a?(Crystal::Def) || n.is_a?(Crystal::Assign) }
 
       # Add route helpers (generated from app metadata)
-      route_helpers = build_route_helpers
-      helper_nodes.concat(route_helpers)
+      if !helper_nodes.empty?
+        emit_file(helper_nodes, "helpers.py", output_dir, emitter, serializer, filters)
+      else
+        File.write(File.join(output_dir, "helpers.py"), "")
+        puts "  helpers.py"
+      end
 
-      return if helper_nodes.empty?
-      emit_file(helper_nodes, "helpers.py", output_dir, emitter, serializer, filters)
-
-      # Append Python-specific helpers (not transpiled from Crystal)
+      # Append hand-written Python helpers (route helpers, form helpers, utils)
       helpers_path = File.join(output_dir, "helpers.py")
       File.open(helpers_path, "a") do |f|
+        f << "\n# Route helpers\n"
+        append_route_helpers(f)
         f << "\n# Python-specific helpers\n"
         f << "from urllib.parse import parse_qs, urlencode\n\n"
         f << "def parse_form(body_bytes):\n"
@@ -297,28 +306,40 @@ module Railcar
         f << "                flat[f'{outer_key}[{k}]'] = v\n"
         f << "        else:\n"
         f << "            flat[outer_key] = inner\n"
-        f << "    return urlencode(flat)\n"
+        f << "    return urlencode(flat)\n\n"
+        f << "def form_with_open_tag(**kwargs):\n"
+        f << "    model = kwargs.get('model')\n"
+        f << "    css = kwargs.get('class_', kwargs.get('class', ''))\n"
+        f << "    cls_attr = f' class=\"{css}\"' if css else ''\n"
+        f << "    name = type(model).__name__.lower()\n"
+        f << "    plural = name + 's'\n"
+        f << "    if model.id:\n"
+        f << "        return (f'<form action=\"/{plural}/{model.id}\" method=\"post\"{cls_attr}>'\n"
+        f << "                f'<input type=\"hidden\" name=\"_method\" value=\"patch\">')\n"
+        f << "    return f'<form action=\"/{plural}\" method=\"post\"{cls_attr}>'\n\n"
+        f << "def form_submit_tag(**kwargs):\n"
+        f << "    model = kwargs.get('model')\n"
+        f << "    css = kwargs.get('class_', kwargs.get('class', ''))\n"
+        f << "    cls_attr = f' class=\"{css}\"' if css else ''\n"
+        f << "    name = type(model).__name__\n"
+        f << "    action = 'Update' if model.id else 'Create'\n"
+        f << "    return f'<input type=\"submit\" value=\"{action} {name}\"{cls_attr}>'\n"
       end
     end
 
-    private def build_route_helpers : Array(Crystal::ASTNode)
-      helpers = [] of Crystal::ASTNode
+    private def append_route_helpers(f : IO)
       app.models.each_key do |name|
         singular = Inflector.underscore(name)
         plural = Inflector.pluralize(singular)
 
-        helpers << Crystal::Parser.parse(
-          "def #{singular}_path(model) : String\n  \"/#{plural}/\#{model.id}\"\nend"
-        )
-        helpers << Crystal::Parser.parse(
-          "def edit_#{singular}_path(model) : String\n  \"/#{plural}/\#{model.id}/edit\"\nend"
-        )
-        helpers << Crystal::Parser.parse(
-          "def #{plural}_path : String\n  \"/#{plural}\"\nend"
-        )
-        helpers << Crystal::Parser.parse(
-          "def new_#{singular}_path : String\n  \"/#{plural}/new\"\nend"
-        )
+        f << "def #{singular}_path(model):\n"
+        f << "    return f'/#{plural}/{model.id}'\n\n"
+        f << "def edit_#{singular}_path(model):\n"
+        f << "    return f'/#{plural}/{model.id}/edit'\n\n"
+        f << "def #{plural}_path():\n"
+        f << "    return '/#{plural}'\n\n"
+        f << "def new_#{singular}_path():\n"
+        f << "    return '/#{plural}/new'\n\n"
       end
 
       # Nested resource helpers
@@ -330,17 +351,13 @@ module Railcar
             parent = Inflector.underscore(name)
             parent_plural = Inflector.pluralize(parent)
 
-            helpers << Crystal::Parser.parse(
-              "def #{parent}_#{child_plural}_path(parent) : String\n  \"/#{parent_plural}/\#{parent.id}/#{child_plural}\"\nend"
-            )
-            helpers << Crystal::Parser.parse(
-              "def #{parent}_#{child}_path(parent, child) : String\n  \"/#{parent_plural}/\#{parent.id}/#{child_plural}/\#{child.id}\"\nend"
-            )
+            f << "def #{parent}_#{child_plural}_path(parent):\n"
+            f << "    return f'/#{parent_plural}/{parent.id}/#{child_plural}'\n\n"
+            f << "def #{parent}_#{child}_path(parent, child):\n"
+            f << "    return f'/#{parent_plural}/{parent.id}/#{child_plural}/{child.id}'\n\n"
           end
         end
       end
-
-      helpers
     end
 
     # ── Emit models ──
@@ -827,7 +844,7 @@ module Railcar
           field_strs = fields.map do |k, v|
             if association_fields.includes?(k) && fixture_table_names.includes?(Inflector.pluralize(k))
               ref_fixture = Inflector.pluralize(k)
-              "#{k}_id=#{ref_fixture}_#{v}.id()"
+              "#{k}_id=#{ref_fixture}_#{v}.id"
             else
               "#{k}=#{v.inspect}"
             end
