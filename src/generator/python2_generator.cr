@@ -593,7 +593,12 @@ module Railcar
     private def emit_app(output_dir : String)
       io = IO::Memory.new
       io << "from aiohttp import web\n"
+      io << "import aiohttp\n"
       io << "import os\n"
+      io << "import json\n"
+      io << "import base64\n"
+      io << "import asyncio\n"
+      io << "import time\n"
       io << "import sqlite3\n"
       io << "from runtime.base import ApplicationRecord\n"
       io << "from helpers import *\n"
@@ -606,6 +611,57 @@ module Railcar
         io << "from controllers import #{name} as #{name}_controller\n"
       end
       io << "\n"
+
+      # ActionCable server for Turbo Streams
+      io << "class CableServer:\n"
+      io << "    def __init__(self):\n"
+      io << "        self.channels = {}\n"
+      io << "\n"
+      io << "    def subscribe(self, ws, channel, identifier):\n"
+      io << "        self.channels.setdefault(channel, set()).add((ws, identifier))\n"
+      io << "\n"
+      io << "    def unsubscribe_all(self, ws):\n"
+      io << "        for channel in list(self.channels):\n"
+      io << "            self.channels[channel] = {(w, i) for w, i in self.channels[channel] if w is not ws}\n"
+      io << "\n"
+      io << "    async def broadcast(self, channel, html):\n"
+      io << "        for ws, identifier in list(self.channels.get(channel, set())):\n"
+      io << "            msg = json.dumps({'type': 'message', 'identifier': identifier, 'message': html})\n"
+      io << "            try:\n"
+      io << "                await ws.send_str(msg)\n"
+      io << "            except Exception:\n"
+      io << "                pass\n"
+      io << "\n"
+      io << "cable = CableServer()\n\n"
+
+      io << "async def cable_handler(request):\n"
+      io << "    ws = web.WebSocketResponse(protocols=['actioncable-v1-json'])\n"
+      io << "    await ws.prepare(request)\n"
+      io << "    await ws.send_str(json.dumps({'type': 'welcome'}))\n"
+      io << "    async def ping():\n"
+      io << "        try:\n"
+      io << "            while not ws.closed:\n"
+      io << "                await asyncio.sleep(3)\n"
+      io << "                if not ws.closed:\n"
+      io << "                    await ws.send_str(json.dumps({'type': 'ping', 'message': int(time.time())}))\n"
+      io << "        except Exception:\n"
+      io << "            pass\n"
+      io << "    ping_task = asyncio.create_task(ping())\n"
+      io << "    try:\n"
+      io << "        async for msg in ws:\n"
+      io << "            if msg.type == aiohttp.WSMsgType.TEXT:\n"
+      io << "                data = json.loads(msg.data)\n"
+      io << "                if data.get('command') == 'subscribe':\n"
+      io << "                    identifier = data['identifier']\n"
+      io << "                    id_data = json.loads(identifier)\n"
+      io << "                    signed = id_data.get('signed_stream_name', '')\n"
+      io << "                    channel = json.loads(base64.b64decode(signed.split('--')[0]))\n"
+      io << "                    cable.subscribe(ws, channel, identifier)\n"
+      io << "                    await ws.send_str(json.dumps({'type': 'confirm_subscription', 'identifier': identifier}))\n"
+      io << "    finally:\n"
+      io << "        ping_task.cancel()\n"
+      io << "        cable.unsubscribe_all(ws)\n"
+      io << "    return ws\n\n"
 
       # DB init
       io << "def init_db():\n"
@@ -682,6 +738,8 @@ module Railcar
         end
       end
 
+      # ActionCable WebSocket endpoint
+      io << "    application.router.add_get('/cable', cable_handler)\n"
       # Static files
       io << "    application.router.add_static('/static', os.path.join(os.path.dirname(__file__), 'static'))\n"
       io << "    return application\n\n"
@@ -715,23 +773,87 @@ module Railcar
       puts "  pyproject.toml"
     end
 
-    # ── Copy static assets ──
+    # ── Static assets: Tailwind CSS + Turbo.js ──
 
     private def copy_static_assets(output_dir : String)
       static_dir = File.join(output_dir, "static")
       Dir.mkdir_p(static_dir)
+      generate_tailwind(output_dir, static_dir)
+      copy_turbo_js(static_dir)
+    end
 
-      # Copy CSS
-      css_source = File.join(rails_dir, "app/assets/stylesheets/application.tailwind.css")
-      if File.exists?(css_source)
-        File.copy(css_source, File.join(static_dir, "app.css"))
+    private def generate_tailwind(output_dir : String, static_dir : String)
+      File.write(File.join(output_dir, "input.css"), "@import \"tailwindcss\";\n")
+
+      tailwind = find_tailwind
+      unless tailwind
+        puts "  tailwind: not found (skipping CSS generation)"
+        puts "  Install: gem install tailwindcss-rails"
+        return
       end
 
-      # Copy turbo.js from railcar's public assets
-      turbo_source = File.join(File.dirname(__FILE__), "..", "..", "public", "turbo.min.js")
-      if File.exists?(turbo_source)
-        File.copy(turbo_source, File.join(static_dir, "turbo.min.js"))
+      err_io = IO::Memory.new
+      result = Process.run(tailwind,
+        ["--input", "input.css", "--output", "static/app.css", "--minify"],
+        chdir: output_dir,
+        output: Process::Redirect::Close,
+        error: err_io)
+
+      if result.success?
+        size = File.size(File.join(static_dir, "app.css"))
+        puts "  static/app.css (#{size} bytes)"
+      else
+        puts "  tailwind: build failed"
+        err_msg = err_io.to_s.strip
+        puts "  #{err_msg}" unless err_msg.empty?
       end
+    end
+
+    private def find_tailwind : String?
+      path = Process.find_executable("tailwindcss")
+      return path if path
+
+      begin
+        output = IO::Memory.new
+        result = Process.run("ruby",
+          ["-e", "puts Gem::Specification.find_by_name('tailwindcss-rails').bin_dir + '/tailwindcss'"],
+          output: output, error: Process::Redirect::Close)
+        if result.success?
+          bin = output.to_s.strip
+          return bin if File.exists?(bin)
+        end
+      rescue
+      end
+      nil
+    end
+
+    private def copy_turbo_js(static_dir : String)
+      turbo_js = find_turbo_js
+      unless turbo_js
+        puts "  turbo.min.js: not found (skipping)"
+        puts "  Install: gem install turbo-rails"
+        return
+      end
+
+      dst = File.join(static_dir, "turbo.min.js")
+      File.write(dst, File.read(turbo_js))
+      size = File.size(dst)
+      puts "  static/turbo.min.js (#{size} bytes)"
+    end
+
+    private def find_turbo_js : String?
+      begin
+        output = IO::Memory.new
+        result = Process.run("ruby",
+          ["-e", "puts Gem::Specification.find_by_name('turbo-rails').gem_dir + '/app/assets/javascripts/turbo.min.js'"],
+          output: output, error: Process::Redirect::Close)
+        if result.success?
+          path = output.to_s.strip
+          return path if File.exists?(path)
+        end
+      rescue
+      end
+      nil
     end
 
     # ── Layer 3: Tests ──
