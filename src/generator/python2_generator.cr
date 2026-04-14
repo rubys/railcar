@@ -20,6 +20,11 @@ require "./source_parser"
 require "../semantic"
 require "../filters/model_boilerplate_python"
 require "../filters/broadcasts_to"
+require "../filters/controller_boilerplate_python"
+require "../filters/instance_var_to_local"
+require "../filters/params_expect"
+require "../filters/respond_to_html"
+require "../filters/strong_params"
 require "../filters/minitest_to_pytest"
 require "../../tools/cr2py/src/py_ast"
 require "../../tools/cr2py/src/cr2py"
@@ -60,7 +65,9 @@ module Railcar
       # Emit
       nodes = extract_railcar_nodes(typed_ast)
       emit_runtime(nodes, output_dir, emitter, serializer, filters)
+      emit_helpers(nodes, output_dir, emitter, serializer, filters)
       emit_models(nodes, output_dir, emitter, serializer, filters)
+      emit_controllers(output_dir, emitter, serializer, filters)
       emit_tests(output_dir, emitter, serializer, filters)
 
       # __init__.py files
@@ -101,8 +108,9 @@ module Railcar
     private def compile(model_asts : Array(Crystal::ASTNode)) : {Crystal::Program?, Crystal::ASTNode?}
       location = Crystal::Location.new("src/app.cr", 1, 1)
 
-      runtime_path = File.join(File.dirname(__FILE__), "..", "runtime", "python", "base.cr")
-      runtime_source = File.read(runtime_path)
+      runtime_dir = File.join(File.dirname(__FILE__), "..", "runtime", "python")
+      runtime_source = File.read(File.join(runtime_dir, "base.cr"))
+      helpers_source = File.read(File.join(runtime_dir, "helpers.cr"))
 
       source = String.build do |io|
         # DB shard stub
@@ -117,9 +125,11 @@ module Railcar
         io << "  end\n"
         io << "end\n\n"
         # Runtime source (strip requires)
-        runtime_source.lines.each do |line|
-          next if line.strip.starts_with?("require ")
-          io << line << "\n"
+        [runtime_source, helpers_source].each do |src|
+          src.lines.each do |line|
+            next if line.strip.starts_with?("require ")
+            io << line << "\n"
+          end
         end
       end
 
@@ -233,6 +243,67 @@ module Railcar
 
     # ── Emit models ──
 
+    # ── Emit helpers ──
+
+    private def emit_helpers(nodes : Array(Crystal::ASTNode), output_dir : String,
+                             emitter : Cr2Py::Emitter,
+                             serializer : PyAST::Serializer,
+                             filters : Tuple)
+      # Collect module-level Defs and Assigns (helpers, constants)
+      helper_nodes = nodes.select { |n| n.is_a?(Crystal::Def) || n.is_a?(Crystal::Assign) }
+
+      # Add route helpers (generated from app metadata)
+      route_helpers = build_route_helpers
+      helper_nodes.concat(route_helpers)
+
+      return if helper_nodes.empty?
+      emit_file(helper_nodes, "helpers.py", output_dir, emitter, serializer, filters)
+    end
+
+    private def build_route_helpers : Array(Crystal::ASTNode)
+      helpers = [] of Crystal::ASTNode
+      app.models.each_key do |name|
+        singular = Inflector.underscore(name)
+        plural = Inflector.pluralize(singular)
+
+        helpers << Crystal::Parser.parse(
+          "def #{singular}_path(model) : String\n  \"/#{plural}/\#{model.id}\"\nend"
+        )
+        helpers << Crystal::Parser.parse(
+          "def edit_#{singular}_path(model) : String\n  \"/#{plural}/\#{model.id}/edit\"\nend"
+        )
+        helpers << Crystal::Parser.parse(
+          "def #{plural}_path : String\n  \"/#{plural}\"\nend"
+        )
+        helpers << Crystal::Parser.parse(
+          "def new_#{singular}_path : String\n  \"/#{plural}/new\"\nend"
+        )
+      end
+
+      # Nested resource helpers
+      app.models.each do |name, model|
+        model.associations.each do |assoc|
+          if assoc.kind == :has_many
+            child = Inflector.singularize(assoc.name)
+            child_plural = assoc.name
+            parent = Inflector.underscore(name)
+            parent_plural = Inflector.pluralize(parent)
+
+            helpers << Crystal::Parser.parse(
+              "def #{parent}_#{child_plural}_path(parent) : String\n  \"/#{parent_plural}/\#{parent.id}/#{child_plural}\"\nend"
+            )
+            helpers << Crystal::Parser.parse(
+              "def #{parent}_#{child}_path(parent, child) : String\n  \"/#{parent_plural}/\#{parent.id}/#{child_plural}/\#{child.id}\"\nend"
+            )
+          end
+        end
+      end
+
+      helpers
+    end
+
+    # ── Emit models ──
+
     private def emit_models(nodes : Array(Crystal::ASTNode), output_dir : String,
                             emitter : Cr2Py::Emitter,
                             serializer : PyAST::Serializer,
@@ -251,6 +322,78 @@ module Railcar
       end
 
       File.write(File.join(models_dir, "__init__.py"), "")
+    end
+
+    # ── Emit controllers ──
+
+    private def emit_controllers(output_dir : String,
+                                 emitter : Cr2Py::Emitter,
+                                 serializer : PyAST::Serializer,
+                                 filters : Tuple)
+      controllers_dir = File.join(output_dir, "controllers")
+      Dir.mkdir_p(controllers_dir)
+
+      app.controllers.each do |info|
+        controller_name = Inflector.underscore(info.name).chomp("_controller")
+        source_path = File.join(rails_dir, "app/controllers/#{controller_name}_controller.rb")
+        next unless File.exists?(source_path)
+
+        model_name = Inflector.classify(Inflector.singularize(controller_name))
+        nested_parent = find_nested_parent(controller_name)
+
+        # Parse and filter
+        ast = SourceParser.parse(source_path)
+        ast = ast.transform(InstanceVarToLocal.new)
+        ast = ast.transform(ParamsExpect.new)
+        ast = ast.transform(RespondToHTML.new)
+        ast = ast.transform(StrongParams.new)
+        ast = ast.transform(ControllerBoilerplatePython.new(controller_name, model_name, nested_parent))
+
+        # Emit
+        py_nodes = emitter.to_nodes(ast)
+        db_filter, dunder_filter, return_filter = filters
+        py_nodes = return_filter.transform(py_nodes)
+
+        mod = PyAST::Module.new(py_nodes)
+        content = serializer.serialize(mod)
+
+        # Add imports
+        imports = String.build do |io|
+          io << "from aiohttp import web\n"
+          io << "from models.#{Inflector.underscore(model_name)} import #{model_name}\n"
+          io << "from helpers import *\n"
+          # Add nested model imports
+          if nested_parent
+            parent_model = Inflector.classify(nested_parent)
+            io << "from models.#{Inflector.underscore(parent_model)} import #{parent_model}\n"
+          end
+          info.actions.each do |action|
+            # Check if action references other models
+          end
+          io << "\n"
+        end
+
+        out_path = File.join(controllers_dir, "#{controller_name}.py")
+        File.write(out_path, imports + content)
+        puts "  controllers/#{controller_name}.py"
+      end
+
+      File.write(File.join(controllers_dir, "__init__.py"), "")
+    end
+
+    private def find_nested_parent(controller_name : String) : String?
+      app.routes.routes.each do |route|
+        if route.controller == Inflector.pluralize(controller_name) && route.path.includes?(":")
+          parts = route.path.split("/").reject(&.empty?)
+          parts.each_with_index do |part, i|
+            if part.starts_with?(":") && i > 0
+              parent = Inflector.singularize(parts[i - 1])
+              return parent if parent != controller_name
+            end
+          end
+        end
+      end
+      nil
     end
 
     # ── Layer 3: Tests ──
