@@ -41,8 +41,9 @@ module Cr2Py
         # Already has return
       when PyAST::Statement
         code = last.code
-        # Don't return assignments (but allow comparisons with ==)
-        unless code.includes?(" = ") && !code.includes?(" == ")
+        # Don't return assignments, raise statements, or pass
+        unless (code.includes?(" = ") && !code.includes?(" == ")) ||
+               code.starts_with?("raise ") || code == "pass"
           body[-1] = PyAST::Return.new(code)
         end
       when PyAST::If

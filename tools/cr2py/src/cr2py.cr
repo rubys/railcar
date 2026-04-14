@@ -26,6 +26,7 @@ module Cr2Py
   PYTHON_BUILTINS = %w[print len int str float bool isinstance hasattr type
     range enumerate zip sorted reversed list dict set tuple super abs min max
     sum any all map filter open getattr setattr delattr repr hash input
+    web
     round format]
 
   class Emitter
@@ -962,7 +963,11 @@ module Cr2Py
           "#{prefix}.#{method_name}(#{emit_args(args, named)})"
         end
       else
-        "#{method_name}(#{emit_args(args, named)})"
+        if args.empty? && named.nil? && PYTHON_BUILTINS.includes?(method_name)
+          method_name  # Module or builtin reference, no parens
+        else
+          "#{method_name}(#{emit_args(args, named)})"
+        end
       end
     end
 
@@ -1133,7 +1138,7 @@ module Cr2Py
     private def python_name(name : String) : String
       result = case name
                when "initialize" then "__init__"
-               when "new"        then "__init__"
+               when "new"        then @in_class ? "__init__" : "new"
                when "nil?"       then "is_none"
                when "[]?"        then "get"
                when "puts"       then "print"
