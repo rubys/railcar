@@ -35,6 +35,8 @@ module Railcar
         when Crystal::Call
           if expr.name == "before_action"
             parse_before_action(expr, before_actions)
+          elsif expr.name == "private" && expr.args.empty?
+            in_private = true
           end
         when Crystal::Def
           if in_private
@@ -48,18 +50,22 @@ module Railcar
         end
       end
 
-      # Transform public actions
+      # Transform public actions (skip private methods and Call nodes)
       actions = [] of Crystal::ASTNode
-      in_private = false
+      in_private = false  # reset for second pass
       exprs.each do |expr|
         case expr
         when Crystal::Call
-          next  # skip before_action declarations
+          if expr.as(Crystal::Call).name == "private"
+            in_private = true
+          end
+          next  # skip before_action and other declarations
         when Crystal::VisibilityModifier
           in_private = true
           next
         when Crystal::Def
           next if in_private
+          next if private_methods.has_key?(expr.name)
           actions << transform_action(expr, before_actions, private_methods)
         end
       end
@@ -107,7 +113,15 @@ module Railcar
 
       # For create/update/destroy: parse form data
       if %w[create update destroy].includes?(action_name)
-        stmts << Crystal::Parser.parse("if data.nil?\n  data = parse_form(request.read)\nend")
+        # if data is None: data = parse_form(request.read)
+        stmts << Crystal::If.new(
+          Crystal::Call.new(Crystal::Var.new("data"), "nil?"),
+          Crystal::Assign.new(
+            Crystal::Var.new("data"),
+            Crystal::Call.new(nil, "parse_form",
+              [Crystal::Call.new(Crystal::Var.new("request"), "read")] of Crystal::ASTNode)
+          )
+        )
       end
 
       # Inline before_action callbacks
@@ -169,12 +183,21 @@ module Railcar
     end
 
     private def transform_before_action_stmt(node : Crystal::ASTNode, singular : String) : Crystal::ASTNode
-      # article = Article.find(id) → article = Article.find(int(request.match_info['id']))
+      # article = Article.find(id) → article = Model.find(int(request.match_info['id']))
       if node.is_a?(Crystal::Assign)
         value = node.value
         if value.is_a?(Crystal::Call) && value.name == "find"
-          return Crystal::Parser.parse(
-            "#{singular} = #{@model_name}.find(int(request.match_info[\"id\"]))"
+          return Crystal::Assign.new(
+            Crystal::Var.new(singular),
+            Crystal::Call.new(Crystal::Path.new(@model_name), "find",
+              [Crystal::Call.new(nil, "int",
+                [Crystal::Call.new(
+                  Crystal::Call.new(Crystal::Var.new("request"), "match_info"),
+                  "[]",
+                  [Crystal::StringLiteral.new("id")] of Crystal::ASTNode
+                )] of Crystal::ASTNode
+              )] of Crystal::ASTNode
+            )
           )
         end
       end
@@ -187,14 +210,21 @@ module Railcar
       when Crystal::Call
         name = node.name
 
-        if name == "redirect_to"
+        if name == "update" && node.obj
+          # article.update(params) → update attributes and save
+          stmts << Crystal::Call.new(node.obj.not_nil!, "update",
+            [Crystal::Call.new(nil, "extract_model_params",
+              [Crystal::Var.new("data"),
+               Crystal::StringLiteral.new(singular)] of Crystal::ASTNode
+            )] of Crystal::ASTNode)
+          return
+        elsif name == "redirect_to"
           stmts << transform_redirect(node, singular, plural)
         elsif name == "render"
           stmts << transform_render(node, action_name, singular)
         elsif name == "destroy!" || name == "destroy"
-          # article.destroy! → article.destroy()
           if obj = node.obj
-            stmts << Crystal::Parser.parse("#{obj}.destroy")
+            stmts << Crystal::Call.new(obj, "destroy")
           end
         else
           stmts << node
@@ -237,14 +267,27 @@ module Railcar
         if node.value.is_a?(Crystal::Call)
           call = node.value.as(Crystal::Call)
           if call.name == "new" && call.obj.to_s == @model_name
-            # Article.new(extract_model_params(params, "article"))
-            # → Article(extract_model_params(data, "article"))
-            stmts << Crystal::Parser.parse(
-              "#{singular} = #{@model_name}.new(extract_model_params(data, \"#{singular}\"))"
-            )
+            if call.args.size > 0
+              # Article.new(extract_model_params(params, "article"))
+              # → article = Article(extract_model_params(data, "article"))
+              stmts << Crystal::Assign.new(
+                Crystal::Var.new(singular),
+                Crystal::Call.new(Crystal::Path.new(@model_name), "new",
+                  [Crystal::Call.new(nil, "extract_model_params",
+                    [Crystal::Var.new("data"),
+                     Crystal::StringLiteral.new(singular)] of Crystal::ASTNode
+                  )] of Crystal::ASTNode)
+              )
+            else
+              # Article.new → Article()
+              stmts << Crystal::Assign.new(
+                Crystal::Var.new(singular),
+                Crystal::Call.new(Crystal::Path.new(@model_name), "new")
+              )
+            end
           elsif call.name == "includes" || call.name == "order"
             # Article.includes(:comments).order(...) → Article.all()
-            stmts << Crystal::Parser.parse("#{node.target} = #{@model_name}.all")
+            stmts << Crystal::Assign.new(node.target, Crystal::Call.new(Crystal::Path.new(@model_name), "all"))
           else
             stmts << node
           end
@@ -263,17 +306,21 @@ module Railcar
         target = args[0]
         target_str = target.to_s
 
-        path = if target_str == "#{plural}_path" || target_str == "#{plural}_path()"
-                 "#{plural}_path()"
-               elsif target_str == singular || target_str.includes?("@")
-                 "#{singular}_path(#{singular})"
-               else
-                 target_str
-               end
+        path_call = if target_str == "#{plural}_path" || target_str == "#{plural}_path()"
+                      Crystal::Call.new(nil, "#{plural}_path")
+                    elsif target_str == singular || target_str.includes?("@")
+                      Crystal::Call.new(nil, "#{singular}_path", [Crystal::Var.new(singular)] of Crystal::ASTNode)
+                    else
+                      target
+                    end
 
-        Crystal::Parser.parse("raise web.HTTPFound(#{path})")
+        Crystal::Call.new(nil, "raise",
+          [Crystal::Call.new(Crystal::Path.new(["web", "HTTPFound"]), "new",
+            [path_call] of Crystal::ASTNode)] of Crystal::ASTNode)
       else
-        Crystal::Parser.parse("raise web.HTTPFound(\"/#{plural}\")")
+        Crystal::Call.new(nil, "raise",
+          [Crystal::Call.new(Crystal::Path.new(["web", "HTTPFound"]), "new",
+            [Crystal::StringLiteral.new("/#{plural}")] of Crystal::ASTNode)] of Crystal::ASTNode)
       end
     end
 
@@ -284,29 +331,44 @@ module Railcar
                    action_name
                  end
 
-      status = "200"
+      status = 200
       if named = node.named_args
         named.each do |na|
           if na.name == "status"
             val = na.value.to_s.strip(':').strip('"')
             status = case val
-                     when "unprocessable_entity" then "422"
-                     when "created"              then "201"
-                     when "ok"                   then "200"
-                     else val
+                     when "unprocessable_entity" then 422
+                     when "created"              then 201
+                     when "ok"                   then 200
+                     else 200
                      end
           end
         end
       end
 
-      Crystal::Parser.parse(
-        "return web.Response(text: layout(render_#{template}(#{singular}: #{singular})), content_type: \"text/html\", status: #{status})"
-      )
+      build_response(template, singular, status)
     end
 
     private def render_template(action_name : String, singular : String) : Crystal::ASTNode
-      Crystal::Parser.parse(
-        "return web.Response(text: layout(render_#{action_name}(#{singular}: #{singular})), content_type: \"text/html\")"
+      build_response(action_name, singular, 200)
+    end
+
+    private def build_response(template : String, singular : String, status : Int32) : Crystal::ASTNode
+      render_call = Crystal::Call.new(nil, "render_#{template}",
+        named_args: [Crystal::NamedArgument.new(singular, Crystal::Var.new(singular))])
+      layout_call = Crystal::Call.new(nil, "layout", [render_call] of Crystal::ASTNode)
+
+      response_args = [
+        Crystal::NamedArgument.new("text", layout_call),
+        Crystal::NamedArgument.new("content_type", Crystal::StringLiteral.new("text/html")),
+      ]
+      if status != 200
+        response_args << Crystal::NamedArgument.new("status", Crystal::NumberLiteral.new(status.to_s))
+      end
+
+      Crystal::Return.new(
+        Crystal::Call.new(Crystal::Path.new(["web", "Response"]), "new",
+          named_args: response_args)
       )
     end
 
