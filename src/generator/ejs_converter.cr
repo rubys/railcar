@@ -121,7 +121,10 @@ module Railcar
       if actual_expr.is_a?(Crystal::Call) && actual_expr.block
         emit_call_with_block(actual_expr, io)
       else
-        io << "<%= " << to_js(actual_expr) << " %>"
+        js = to_js(actual_expr)
+        # Use <%- for includes (unescaped HTML)
+        tag = js.starts_with?("include(") ? "<%-" : "<%="
+        io << "#{tag} " << js << " %>"
       end
     end
 
@@ -482,10 +485,27 @@ module Railcar
         return "helpers.#{ts_name}(#{args.join(", ")})"
       end
 
-      # render_*_partial → renderPartial()
+      # render_*_partial → EJS include
       if !obj && name.starts_with?("render_") && name.ends_with?("_partial")
-        ts_name = name.gsub(/_([a-z])/) { |_, m| m[1].upcase }
-        return "#{ts_name}(#{args.join(", ")})"
+        partial_name = name.lchop("render_").chomp("_partial")
+        var_name = args.last? || partial_name
+
+        # Check if partial is in the same controller's views or a different one.
+        # Model partials (article, comment) go in their model's view dir.
+        # Non-model partials (form) are local to the current controller.
+        controller_plural = Inflector.pluralize(@controller)
+        partial_model_plural = Inflector.pluralize(partial_name)
+        model_name = Inflector.classify(partial_name)
+        is_model_partial = partial_name != "form" && partial_model_plural != controller_plural
+
+        if is_model_partial
+          partial_path = "../#{partial_model_plural}/_#{partial_name}"
+        else
+          # Local partial in same directory
+          partial_path = "./_#{partial_name}"
+        end
+
+        return "include(\"#{partial_path}\", { #{partial_name}: #{var_name}, helpers })"
       end
 
       # Method calls on objects

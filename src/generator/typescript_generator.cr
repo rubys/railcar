@@ -239,6 +239,15 @@ module Railcar
       io << HELPERS_SOURCE
       io << "\n"
 
+      # Build helpers object for EJS template locals
+      helper_names = %w[linkTo buttonTo turboStreamFrom turboCableStreamTag truncate domId pluralize formWithOpenTag formSubmitTag parseForm formValue extractModelParams encodeParams]
+      app.routes.helpers.each do |helper|
+        ts_name = helper.name.gsub(/_([a-z])/) { |_, m| m[1].upcase } + "Path"
+        helper_names << ts_name
+      end
+      io << "// Helpers object for EJS template locals\n"
+      io << "export const helpers = { #{helper_names.join(", ")} } as Record<string, unknown>;\n\n"
+
       File.write(File.join(output_dir, "helpers.ts"), io.to_s)
       puts "  helpers.ts"
     end
@@ -265,6 +274,8 @@ module Railcar
       const signed = Buffer.from(JSON.stringify(channel)).toString("base64");
       return `<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="${signed}"></turbo-cable-stream-source>`;
     }
+
+    export const turboCableStreamTag = turboStreamFrom;
 
     export function truncate(text: string | null, opts: { length?: number } = {}): string {
       if (!text) return "";
@@ -319,10 +330,18 @@ module Railcar
       return `<input type="submit" value="${action} ${name}"${cls}>`;
     }
 
-    export function parseForm(body: string): Record<string, string[]> {
+    export function parseForm(body: unknown): Record<string, string[]> {
       const result: Record<string, string[]> = {};
       if (!body) return result;
-      for (const pair of body.split("&")) {
+      // Express urlencoded parser returns an object; raw string from supertest
+      if (typeof body === "object") {
+        for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
+          result[key] = [String(value)];
+        }
+        return result;
+      }
+      const str = String(body);
+      for (const pair of str.split("&")) {
         const [key, value] = pair.split("=").map(decodeURIComponent);
         if (!result[key]) result[key] = [];
         result[key].push(value ?? "");
@@ -363,17 +382,27 @@ module Railcar
     const viewsDir = path.join(__helpers_dir, "views");
     const layoutPath = path.join(viewsDir, "layouts", "application.ejs");
 
+    import fs from "fs";
+
     export function renderView(res: Response, template: string, data: unknown, status: number = 200): void {
       const templatePath = path.join(viewsDir, template + ".ejs");
-      const self = exports;
-      const locals = { ...self, data, [template.split("/").pop()!.replace(/^_/, "")]: data };
+      const varName = template.split("/").pop()!.replace(/^_/, "");
+      // Make data available under multiple names: the template-derived name,
+      // and common singular/plural forms for the controller's model
+      const plural = template.split("/")[0];
+      const singular = plural.endsWith("s") ? plural.slice(0, -1) : plural;
+      const locals: Record<string, unknown> = {
+        ...helpers, helpers,
+        [varName]: data, [singular]: data, [plural]: data,
+        notice: null, flash: {},
+      };
       const content = ejs.render(
-        require("fs").readFileSync(templatePath, "utf-8"),
+        fs.readFileSync(templatePath, "utf-8"),
         locals,
         { filename: templatePath }
       );
       const html = ejs.render(
-        require("fs").readFileSync(layoutPath, "utf-8"),
+        fs.readFileSync(layoutPath, "utf-8"),
         { content, title: (locals as Record<string, unknown>).title || "Blog" },
         { filename: layoutPath }
       );
@@ -722,6 +751,8 @@ module Railcar
           "@types/better-sqlite3": "^7.6.0",
           "@types/ejs": "^3.1.0",
           "@types/express": "^5.0.0",
+          "@types/supertest": "^6.0.0",
+          "supertest": "^7.0.0",
           "tsx": "^4.0.0",
           "typescript": "^5.0.0"
         }
