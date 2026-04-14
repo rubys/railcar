@@ -14,8 +14,10 @@ module Railcar
     getter controller_name : String
     getter model_name : String
     getter nested_parent : String?
+    getter extracted_before_actions : Array(BeforeAction)
 
-    def initialize(@controller_name, @model_name, @nested_parent = nil)
+    def initialize(@controller_name, @model_name, @nested_parent = nil,
+                   @extracted_before_actions = [] of BeforeAction)
     end
 
     def transform(node : Crystal::ClassDef) : Crystal::ASTNode
@@ -25,17 +27,28 @@ module Railcar
               else [body]
               end
 
-      # Collect before_action callbacks and private methods
+      # Build before_actions lookup from extracted ControllerInfo
       before_actions = {} of String => Array(String)
+      @extracted_before_actions.each do |ba|
+        if only = ba.only
+          only.each do |action|
+            before_actions[action] ||= [] of String
+            before_actions[action] << ba.method_name
+          end
+        else
+          before_actions["*"] ||= [] of String
+          before_actions["*"] << ba.method_name
+        end
+      end
+
+      # Collect private methods from AST (needed for inlining)
       private_methods = {} of String => Crystal::Def
       in_private = false
 
       exprs.each do |expr|
         case expr
         when Crystal::Call
-          if expr.name == "before_action"
-            parse_before_action(expr, before_actions)
-          elsif expr.name == "private" && expr.args.empty?
+          if expr.name == "private" && expr.args.empty?
             in_private = true
           end
         when Crystal::Def
@@ -75,33 +88,6 @@ module Railcar
 
     def transform(node : Crystal::ASTNode) : Crystal::ASTNode
       super
-    end
-
-    private def parse_before_action(call : Crystal::Call, result : Hash(String, Array(String)))
-      return unless call.args.size > 0
-      method_name = call.args[0].to_s.strip(':').strip('"')
-
-      only = [] of String
-      if named = call.named_args
-        named.each do |na|
-          if na.name == "only" && na.value.is_a?(Crystal::ArrayLiteral)
-            na.value.as(Crystal::ArrayLiteral).elements.each do |el|
-              only << el.to_s.strip(':').strip('"')
-            end
-          end
-        end
-      end
-
-      if only.empty?
-        # Applies to all actions — use "*" as wildcard
-        result["*"] ||= [] of String
-        result["*"] << method_name
-      else
-        only.each do |action|
-          result[action] ||= [] of String
-          result[action] << method_name
-        end
-      end
     end
 
     private def transform_action(defn : Crystal::Def,

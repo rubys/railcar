@@ -11,6 +11,7 @@ require "compiler/crystal/syntax"
 require "../generator/inflector"
 require "../generator/schema_extractor"
 require "../generator/model_extractor"
+require "./rails_dsl"
 
 module Railcar
   class ModelBoilerplate < Crystal::Transformer
@@ -68,14 +69,13 @@ module Railcar
       when Crystal::Expressions
         body.expressions.each do |expr|
           next if expr.is_a?(Crystal::Nop)
-          next if is_association_call?(expr)
-          next if is_validates_call?(expr)
+          next if Railcar.rails_model_dsl?(expr)
           block_stmts << expr
         end
       when Crystal::Nop
         # empty
       else
-        block_stmts << body if body && !is_association_call?(body) && !is_validates_call?(body)
+        block_stmts << body if body && !Railcar.rails_model_dsl?(body)
       end
 
       # Add validations from metadata
@@ -178,14 +178,6 @@ module Railcar
         body: body,
         return_type: Crystal::Path.new("String")
       )
-    end
-
-    private def is_association_call?(node : Crystal::ASTNode) : Bool
-      node.is_a?(Crystal::Call) && {"has_many", "has_one", "belongs_to"}.includes?(node.as(Crystal::Call).name)
-    end
-
-    private def is_validates_call?(node : Crystal::ASTNode) : Bool
-      node.is_a?(Crystal::Call) && node.as(Crystal::Call).name == "validates"
     end
 
     private def build_association(assoc : Association) : Crystal::Call

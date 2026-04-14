@@ -36,12 +36,12 @@ require "../filters/params_expect"
 require "../filters/respond_to_html"
 require "../filters/strong_params"
 require "../filters/minitest_to_pytest"
-require "../../tools/cr2py/src/py_ast"
-require "../../tools/cr2py/src/cr2py"
-require "../../tools/cr2py/src/filters/db_filter"
-require "../../tools/cr2py/src/filters/pyast_dunder_filter"
-require "../../tools/cr2py/src/filters/pyast_return_filter"
-require "../../tools/cr2py/src/filters/pyast_async_filter"
+require "../emitter/python/py_ast"
+require "../emitter/python/cr2py"
+require "../emitter/python/filters/db_filter"
+require "../emitter/python/filters/pyast_dunder_filter"
+require "../emitter/python/filters/pyast_return_filter"
+require "../emitter/python/filters/pyast_async_filter"
 
 module Railcar
   class Python2Generator
@@ -411,7 +411,7 @@ module Railcar
         ast = ast.transform(ParamsExpect.new)
         ast = ast.transform(RespondToHTML.new)
         ast = ast.transform(StrongParams.new)
-        ast = ast.transform(ControllerBoilerplatePython.new(controller_name, model_name, nested_parent))
+        ast = ast.transform(ControllerBoilerplatePython.new(controller_name, model_name, nested_parent, info.before_actions))
 
         # Emit
         py_nodes = emitter.to_nodes(ast)

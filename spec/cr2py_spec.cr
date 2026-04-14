@@ -1,9 +1,9 @@
 require "spec"
 require "compiler/crystal/syntax"
 require "../src/semantic"
-require "../tools/cr2py/src/py_ast"
-require "../tools/cr2py/src/filters/db_filter"
-require "../tools/cr2py/src/cr2py"
+require "../src/emitter/python/py_ast"
+require "../src/emitter/python/filters/db_filter"
+require "../src/emitter/python/cr2py"
 require "../src/generator/python2_generator"
 
 # Helper: parse Crystal code and get the AST

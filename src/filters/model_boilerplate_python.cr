@@ -24,6 +24,7 @@ require "compiler/crystal/syntax"
 require "../generator/inflector"
 require "../generator/schema_extractor"
 require "../generator/model_extractor"
+require "./rails_dsl"
 
 module Railcar
   class ModelBoilerplatePython < Crystal::Transformer
@@ -77,13 +78,13 @@ module Railcar
       when Crystal::Expressions
         body.expressions.each do |expr|
           next if expr.is_a?(Crystal::Nop)
-          next if is_rails_dsl_call?(expr)
+          next if Railcar.rails_model_dsl?(expr)
           class_body << expr
         end
       when Crystal::Nop
         # empty
       else
-        if body && !is_rails_dsl_call?(body)
+        if body && !Railcar.rails_model_dsl?(body)
           class_body << body
         end
       end
@@ -185,19 +186,5 @@ module Railcar
       Crystal::Parser.parse("def destroy : Bool\n#{stmts.join("\n")}\nend").as(Crystal::Def)
     end
 
-    private def is_rails_dsl_call?(node : Crystal::ASTNode) : Bool
-      return false unless node.is_a?(Crystal::Call)
-      call = node.as(Crystal::Call)
-      # Skip any class-level call (no receiver) that isn't a method definition
-      # These are Rails DSL calls: has_many, validates, broadcasts_to, callbacks, etc.
-      return false if call.obj  # has a receiver — it's a method call, keep it
-      name = call.name
-      {"has_many", "has_one", "belongs_to", "validates",
-       "broadcasts_to", "broadcasts",
-       "after_save", "after_destroy", "after_create", "after_update",
-       "after_create_commit", "after_update_commit", "after_destroy_commit",
-       "before_save", "before_destroy", "before_create", "before_update",
-       "scope", "enum", "delegate", "accepts_nested_attributes_for"}.includes?(name)
-    end
   end
 end

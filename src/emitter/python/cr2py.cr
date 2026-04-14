@@ -6,7 +6,7 @@
 #   to_nodes(node) — statement context, returns Array(PyAST::Node)
 #   to_expr(node)  — expression context, returns String
 
-require "../../../src/semantic"
+require "../../semantic"
 require "./py_ast"
 require "./filters/db_filter"
 require "./type_index"
