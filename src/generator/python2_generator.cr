@@ -845,6 +845,12 @@ module Railcar
         end
       end
 
+      # Root route
+      if rc = app.routes.root_controller
+        ra = app.routes.root_action || "index"
+        io << "    application.router.add_get('/', #{rc}_controller.#{ra})\n"
+      end
+
       # ActionCable WebSocket endpoint
       io << "    application.router.add_get('/cable', cable_handler)\n"
       # Static files
