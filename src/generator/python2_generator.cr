@@ -24,6 +24,7 @@ require "../filters/controller_boilerplate_python"
 require "./erb_compiler"
 require "../filters/instance_var_to_local"
 require "../filters/view_cleanup"
+require "../filters/buf_to_interpolation"
 require "../filters/params_expect"
 require "../filters/respond_to_html"
 require "../filters/strong_params"
@@ -443,13 +444,13 @@ module Railcar
             ast = ast.transform(ViewCleanup.new)
             # Convert bare calls matching parameter names to Var nodes
             ast = ViewCleanup.calls_to_vars(ast, [singular, "_buf", "notice", "flash"])
+            ast = ast.transform(BufToInterpolation.new)
 
-            # Wrap in a function (strip any remaining def render wrapper)
-            body = if ast.is_a?(Crystal::Def) && ast.name == "render"
-                     ast.body
-                   else
-                     ast
-                   end
+            # Strip def render wrapper (kept for BufToInterpolation to process)
+            body = ast
+            while body.is_a?(Crystal::Def) && body.name == "render"
+              body = body.body
+            end
 
             arg = Crystal::Arg.new(singular)
             func_def = Crystal::Def.new(func_name, [arg] of Crystal::Arg,

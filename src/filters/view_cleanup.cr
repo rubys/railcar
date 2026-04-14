@@ -18,10 +18,11 @@ require "compiler/crystal/syntax"
 
 module Railcar
   class ViewCleanup < Crystal::Transformer
-    # Strip def render wrapper, return just the body
+    # Transform def render body but keep the wrapper (for BufToInterpolation)
     def transform(node : Crystal::Def) : Crystal::ASTNode
       if node.name == "render"
-        transform(node.body)
+        node.body = transform(node.body)
+        node
       else
         super
       end
