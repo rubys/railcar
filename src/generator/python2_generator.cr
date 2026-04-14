@@ -783,38 +783,17 @@ module Railcar
       io << "    ApplicationRecord.db = db\n"
       io << "    return db\n\n"
 
-      # Seed data
-      association_fields = Set(String).new
-      app.models.each do |_, model|
-        model.associations.each do |assoc|
-          association_fields << Inflector.singularize(assoc.name) if assoc.kind == :belongs_to
-        end
-      end
-
+      # Seed data — prefer db/seeds.rb, fall back to fixtures
+      seeds_path = File.join(rails_dir, "db/seeds.rb")
       io << "def seed_db():\n"
-      if app.fixtures.empty?
-        io << "    pass\n"
+      if File.exists?(seeds_path)
+        generate_seed_from_seeds_rb(io, seeds_path)
       else
-        app.fixtures.each do |fixture|
-          model_name = Inflector.classify(Inflector.singularize(fixture.name))
-          io << "    from models.#{Inflector.underscore(model_name)} import #{model_name}\n"
-          fixture.records.each do |record|
-            fields = record.fields.reject { |k, _| k == "id" }
-            field_strs = fields.map do |k, v|
-              if association_fields.includes?(k)
-                # article: one → article_id=articles_one.id
-                ref_var = "#{Inflector.pluralize(k)}_#{v}"
-                "#{k}_id=#{ref_var}.id"
-              else
-                "#{k}=#{v.inspect}"
-              end
-            end
-            var_name = "#{fixture.name}_#{record.label}"
-            io << "    #{var_name} = #{model_name}.create(#{field_strs.join(", ")})\n"
-          end
-        end
+        io << "    pass\n"
       end
       io << "\n"
+
+      # Wire broadcast partials
 
       # Route dispatch
       io << "def create_app():\n"
@@ -866,6 +845,105 @@ module Railcar
 
       File.write(File.join(output_dir, "app.py"), io.to_s)
       puts "  app.py"
+    end
+
+    # ── Seed data generators ──
+
+    private def generate_seed_from_seeds_rb(io : IO, seeds_path : String)
+      source = File.read(seeds_path)
+      ast = Prism.parse(source)
+      stmts = ast.statements
+      return unless stmts.is_a?(Prism::StatementsNode)
+
+      # Collect model imports
+      models_seen = Set(String).new
+      stmts.body.each do |stmt|
+        scan_for_models(stmt, models_seen)
+      end
+      models_seen.each do |name|
+        io << "    from models.#{Inflector.underscore(name)} import #{name}\n"
+      end
+
+      stmts.body.each do |stmt|
+        case stmt
+        when Prism::CallNode
+          next if stmt.name == "return" || stmt.name == "puts"
+        when Prism::IfNode, Prism::GenericNode
+          next
+        end
+        emit_seed_stmt(stmt, io, "    ")
+      end
+    end
+
+    private def scan_for_models(node : Prism::Node, models : Set(String))
+      case node
+      when Prism::ConstantReadNode
+        models << node.name
+      when Prism::CallNode
+        if recv = node.receiver
+          scan_for_models(recv, models)
+        end
+        node.arg_nodes.each { |a| scan_for_models(a, models) }
+      when Prism::LocalVariableWriteNode
+        scan_for_models(node.value, models)
+      end
+    end
+
+    private def emit_seed_stmt(node : Prism::Node, io : IO, indent : String)
+      case node
+      when Prism::LocalVariableWriteNode
+        io << indent << node.name << " = " << seed_expr(node.value) << "\n"
+      when Prism::CallNode
+        io << indent << seed_expr(node) << "\n"
+      end
+    end
+
+    private def seed_expr(node : Prism::Node) : String
+      case node
+      when Prism::CallNode
+        receiver = node.receiver
+        method = node.name
+        args = node.arg_nodes
+        recv_str = receiver ? seed_expr(receiver) : nil
+
+        case method
+        when "create!", "create"
+          kwargs = args.map { |a| seed_kwargs(a) }.join(", ")
+          recv_str ? "#{recv_str}.create(#{kwargs})" : "create(#{kwargs})"
+        else
+          if recv_str
+            arg_strs = args.map { |a| seed_expr(a) }
+            arg_strs.empty? ? "#{recv_str}.#{method}()" : "#{recv_str}.#{method}(#{arg_strs.join(", ")})"
+          else
+            arg_strs = args.map { |a| seed_expr(a) }
+            arg_strs.empty? ? method : "#{method}(#{arg_strs.join(", ")})"
+          end
+        end
+      when Prism::ConstantReadNode
+        node.name
+      when Prism::LocalVariableReadNode
+        node.name
+      when Prism::StringNode
+        node.value.inspect
+      when Prism::IntegerNode
+        node.value.to_s
+      when Prism::SymbolNode
+        node.value.inspect
+      else
+        "None"
+      end
+    end
+
+    private def seed_kwargs(node : Prism::Node) : String
+      case node
+      when Prism::KeywordHashNode
+        node.elements.compact_map do |el|
+          next nil unless el.is_a?(Prism::AssocNode) && el.key.is_a?(Prism::SymbolNode)
+          "#{el.key.as(Prism::SymbolNode).value}=#{seed_expr(el.value_node)}"
+        end.join(", ")
+      else
+        seed_expr(node)
+      end
     end
 
     # ── Emit pyproject.toml ──
