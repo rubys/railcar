@@ -286,6 +286,12 @@ module Railcar
         append_route_helpers(f)
         f << "\n# Python-specific helpers\n"
         f << "from urllib.parse import parse_qs, urlencode\n\n"
+        f << "def truncate(text, length=30, omission='...'):\n"
+        f << "    if text is None:\n"
+        f << "        return ''\n"
+        f << "    if len(text) <= length:\n"
+        f << "        return text\n"
+        f << "    return text[:length - len(omission)] + omission\n\n"
         f << "def parse_form(body_bytes):\n"
         f << "    return parse_qs(body_bytes.decode('utf-8'), keep_blank_values=True)\n\n"
         f << "def form_value(data, key):\n"
@@ -623,6 +629,13 @@ module Railcar
       io << "    return db\n\n"
 
       # Seed data
+      association_fields = Set(String).new
+      app.models.each do |_, model|
+        model.associations.each do |assoc|
+          association_fields << Inflector.singularize(assoc.name) if assoc.kind == :belongs_to
+        end
+      end
+
       io << "def seed_db():\n"
       if app.fixtures.empty?
         io << "    pass\n"
@@ -632,8 +645,17 @@ module Railcar
           io << "    from models.#{Inflector.underscore(model_name)} import #{model_name}\n"
           fixture.records.each do |record|
             fields = record.fields.reject { |k, _| k == "id" }
-            field_strs = fields.map { |k, v| "#{k}=#{v.inspect}" }
-            io << "    #{model_name}.create(#{field_strs.join(", ")})\n"
+            field_strs = fields.map do |k, v|
+              if association_fields.includes?(k)
+                # article: one → article_id=articles_one.id
+                ref_var = "#{Inflector.pluralize(k)}_#{v}"
+                "#{k}_id=#{ref_var}.id"
+              else
+                "#{k}=#{v.inspect}"
+              end
+            end
+            var_name = "#{fixture.name}_#{record.label}"
+            io << "    #{var_name} = #{model_name}.create(#{field_strs.join(", ")})\n"
           end
         end
       end

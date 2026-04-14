@@ -77,11 +77,6 @@ module Railcar
     ""
   end
 
-  def self.truncate(text : String, length : Int32 = 30) : String
-    if text.size <= length
-      text
-    else
-      text[0, length - 3] + "..."
-    end
-  end
+  # truncate is emitted as hand-written Python by the generator
+  # (Crystal's text[0, n] slice syntax doesn't transpile to Python)
 end
