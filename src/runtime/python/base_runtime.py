@@ -79,6 +79,12 @@ class CollectionProxy:
     def size(self):
         return len(self.all())
 
+    def __len__(self):
+        return self.size()
+
+    def __iter__(self):
+        return iter(self.all())
+
     def all(self):
         return self.model_class().where(**{self.foreign_key: self.owner.id})
 
@@ -92,7 +98,9 @@ class ApplicationRecord:
         super().__init_subclass__(**kwargs)
         MODEL_REGISTRY[cls.__name__] = cls
 
-    def __init__(self, **kwargs):
+    def __init__(self, attrs=None, **kwargs):
+        if attrs:
+            kwargs.update(attrs)
         self.id = kwargs.get('id')
         for col in self.__class__.COLUMNS:
             setattr(self, col, kwargs.get(col, self._default_for(col)))
@@ -205,6 +213,11 @@ class ApplicationRecord:
         result = cls.db.execute(
             f"SELECT COUNT(*) FROM {cls.TABLE}").fetchone()
         return result[0]
+
+    @classmethod
+    def last(cls):
+        records = cls.all()
+        return records[-1] if records else None
 
     @classmethod
     def create(cls, **kwargs):

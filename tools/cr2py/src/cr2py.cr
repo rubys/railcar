@@ -18,7 +18,7 @@ module Cr2Py
     lambda nonlocal not or pass raise return try while with yield]
 
   # Properties known to be attributes (not methods) on framework objects
-  KNOWN_PROPERTIES = %w[id match_info status headers body text method path]
+  KNOWN_PROPERTIES = %w[id errors persisted match_info status headers body text method path]
 
   PYTHON_BUILTINS = %w[print len int str float bool isinstance hasattr type
     range enumerate zip sorted reversed list dict set tuple super abs min max
@@ -868,6 +868,10 @@ module Cr2Py
         return "#{to_expr(obj)}[0]"
       end
       if name == "last" && args.empty? && obj
+        # Class.last → Class.last() (classmethod), collection.last → collection[-1]
+        if obj.is_a?(Crystal::Path)
+          return "#{to_expr(obj)}.last()"
+        end
         return "#{to_expr(obj)}[-1]"
       end
 
@@ -1212,18 +1216,41 @@ module Cr2Py
       end
 
       # Fallback: check model_columns for untyped variables (views, tests, helpers)
-      if !@model_columns.empty? && obj.is_a?(Crystal::Var)
-        model_name = obj.name.capitalize.gsub(/_([a-z])/) { $1.upcase }
-        if props = @model_columns[model_name]?
-          if props.includes?(name)
-            debug "#{ctx}: found model column #{name} on #{model_name}" if do_debug
-            return true
+      if !@model_columns.empty?
+        model_name = infer_model_name(obj)
+        if model_name
+          if props = @model_columns[model_name]?
+            if props.includes?(name)
+              debug "#{ctx}: found model column #{name} on #{model_name}" if do_debug
+              return true
+            end
           end
         end
       end
 
       debug "#{ctx}: NOT a property (cn=#{@current_class_name})" if do_debug
       false
+    end
+
+    # Infer model name from an expression for model_columns lookup
+    private def infer_model_name(node : Crystal::ASTNode) : String?
+      case node
+      when Crystal::Var
+        # article → Article
+        node.name.capitalize.gsub(/_([a-z])/) { $1.upcase }
+      when Crystal::Call
+        if node.obj.is_a?(Crystal::Path)
+          # Article.last(), Article.find() → Article
+          node.obj.as(Crystal::Path).names.last
+        elsif node.obj
+          # chain: something.method() → infer from inner
+          infer_model_name(node.obj.not_nil!)
+        else
+          nil
+        end
+      else
+        nil
+      end
     end
 
     # Resolve the type name of an expression using the type index

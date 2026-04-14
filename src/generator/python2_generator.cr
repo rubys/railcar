@@ -550,6 +550,15 @@ module Railcar
         app.models.each_key do |name|
           imports += "from models.#{Inflector.underscore(name)} import #{name}\n"
         end
+        # Import other view modules if referenced (e.g., render_comment_partial)
+        app.controllers.each do |other_info|
+          other_name = Inflector.underscore(other_info.name).chomp("_controller")
+          next if other_name == controller_name
+          other_plural = Inflector.pluralize(other_name)
+          if content.includes?("render_#{Inflector.singularize(other_name)}_partial")
+            imports += "from views.#{other_plural} import *\n"
+          end
+        end
         imports += "\n"
 
         out_path = File.join(views_dir, "#{Inflector.pluralize(controller_name)}.py")
