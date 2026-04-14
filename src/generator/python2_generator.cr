@@ -34,6 +34,7 @@ require "../../tools/cr2py/src/cr2py"
 require "../../tools/cr2py/src/filters/db_filter"
 require "../../tools/cr2py/src/filters/pyast_dunder_filter"
 require "../../tools/cr2py/src/filters/pyast_return_filter"
+require "../../tools/cr2py/src/filters/pyast_async_filter"
 
 module Railcar
   class Python2Generator
@@ -389,6 +390,10 @@ module Railcar
         db_filter, dunder_filter, return_filter = filters
         py_nodes = return_filter.transform(py_nodes)
 
+        # Apply async filter to controllers
+        async_filter = Cr2Py::PyAstAsyncFilter.new
+        py_nodes = async_filter.transform(py_nodes)
+
         mod = PyAST::Module.new(py_nodes)
         content = serializer.serialize(mod)
 
@@ -397,11 +402,11 @@ module Railcar
         import_lines << "from aiohttp import web"
         import_lines << "from models.#{Inflector.underscore(model_name)} import #{model_name}"
         import_lines << "from helpers import *"
+        import_lines << "from views.#{Inflector.pluralize(controller_name)} import *"
         if nested_parent
           parent_model = Inflector.classify(nested_parent)
           import_lines << "from models.#{Inflector.underscore(parent_model)} import #{parent_model}"
         end
-        # Scan content for other model references
         app.models.each_key do |name|
           next if name == model_name
           if content.includes?(name)
@@ -409,17 +414,6 @@ module Railcar
           end
         end
         imports = import_lines.join("\n") + "\n\n"
-
-        # Controllers are async — add async/await
-        content = content
-          .gsub("def index(", "async def index(")
-          .gsub("def show(", "async def show(")
-          .gsub("def new(", "async def new(")
-          .gsub("def edit(", "async def edit(")
-          .gsub("def create(", "async def create(")
-          .gsub("def update(", "async def update(")
-          .gsub("def destroy(", "async def destroy(")
-          .gsub("parse_form(request.read())", "parse_form(await request.read())")
 
         out_path = File.join(controllers_dir, "#{controller_name}.py")
         File.write(out_path, imports + content)
@@ -482,7 +476,8 @@ module Railcar
             ast = ast.transform(InstanceVarToLocal.new)
             ast = ast.transform(ViewCleanup.new)
             # Convert bare calls matching parameter names to Var nodes
-            ast = ViewCleanup.calls_to_vars(ast, [singular, "_buf", "notice", "flash"])
+            plural = Inflector.pluralize(singular)
+            ast = ViewCleanup.calls_to_vars(ast, [singular, plural, "_buf", "notice", "flash"])
             ast = ast.transform(BufToInterpolation.new)
 
             # Strip def render wrapper (kept for BufToInterpolation to process)
@@ -491,7 +486,9 @@ module Railcar
               body = body.body
             end
 
-            arg = Crystal::Arg.new(singular)
+            # Index templates use plural (articles), others use singular (article)
+            param_name = basename == "index" ? Inflector.pluralize(singular) : singular
+            arg = Crystal::Arg.new(param_name)
             func_def = Crystal::Def.new(func_name, [arg] of Crystal::Arg,
               body, return_type: Crystal::Path.new("String"))
 
@@ -590,7 +587,7 @@ module Railcar
       io << "    application = web.Application()\n"
 
       app.routes.routes.each do |route|
-        controller = Inflector.singularize(route.controller)
+        controller = Inflector.underscore(route.controller)
         action = route.action
         path = route.path.gsub(/:(\w+)/, "{\\1}")
 
@@ -629,7 +626,9 @@ module Railcar
       io << "requires-python = \">=3.11\"\n"
       io << "dependencies = [\"aiohttp\"]\n\n"
       io << "[project.optional-dependencies]\n"
-      io << "test = [\"pytest\", \"pytest-aiohttp\"]\n"
+      io << "test = [\"pytest\", \"pytest-aiohttp\", \"pytest-asyncio\"]\n\n"
+      io << "[tool.pytest.ini_options]\n"
+      io << "asyncio_mode = \"auto\"\n"
 
       File.write(File.join(output_dir, "pyproject.toml"), io.to_s)
       puts "  pyproject.toml"
@@ -715,9 +714,6 @@ module Railcar
           db_filter, dunder_filter, return_filter = filters
           py_nodes = return_filter.transform(py_nodes)
 
-          mod = PyAST::Module.new(py_nodes)
-          content = serializer.serialize(mod)
-
           imports = String.build do |io|
             io << "import pytest\n"
             io << "import sys\nimport os\n"
@@ -732,17 +728,12 @@ module Railcar
             io << "from tests.conftest import *\n\n"
           end
 
-          # Controller tests need async/await
-          content = content
-            .gsub("def test_", "async def test_")
-            .gsub(/client = .*$/) { "client = await aiohttp_client(app_module.create_app())" }
-            .gsub("client.get(", "await client.get(")
-            .gsub("client.post(", "await client.post(")
-            .gsub("client.patch(", "await client.patch(")
-            .gsub("client.delete(", "await client.delete(")
-            .gsub("response.text", "await response.text()")
-            .gsub("(app_client)", "(aiohttp_client)")
-            .gsub("app_module()", "app_module")
+          # Apply async filter to controller tests
+          async_filter = Cr2Py::PyAstAsyncFilter.new
+          py_nodes = async_filter.transform(py_nodes)
+
+          mod = PyAST::Module.new(py_nodes)
+          content = serializer.serialize(mod)
 
           out_path = File.join(tests_dir, py_name)
           File.write(out_path, imports + content)

@@ -58,6 +58,21 @@ module Railcar
     end
   end
 
+  def self.turbo_stream_from(channel : String) : String
+    ""
+  end
+
+  def self.content_for(name : String, value : String)
+  end
+
+  def self.form_with(model, css : String = "") : String
+    ""
+  end
+
+  def self.render(partial) : String
+    ""
+  end
+
   def self.truncate(text : String, length : Int32 = 30) : String
     if text.size <= length
       text

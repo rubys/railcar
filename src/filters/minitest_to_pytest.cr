@@ -98,11 +98,12 @@ module Railcar
       # Build function body: setup + test body
       all_stmts = [] of Crystal::ASTNode
 
-      # For integration tests, create test client
+      # For integration tests, create test client from app
       if is_integration
         all_stmts << Crystal::Assign.new(
           Crystal::Var.new("client"),
-          Crystal::Call.new(nil, "create_test_client"))
+          Crystal::Call.new(nil, "aiohttp_client",
+            [Crystal::Call.new(Crystal::Var.new("app_module"), "create_app")] of Crystal::ASTNode))
       end
 
       # Inline setup block
@@ -133,7 +134,7 @@ module Railcar
         end
       end
 
-      args = is_integration ? [Crystal::Arg.new("app_client")] : [] of Crystal::Arg
+      args = is_integration ? [Crystal::Arg.new("aiohttp_client")] : [] of Crystal::Arg
       Crystal::Def.new(func_name, args, Crystal::Expressions.new(all_stmts))
     end
 

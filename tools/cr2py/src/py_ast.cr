@@ -68,13 +68,14 @@ module PyAST
     def initialize(@expr); end
   end
 
-  # def name(args): body
+  # def name(args): body  (or async def when @is_async)
   class Func < Node
     getter name : String
     getter args : Array(String)
     getter body : Array(Node)
     getter return_type : String?
     getter decorators : Array(String)
+    property is_async : Bool = false
     def initialize(@name, @args, @body, @return_type = nil, @decorators = [] of String); end
   end
 
@@ -143,7 +144,7 @@ module PyAST
 
       when Func
         node.decorators.each { |d| io << indent << "@" << d << "\n" }
-        io << indent << "def " << node.name << "(" << node.args.join(", ") << ")"
+        io << indent << (node.is_async ? "async def " : "def ") << node.name << "(" << node.args.join(", ") << ")"
         if rt = node.return_type
           io << " -> " << rt
         end
