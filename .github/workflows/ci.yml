@@ -57,3 +57,9 @@ jobs:
           build/railcar --python build/demo/blog build/python-blog
           cd build/python-blog
           uv run --extra test python -m pytest tests/ -v
+
+      - name: Test TypeScript runtime
+        run: |
+          cd src/runtime/typescript
+          npm install
+          npx tsx base_runtime_test.ts
