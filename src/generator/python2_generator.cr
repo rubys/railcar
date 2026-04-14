@@ -363,20 +363,22 @@ module Railcar
         content = serializer.serialize(mod)
 
         # Add imports
-        imports = String.build do |io|
-          io << "from aiohttp import web\n"
-          io << "from models.#{Inflector.underscore(model_name)} import #{model_name}\n"
-          io << "from helpers import *\n"
-          # Add nested model imports
-          if nested_parent
-            parent_model = Inflector.classify(nested_parent)
-            io << "from models.#{Inflector.underscore(parent_model)} import #{parent_model}\n"
-          end
-          info.actions.each do |action|
-            # Check if action references other models
-          end
-          io << "\n"
+        import_lines = Set(String).new
+        import_lines << "from aiohttp import web"
+        import_lines << "from models.#{Inflector.underscore(model_name)} import #{model_name}"
+        import_lines << "from helpers import *"
+        if nested_parent
+          parent_model = Inflector.classify(nested_parent)
+          import_lines << "from models.#{Inflector.underscore(parent_model)} import #{parent_model}"
         end
+        # Scan content for other model references
+        app.models.each_key do |name|
+          next if name == model_name
+          if content.includes?(name)
+            import_lines << "from models.#{Inflector.underscore(name)} import #{name}"
+          end
+        end
+        imports = import_lines.join("\n") + "\n\n"
 
         out_path = File.join(controllers_dir, "#{controller_name}.py")
         File.write(out_path, imports + content)

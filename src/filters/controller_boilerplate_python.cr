@@ -231,6 +231,16 @@ module Railcar
         end
 
       when Crystal::If
+        # Transform condition — handle article.update(params) → article.update(data)
+        cond = node.cond
+        if cond.is_a?(Crystal::Call) && cond.name == "update" && cond.obj
+          cond = Crystal::Call.new(cond.obj, "update",
+            [Crystal::Call.new(nil, "extract_model_params",
+              [Crystal::Var.new("data"),
+               Crystal::StringLiteral.new(singular)] of Crystal::ASTNode
+            )] of Crystal::ASTNode)
+        end
+
         # Transform both branches
         then_stmts = [] of Crystal::ASTNode
         else_stmts = [] of Crystal::ASTNode
@@ -257,7 +267,7 @@ module Railcar
           transform_action_stmt(node.else, else_stmts, action_name, singular, plural)
         end
 
-        new_if = Crystal::If.new(node.cond,
+        new_if = Crystal::If.new(cond,
           Crystal::Expressions.new(then_stmts),
           Crystal::Expressions.new(else_stmts))
         stmts << new_if
@@ -354,8 +364,10 @@ module Railcar
     end
 
     private def build_response(template : String, singular : String, status : Int32) : Crystal::ASTNode
+      # index uses plural (articles), other actions use singular (article)
+      var_name = template == "index" ? Inflector.pluralize(singular) : singular
       render_call = Crystal::Call.new(nil, "render_#{template}",
-        named_args: [Crystal::NamedArgument.new(singular, Crystal::Var.new(singular))])
+        named_args: [Crystal::NamedArgument.new(var_name, Crystal::Var.new(var_name))])
       layout_call = Crystal::Call.new(nil, "layout", [render_call] of Crystal::ASTNode)
 
       response_args = [
@@ -375,11 +387,10 @@ module Railcar
     private def ends_with_redirect_or_render?(stmts : Array(Crystal::ASTNode)) : Bool
       return false if stmts.empty?
       last = stmts.last
-      return true if last.to_s.includes?("web.HTTPFound") || last.to_s.includes?("web.Response")
-      if last.is_a?(Crystal::If)
-        # Both branches should end with redirect/render
-        return true  # Assume if/else in action body is redirect/render pattern
-      end
+      return true if last.is_a?(Crystal::Return)
+      str = last.to_s
+      return true if str.includes?("HTTPFound") || str.includes?("Response")
+      return true if last.is_a?(Crystal::If)
       false
     end
   end

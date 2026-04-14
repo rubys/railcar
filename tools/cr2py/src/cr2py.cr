@@ -23,6 +23,9 @@ module Cr2Py
     continue def del elif else except finally for from global if import in is
     lambda nonlocal not or pass raise return try while with yield]
 
+  # Properties known to be attributes (not methods) on framework objects
+  KNOWN_PROPERTIES = %w[match_info status headers body text method path]
+
   PYTHON_BUILTINS = %w[print len int str float bool isinstance hasattr type
     range enumerate zip sorted reversed list dict set tuple super abs min max
     sum any all map filter open getattr setattr delattr repr hash input
@@ -929,10 +932,12 @@ module Cr2Py
         return "#{to_expr(obj)}.replace(#{to_expr(args[0])}, #{to_expr(args[1])})"
       end
 
-      # Property access (type-checked)
-      if args.empty? && named.nil? && !node.block && obj && is_property?(node)
+      # Property access (type-checked or known framework properties)
+      if args.empty? && named.nil? && !node.block && obj
         prop_name = name.rstrip('!').rstrip('?')
-        return "#{to_expr(obj)}.#{prop_name}"
+        if is_property?(node) || KNOWN_PROPERTIES.includes?(prop_name)
+          return "#{to_expr(obj)}.#{prop_name}"
+        end
       end
 
       # type(self).classvar → access class attribute without parens
