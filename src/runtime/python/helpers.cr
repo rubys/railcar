@@ -24,26 +24,8 @@ module Railcar
     head + content + LAYOUT_TAIL
   end
 
-  def self.link_to(text : String, url : String, **kwargs) : String
-    css = kwargs["class_"]? || kwargs["class"]? || ""
-    if css.empty?
-      "<a href=\"#{url}\">#{text}</a>"
-    else
-      "<a href=\"#{url}\" class=\"#{css}\">#{text}</a>"
-    end
-  end
-
-  def self.button_to(text : String, url : String, **kwargs) : String
-    method = kwargs["method"]? || "post"
-    css = kwargs["class_"]? || kwargs["class"]? || ""
-    confirm = kwargs["data_turbo_confirm"]? || ""
-    confirm_attr = confirm.empty? ? "" : " data-turbo-confirm=\"#{confirm}\""
-    cls_attr = css.empty? ? "" : " class=\"#{css}\""
-    "<form method=\"post\" action=\"#{url}\"#{confirm_attr}>" \
-    "<input type=\"hidden\" name=\"_method\" value=\"#{method}\">" \
-    "<button type=\"submit\"#{cls_attr}>#{text}</button>" \
-    "</form>"
-  end
+  # link_to and button_to are emitted as hand-written Python by the generator
+  # (need to handle form_class, data dict, and other kwargs cleanly)
 
   def self.dom_id(obj, prefix : String = "") : String
     name = obj.class.name.downcase

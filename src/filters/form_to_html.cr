@@ -106,7 +106,16 @@ module Railcar
       css_attr = css_class ? " class=\"#{css_class}\"" : ""
       if parent_var && child_class
         plural = Inflector.pluralize(child_class)
-        stmts << buf_str("<form action=\"' + str(#{parent_var}_#{plural}_path(#{parent_var})) + '\" method=\"post\"#{css_attr}>")
+        # Use Crystal string interpolation so BufToInterpolation produces a clean f-string
+        stmts << Crystal::OpAssign.new(
+          Crystal::Var.new("_buf"), "+",
+          Crystal::StringInterpolation.new([
+            Crystal::StringLiteral.new("<form action=\""),
+            Crystal::Call.new(nil, "#{parent_var}_#{plural}_path",
+              [Crystal::Var.new(parent_var)] of Crystal::ASTNode),
+            Crystal::StringLiteral.new("\" method=\"post\"#{css_attr}>"),
+          ] of Crystal::ASTNode)
+        )
       elsif model_var
         plural = Inflector.pluralize(model_var)
         # Dynamic form: new vs edit
