@@ -53,8 +53,20 @@ module Railcar
       super
     end
 
-    # _buf.append= expr → _buf += str(expr)
     def transform(node : Crystal::Call) : Crystal::ASTNode
+      # render("form", article: article) → render_form_partial(article: article)
+      # render(@article.comments) → render_comment_partial for each
+      if node.name == "render" && node.args.size >= 1
+        first_arg = node.args[0]
+        if first_arg.is_a?(Crystal::StringLiteral)
+          partial_name = first_arg.as(Crystal::StringLiteral).value
+          named = node.named_args
+          return Crystal::Call.new(nil, "render_#{partial_name}_partial",
+            named_args: named)
+        end
+      end
+
+      # _buf.append= expr → _buf += str(expr)
       if node.name == "append=" && node.obj.is_a?(Crystal::Var) &&
          node.obj.as(Crystal::Var).name == "_buf" && node.args.size == 1
         expr = strip_to_s(node.args[0])

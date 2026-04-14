@@ -69,10 +69,22 @@ module Cr2Py
       AWAIT_METHODS.each do |method|
         result = result.gsub(/(\w+)\.#{method}\(/) { "await #{$1}.#{method}(" }
       end
-      # client.post(url, data) → client.post(url, data=data) for aiohttp
-      result = result.gsub(/await client\.(post|patch|put)\(([^,]+), ([^)]+)\)/) {
-        "await client.#{$1}(#{$2}, data=#{$3})"
-      }
+      # Add allow_redirects=False to POST/PATCH/PUT/DELETE calls
+      # and data= keyword for body data
+      if result.includes?("await client.post(") || result.includes?("await client.patch(") ||
+         result.includes?("await client.put(") || result.includes?("await client.delete(")
+        # Find the client call and add allow_redirects before closing paren
+        result = result.gsub(/await client\.(post|patch|put|delete)\((.+)\)\s*$/) do |match|
+          method = $1
+          inner = $2
+          if inner.includes?(",")
+            parts = inner.split(", ", 2)
+            "await client.#{method}(#{parts[0]}, data=#{parts[1]}, allow_redirects=False)"
+          else
+            "await client.#{method}(#{inner}, allow_redirects=False)"
+          end
+        end
+      end
       # response.text (property) → await response.text() (coroutine in aiohttp)
       result = result.gsub(/(\w+)\.text(?!\()/) { "await #{$1}.text()" }
       # await function(...) calls

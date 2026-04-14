@@ -267,14 +267,19 @@ module Railcar
           )] of Crystal::ASTNode)
 
       when "assert_select"
-        # assert_select("selector", "text") → assert "text" in body
-        if args.size >= 2 && args[1].is_a?(Crystal::StringLiteral)
-          text = args[1].as(Crystal::StringLiteral).value
-          Crystal::Call.new(nil, "assert",
-            [Crystal::Call.new(
-              Crystal::StringLiteral.new(text), "in",
-              [Crystal::Var.new("body")] of Crystal::ASTNode
-            )] of Crystal::ASTNode)
+        # assert_select("selector", "text"/expr) → assert text/expr in body
+        if args.size >= 2
+          value = transform_stmt(args[1])
+          # Skip named args like minimum: 1
+          if value.is_a?(Crystal::StringLiteral) || value.is_a?(Crystal::Call)
+            Crystal::Call.new(nil, "assert",
+              [Crystal::Call.new(
+                Crystal::Call.new(nil, "str", [value] of Crystal::ASTNode), "in",
+                [Crystal::Var.new("body")] of Crystal::ASTNode
+              )] of Crystal::ASTNode)
+          else
+            Crystal::Nop.new  # skip complex assert_select
+          end
         elsif args.size == 1
           # assert_select("selector") → assert "selector-fragment" in body
           selector = args[0].to_s.strip('"')
