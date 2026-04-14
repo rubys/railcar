@@ -70,6 +70,9 @@ module Railcar
       emit_models(nodes, output_dir, emitter, serializer, filters)
       emit_controllers(output_dir, emitter, serializer, filters)
       emit_views(output_dir, emitter, serializer, filters)
+      emit_app(output_dir)
+      emit_pyproject(output_dir)
+      copy_static_assets(output_dir)
       emit_tests(output_dir, emitter, serializer, filters)
 
       # __init__.py files
@@ -471,6 +474,132 @@ module Railcar
       end
 
       File.write(File.join(views_dir, "__init__.py"), "")
+    end
+
+    # ── Emit app.py ──
+
+    private def emit_app(output_dir : String)
+      io = IO::Memory.new
+      io << "from aiohttp import web\n"
+      io << "import os\n"
+      io << "import sqlite3\n"
+      io << "from runtime.base import ApplicationRecord\n"
+      io << "from helpers import *\n"
+
+      # Controller imports
+      controller_names = [] of String
+      app.controllers.each do |info|
+        name = Inflector.underscore(info.name).chomp("_controller")
+        controller_names << name
+        io << "from controllers import #{name} as #{name}_controller\n"
+      end
+      io << "\n"
+
+      # DB init
+      io << "def init_db():\n"
+      io << "    db = sqlite3.connect(os.path.join(os.path.dirname(__file__), 'blog.db'))\n"
+      io << "    db.row_factory = sqlite3.Row\n"
+      io << "    db.execute('PRAGMA foreign_keys = ON')\n"
+      app.schemas.each do |schema|
+        all_cols = [{name: "id", type: "INTEGER"}]
+        schema.columns.each { |c| all_cols << {name: c.name, type: c.type} }
+        col_defs = all_cols.map do |c|
+          parts = "#{c[:name]} #{c[:type]}"
+          parts += " PRIMARY KEY AUTOINCREMENT" if c[:name] == "id"
+          parts += " NOT NULL" unless c[:name] == "id"
+          parts
+        end
+        io << "    db.execute('''CREATE TABLE IF NOT EXISTS #{schema.name} (\n"
+        io << "        #{col_defs.join(",\n        ")}\n"
+        io << "    )''')\n"
+      end
+      io << "    ApplicationRecord.db = db\n"
+      io << "    return db\n\n"
+
+      # Seed data
+      io << "def seed_db():\n"
+      if app.fixtures.empty?
+        io << "    pass\n"
+      else
+        app.fixtures.each do |fixture|
+          model_name = Inflector.classify(Inflector.singularize(fixture.name))
+          io << "    from models.#{Inflector.underscore(model_name)} import #{model_name}\n"
+          fixture.records.each do |record|
+            fields = record.fields.reject { |k, _| k == "id" }
+            field_strs = fields.map { |k, v| "#{k}=#{v.inspect}" }
+            io << "    #{model_name}.create(#{field_strs.join(", ")})\n"
+          end
+        end
+      end
+      io << "\n"
+
+      # Route dispatch
+      io << "def create_app():\n"
+      io << "    application = web.Application()\n"
+
+      app.routes.routes.each do |route|
+        controller = Inflector.singularize(route.controller)
+        action = route.action
+        path = route.path.gsub(/:(\w+)/, "{\\1}")
+
+        case route.method.upcase
+        when "GET"
+          io << "    application.router.add_get('#{path}', #{controller}_controller.#{action})\n"
+        when "POST"
+          io << "    application.router.add_post('#{path}', #{controller}_controller.#{action})\n"
+        when "PATCH", "PUT", "DELETE"
+          # These come through POST with _method override — handled by dispatch
+        end
+      end
+
+      # Static files
+      io << "    application.router.add_static('/static', os.path.join(os.path.dirname(__file__), 'static'))\n"
+      io << "    return application\n\n"
+
+      # Main
+      io << "if __name__ == '__main__':\n"
+      io << "    init_db()\n"
+      io << "    seed_db()\n"
+      io << "    print('Blog running at http://localhost:3000')\n"
+      io << "    web.run_app(create_app(), host='0.0.0.0', port=3000, print=lambda _: None)\n"
+
+      File.write(File.join(output_dir, "app.py"), io.to_s)
+      puts "  app.py"
+    end
+
+    # ── Emit pyproject.toml ──
+
+    private def emit_pyproject(output_dir : String)
+      io = IO::Memory.new
+      io << "[project]\n"
+      io << "name = \"blog\"\n"
+      io << "version = \"0.1.0\"\n"
+      io << "requires-python = \">=3.11\"\n"
+      io << "dependencies = [\"aiohttp\"]\n\n"
+      io << "[project.optional-dependencies]\n"
+      io << "test = [\"pytest\", \"pytest-aiohttp\"]\n"
+
+      File.write(File.join(output_dir, "pyproject.toml"), io.to_s)
+      puts "  pyproject.toml"
+    end
+
+    # ── Copy static assets ──
+
+    private def copy_static_assets(output_dir : String)
+      static_dir = File.join(output_dir, "static")
+      Dir.mkdir_p(static_dir)
+
+      # Copy CSS
+      css_source = File.join(rails_dir, "app/assets/stylesheets/application.tailwind.css")
+      if File.exists?(css_source)
+        File.copy(css_source, File.join(static_dir, "app.css"))
+      end
+
+      # Copy turbo.js from railcar's public assets
+      turbo_source = File.join(File.dirname(__FILE__), "..", "..", "public", "turbo.min.js")
+      if File.exists?(turbo_source)
+        File.copy(turbo_source, File.join(static_dir, "turbo.min.js"))
+      end
     end
 
     # ── Layer 3: Tests ──
