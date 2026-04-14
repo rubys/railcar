@@ -60,9 +60,11 @@ class CollectionProxy:
     def model_class(self):
         return MODEL_REGISTRY[self.model_name]
 
-    def build(self, **attrs):
-        attrs[self.foreign_key] = self.owner.id
-        return self.model_class()(**attrs)
+    def build(self, attrs=None, **kwargs):
+        if attrs:
+            kwargs.update(attrs)
+        kwargs[self.foreign_key] = self.owner.id
+        return self.model_class()(**kwargs)
 
     def create(self, **attrs):
         record = self.build(**attrs)
@@ -84,6 +86,9 @@ class CollectionProxy:
 
     def __iter__(self):
         return iter(self.all())
+
+    def find(self, id):
+        return self.model_class().find(id)
 
     def all(self):
         return self.model_class().where(**{self.foreign_key: self.owner.id})

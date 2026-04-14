@@ -517,20 +517,33 @@ module Railcar
               body = body.body
             end
 
-            # Index templates use plural (articles), others use singular (article)
-            param_name = basename == "index" ? Inflector.pluralize(singular) : singular
-            args = [Crystal::Arg.new(param_name)]
-            # Add notice parameter with default None for templates that use flash
-            notice_arg = Crystal::Arg.new("notice")
-            notice_arg.default_value = Crystal::NilLiteral.new
-            args << notice_arg
+            # Build function args
+            is_partial = basename.starts_with?("_")
+            if is_partial
+              # Partials use *args to accept optional parent
+              args = [Crystal::Arg.new("*args")]
+            else
+              # Index templates use plural (articles), others use singular (article)
+              param_name = basename == "index" ? Inflector.pluralize(singular) : singular
+              args = [Crystal::Arg.new(param_name)]
+              notice_arg = Crystal::Arg.new("notice")
+              notice_arg.default_value = Crystal::NilLiteral.new
+              args << notice_arg
+            end
             func_def = Crystal::Def.new(func_name, args,
               body, return_type: Crystal::Path.new("String"))
 
             py_func_nodes = emitter.to_nodes(func_def)
+
+            # For partials, prepend the *args unpack
+            if is_partial && py_func_nodes.first?.is_a?(PyAST::Func)
+              func = py_func_nodes.first.as(PyAST::Func)
+              func.body.unshift(PyAST::Assign.new(singular, "args[-1] if args else None"))
+            end
             view_nodes.concat(py_func_nodes)
           rescue ex
             # If ERB compilation fails, emit a stub
+            STDERR.puts "  WARN: #{func_name}: #{ex.message}"
             view_nodes << PyAST::Func.new(func_name, [singular], [
               PyAST::Return.new("f'<!-- #{basename} template -->'"),
             ] of PyAST::Node, "str")

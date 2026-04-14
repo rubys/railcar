@@ -33,6 +33,7 @@ module Cr2Py
     property in_method : Bool = false
     property in_classmethod : Bool = false
     property current_double_splat : String? = nil
+    property current_method_name : String? = nil
     property current_class_type : Crystal::Type? = nil
     property current_class_name : String? = nil
 
@@ -461,9 +462,11 @@ module Cr2Py
       old_in_method = @in_method
       old_in_classmethod = @in_classmethod
       old_double_splat = @current_double_splat
+      old_method_name = @current_method_name
       @in_method = true
       @in_classmethod = is_class_method || false
       @current_double_splat = node.double_splat.try(&.name)
+      @current_method_name = node.name
 
       method_ctx = "#{@current_class_name || "?"}##{name}"
       if debug?(method_ctx)
@@ -474,6 +477,7 @@ module Cr2Py
       @in_method = old_in_method
       @in_classmethod = old_in_classmethod
       @current_double_splat = old_double_splat
+      @current_method_name = old_method_name
 
 
       decorators = [] of String
@@ -643,6 +647,11 @@ module Cr2Py
         return block_call_to_nodes(node, block)
       end
 
+      # super → super().current_method()
+      if name == "super" && !obj
+        return [PyAST::Statement.new("super().#{python_name(@current_method_name || "unknown")}()")] of PyAST::Node
+      end
+
       # assert → assert statement
       if name == "assert" && !obj && args.size == 1
         return [PyAST::Statement.new("assert #{to_expr(args[0])}")] of PyAST::Node
@@ -676,6 +685,11 @@ module Cr2Py
       name = node.name
       args = node.args
       named = node.named_args
+
+      # super → super().current_method()
+      if name == "super" && !obj
+        return "super().#{python_name(@current_method_name || "unknown")}()"
+      end
 
       # << on non-IO → .append() in expression context
       if name == "<<" && args.size == 1 && obj

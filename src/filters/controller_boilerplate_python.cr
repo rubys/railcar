@@ -93,7 +93,9 @@ module Railcar
       end
 
       if only.empty?
-        # Applies to all actions — we'll handle this by marking all known actions
+        # Applies to all actions — use "*" as wildcard
+        result["*"] ||= [] of String
+        result["*"] << method_name
       else
         only.each do |action|
           result[action] ||= [] of String
@@ -124,12 +126,17 @@ module Railcar
         )
       end
 
-      # Inline before_action callbacks
-      if callbacks = before_actions[action_name]?
-        callbacks.each do |cb_name|
-          if cb_def = private_methods[cb_name]?
-            inline_method_body(cb_def, stmts, singular)
-          end
+      # Inline before_action callbacks (specific + wildcard)
+      all_callbacks = [] of String
+      if cbs = before_actions["*"]?
+        all_callbacks.concat(cbs)
+      end
+      if cbs = before_actions[action_name]?
+        all_callbacks.concat(cbs)
+      end
+      all_callbacks.each do |cb_name|
+        if cb_def = private_methods[cb_name]?
+          inline_method_body(cb_def, stmts, singular)
         end
       end
 
@@ -183,18 +190,26 @@ module Railcar
     end
 
     private def transform_before_action_stmt(node : Crystal::ASTNode, singular : String) : Crystal::ASTNode
-      # article = Article.find(id) → article = Model.find(int(request.match_info['id']))
+      # article = Article.find(article_id) → article = Model.find(int(request.match_info['article_id']))
       if node.is_a?(Crystal::Assign)
         value = node.value
-        if value.is_a?(Crystal::Call) && value.name == "find"
+        if value.is_a?(Crystal::Call) && value.name == "find" && value.obj
+          # Determine model class and URL parameter name from the find call
+          model = value.obj.not_nil!
+          param_name = if value.args.size > 0 && value.args[0].is_a?(Crystal::Var)
+                         value.args[0].as(Crystal::Var).name
+                       else
+                         "id"
+                       end
+          var_name = node.target.to_s
           return Crystal::Assign.new(
-            Crystal::Var.new(singular),
-            Crystal::Call.new(Crystal::Path.new(@model_name), "find",
+            Crystal::Var.new(var_name),
+            Crystal::Call.new(model, "find",
               [Crystal::Call.new(nil, "int",
                 [Crystal::Call.new(
                   Crystal::Call.new(Crystal::Var.new("request"), "match_info"),
                   "[]",
-                  [Crystal::StringLiteral.new("id")] of Crystal::ASTNode
+                  [Crystal::StringLiteral.new(param_name)] of Crystal::ASTNode
                 )] of Crystal::ASTNode
               )] of Crystal::ASTNode
             )
@@ -295,6 +310,30 @@ module Railcar
                 Crystal::Call.new(Crystal::Path.new(@model_name), "new")
               )
             end
+          elsif call.name == "build" && call.args.size > 0
+            # article.comments.build(extract_model_params(params, "comment"))
+            # → replace params with data
+            new_args = call.args.map do |arg|
+              replace_params_with_data(arg)
+            end
+            stmts << Crystal::Assign.new(node.target,
+              Crystal::Call.new(call.obj, "build", new_args))
+          elsif call.name == "find" && call.obj && !call.obj.is_a?(Crystal::Path)
+            # article.comments.find(id) → Model.find(int(request.match_info['id']))
+            new_args = call.args.map do |arg|
+              if arg.is_a?(Crystal::Var)
+                Crystal::Call.new(nil, "int",
+                  [Crystal::Call.new(
+                    Crystal::Call.new(Crystal::Var.new("request"), "match_info"),
+                    "[]",
+                    [Crystal::StringLiteral.new(arg.as(Crystal::Var).name)] of Crystal::ASTNode
+                  )] of Crystal::ASTNode)
+              else
+                arg
+              end
+            end
+            stmts << Crystal::Assign.new(node.target,
+              Crystal::Call.new(call.obj, "find", new_args))
           elsif call.name == "includes" || call.name == "order"
             # Article.includes(:comments).order(...) → Article.all()
             stmts << Crystal::Assign.new(node.target, Crystal::Call.new(Crystal::Path.new(@model_name), "all"))
@@ -320,6 +359,9 @@ module Railcar
                       Crystal::Call.new(nil, "#{plural}_path")
                     elsif target_str == singular || target_str.includes?("@")
                       Crystal::Call.new(nil, "#{singular}_path", [Crystal::Var.new(singular)] of Crystal::ASTNode)
+                    elsif target.is_a?(Crystal::Var) || target.is_a?(Crystal::Call)
+                      # Variable reference (e.g., article in comments controller) → model_path(model)
+                      Crystal::Call.new(nil, "#{target_str}_path", [Crystal::Var.new(target_str)] of Crystal::ASTNode)
                     else
                       target
                     end
@@ -382,6 +424,21 @@ module Railcar
         Crystal::Call.new(Crystal::Path.new(["web", "Response"]), "new",
           named_args: response_args)
       )
+    end
+
+    private def replace_params_with_data(node : Crystal::ASTNode) : Crystal::ASTNode
+      if node.is_a?(Crystal::Call) && node.name == "extract_model_params"
+        new_args = node.args.map do |arg|
+          if arg.is_a?(Crystal::Var) && arg.name == "params"
+            Crystal::Var.new("data").as(Crystal::ASTNode)
+          else
+            arg
+          end
+        end
+        Crystal::Call.new(nil, "extract_model_params", new_args)
+      else
+        node
+      end
     end
 
     private def ends_with_redirect_or_render?(stmts : Array(Crystal::ASTNode)) : Bool
