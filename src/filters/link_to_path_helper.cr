@@ -7,9 +7,12 @@
 # as the target argument, converting them to *_path helper calls.
 
 require "compiler/crystal/syntax"
+require "./path_helper_utils"
 
 module Railcar
   class LinkToPathHelper < Crystal::Transformer
+    include PathHelperUtils
+
     def transform(node : Crystal::Call) : Crystal::ASTNode
       if node.name == "link_to" && node.args.size >= 2
         args = node.args.dup
@@ -23,28 +26,6 @@ module Railcar
       })
       node.block = node.block.try(&.transform(self).as(Crystal::Block))
       node
-    end
-
-    private def model_to_path(node : Crystal::ASTNode) : Crystal::ASTNode
-      case node
-      when Crystal::InstanceVar
-        name = node.name.lchop("@")
-        Crystal::Call.new(nil, "#{name}_path", [Crystal::Var.new(name)] of Crystal::ASTNode)
-      when Crystal::Var
-        name = node.name
-        return node if name.ends_with?("_path")
-        Crystal::Call.new(nil, "#{name}_path", [node] of Crystal::ASTNode)
-      when Crystal::Call
-        if node.obj.nil? && node.args.empty?
-          name = node.name
-          return node if name.ends_with?("_path")
-          Crystal::Call.new(nil, "#{name}_path", [node] of Crystal::ASTNode)
-        else
-          node
-        end
-      else
-        node
-      end
     end
   end
 end

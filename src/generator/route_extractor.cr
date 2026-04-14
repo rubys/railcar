@@ -28,6 +28,21 @@ module Railcar
     def add(route : Route)
       @routes << route
     end
+
+    # Find the parent resource for a nested controller.
+    # Returns the singular parent name (e.g. "article" for comments nested under articles),
+    # or nil if the controller is not nested.
+    # controller_name should be the plural form (e.g. "comments").
+    def nested_parent_for(controller_name : String) : String?
+      routes.each do |route|
+        if route.controller == controller_name && route.path.includes?("_id")
+          if match = route.path.match(/:(\w+)_id/)
+            return match[1]
+          end
+        end
+      end
+      nil
+    end
   end
 
   class RouteExtractor

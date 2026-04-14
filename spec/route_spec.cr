@@ -100,6 +100,29 @@ describe Railcar::RouteExtractor do
   end
 end
 
+describe Railcar::RouteSet do
+  it "finds nested parent for a nested controller" do
+    route_set = Railcar::RouteExtractor.extract_file(
+      File.join(BLOG_DIR, "config/routes.rb")
+    )
+    route_set.nested_parent_for("comments").should eq "article"
+  end
+
+  it "returns nil for a top-level controller" do
+    route_set = Railcar::RouteExtractor.extract_file(
+      File.join(BLOG_DIR, "config/routes.rb")
+    )
+    route_set.nested_parent_for("articles").should be_nil
+  end
+
+  it "returns nil for an unknown controller" do
+    route_set = Railcar::RouteExtractor.extract_file(
+      File.join(BLOG_DIR, "config/routes.rb")
+    )
+    route_set.nested_parent_for("nonexistent").should be_nil
+  end
+end
+
 describe Railcar::RouteGenerator do
   it "generates route helpers matching hand-written ones" do
     route_set = Railcar::RouteExtractor.extract_file(

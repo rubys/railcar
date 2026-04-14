@@ -11,10 +11,7 @@ require "./source_parser"
 require "./prism_translator"
 require "./inflector"
 require "./schema_extractor"
-require "../filters/instance_var_to_local"
-require "../filters/params_expect"
-require "../filters/respond_to_html"
-require "../filters/strong_params"
+require "../filters/shared_controller_filters"
 require "../filters/redirect_to_response"
 require "../filters/render_to_ecr"
 require "../filters/controller_signature"
@@ -58,7 +55,7 @@ module Railcar
       app.controllers.each do |info|
         controller_name = Inflector.underscore(info.name).chomp("_controller")
         singular = Inflector.singularize(controller_name)
-        nested_parent = find_nested_parent(controller_name)
+        nested_parent = app.routes.nested_parent_for(controller_name)
 
         info.actions.reject(&.is_private).each do |action|
           next unless action.body
@@ -138,16 +135,13 @@ module Railcar
       source_path = File.join(rails_dir, "app/controllers/#{controller_name}_controller.rb")
       return nil unless File.exists?(source_path)
 
-      nested_parent = find_nested_parent(controller_name)
+      nested_parent = app.routes.nested_parent_for(controller_name)
       views_dir = File.join(rails_dir, "app/views")
 
       ast = SourceParser.parse(source_path)
 
       # Same filter chain as AppGenerator.generate_controller_file
-      ast = ast.transform(InstanceVarToLocal.new)
-      ast = ast.transform(ParamsExpect.new)
-      ast = ast.transform(RespondToHTML.new)
-      ast = ast.transform(StrongParams.new)
+      ast = SharedControllerFilters.apply(ast)
       ast = ast.transform(RedirectToResponse.new)
       ast = ast.transform(RenderToECR.new(controller_name))
       ast = ast.transform(ControllerSignature.new(controller_name, nested_parent, info.before_actions, model_names))
@@ -306,17 +300,5 @@ module Railcar
       args
     end
 
-    private def find_nested_parent(controller_name : String) : String?
-      app.routes.routes.each do |route|
-        if route.controller == Inflector.pluralize(controller_name) && route.path.includes?(":")
-          parts = route.path.split("/").select(&.starts_with?(":"))
-          if parts.size > 1
-            parent_param = parts[0].lchop(":")
-            return parent_param.chomp("_id") if parent_param.ends_with?("_id")
-          end
-        end
-      end
-      nil
-    end
   end
 end

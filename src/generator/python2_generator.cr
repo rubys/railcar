@@ -22,7 +22,7 @@ require "../filters/model_boilerplate_python"
 require "../filters/broadcasts_to"
 require "../filters/controller_boilerplate_python"
 require "./erb_compiler"
-require "../filters/instance_var_to_local"
+require "../filters/shared_controller_filters"
 require "../filters/view_cleanup"
 require "../filters/buf_to_interpolation"
 require "../filters/rails_helpers"
@@ -32,9 +32,6 @@ require "../filters/render_to_partial"
 require "../filters/form_to_html"
 require "../filters/python_constructor"
 require "../filters/python_view"
-require "../filters/params_expect"
-require "../filters/respond_to_html"
-require "../filters/strong_params"
 require "../filters/minitest_to_pytest"
 require "../emitter/python/py_ast"
 require "../emitter/python/cr2py"
@@ -517,14 +514,11 @@ module Railcar
         next unless File.exists?(source_path)
 
         model_name = Inflector.classify(Inflector.singularize(controller_name))
-        nested_parent = find_nested_parent(controller_name)
+        nested_parent = app.routes.nested_parent_for(controller_name)
 
         # Parse and filter
         ast = SourceParser.parse(source_path)
-        ast = ast.transform(InstanceVarToLocal.new)
-        ast = ast.transform(ParamsExpect.new)
-        ast = ast.transform(RespondToHTML.new)
-        ast = ast.transform(StrongParams.new)
+        ast = SharedControllerFilters.apply(ast)
         ast = ast.transform(ControllerBoilerplatePython.new(controller_name, model_name, nested_parent, info.before_actions))
 
         # Emit
@@ -563,21 +557,6 @@ module Railcar
       end
 
       File.write(File.join(controllers_dir, "__init__.py"), "")
-    end
-
-    private def find_nested_parent(controller_name : String) : String?
-      app.routes.routes.each do |route|
-        if route.controller == Inflector.pluralize(controller_name) && route.path.includes?(":")
-          parts = route.path.split("/").reject(&.empty?)
-          parts.each_with_index do |part, i|
-            if part.starts_with?(":") && i > 0
-              parent = Inflector.singularize(parts[i - 1])
-              return parent if parent != controller_name
-            end
-          end
-        end
-      end
-      nil
     end
 
     # ── Emit views ──

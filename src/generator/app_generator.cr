@@ -9,10 +9,7 @@ require "./crystal_emitter"
 require "./erb_converter"
 require "./controller_generator"
 require "./prism_translator"
-require "../filters/instance_var_to_local"
-require "../filters/params_expect"
-require "../filters/respond_to_html"
-require "../filters/strong_params"
+require "../filters/shared_controller_filters"
 require "../filters/redirect_to_response"
 require "../filters/render_to_ecr"
 require "../filters/strip_callbacks"
@@ -216,7 +213,7 @@ module Railcar
 
     private def generate_controller_file(info : ControllerInfo, controller_name : String) : String
       singular = CrystalEmitter.singularize(controller_name)
-      nested_parent = find_nested_parent(controller_name)
+      nested_parent = route_set.nested_parent_for(controller_name)
       model_names = models.keys.to_a
       views_dir = File.join(rails_dir, "app/views")
 
@@ -235,10 +232,7 @@ module Railcar
       # 7. ControllerSignature  — add typed params, inline before_actions, view rendering
       # 8. ControllerBoilerplate — inject includes, helpers, partial renderers
       # 9. ModelNamespace       — Article → Railcar::Article (must be last)
-      ast = ast.transform(InstanceVarToLocal.new)
-      ast = ast.transform(ParamsExpect.new)
-      ast = ast.transform(RespondToHTML.new)
-      ast = ast.transform(StrongParams.new)
+      ast = SharedControllerFilters.apply(ast)
       ast = ast.transform(RedirectToResponse.new)
       ast = ast.transform(RenderToECR.new(controller_name))
       ast = ast.transform(ControllerSignature.new(controller_name, nested_parent, info.before_actions, model_names))
@@ -263,18 +257,6 @@ module Railcar
       Crystal::Expressions.new(nodes).to_s + "\n"
     end
 
-    # Find nested parent from route structure
-    private def find_nested_parent(controller_name : String) : String?
-      route_set.routes.each do |route|
-        if route.controller == controller_name && route.path.includes?("_id")
-          # Extract parent from path like /articles/:article_id/comments
-          if match = route.path.match(/:(\w+)_id/)
-            return match[1]
-          end
-        end
-      end
-      nil
-    end
 
     # Generate the route matching file
     private def generate_routes

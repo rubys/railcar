@@ -16,10 +16,7 @@ require "./prism_translator"
 require "./controller_extractor"
 require "./python_emitter"
 require "./inflector"
-require "../filters/instance_var_to_local"
-require "../filters/params_expect"
-require "../filters/respond_to_html"
-require "../filters/strong_params"
+require "../filters/shared_controller_filters"
 require "../filters/python_constructor"
 require "../filters/python_redirect"
 require "../filters/python_render"
@@ -203,18 +200,12 @@ module Railcar
       # Process the action body through the filter chain
       if body = action.body
         translated = PrismTranslator.new.translate(body)
-        filters = [
-          InstanceVarToLocal.new,
-          ParamsExpect.new,
-          RespondToHTML.new,
-          StrongParams.new,
+        filtered = SharedControllerFilters.apply(translated.as(Crystal::ASTNode))
+        [
           PythonConstructor.new,
           PythonRedirect.new,
           PythonRender.new(plural, singular),
-        ] of Crystal::Transformer
-
-        filtered = translated.as(Crystal::ASTNode)
-        filters.each { |f| filtered = filtered.transform(f) }
+        ].each { |f| filtered = filtered.transform(f) }
 
         emitter = PythonEmitter.new(indent: 1)
         body_py = emitter.emit_body(filtered)
