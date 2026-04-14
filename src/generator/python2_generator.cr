@@ -594,7 +594,7 @@ module Railcar
 
           begin
             ast = SourceParser.parse_source(ruby_code)
-            # Same filter chain as --python0
+            # View filter chain: normalize Rails helpers before emission
             ast = ast.transform(InstanceVarToLocal.new)
             ast = ast.transform(RailsHelpers.new)
             ast = ast.transform(LinkToPathHelper.new)

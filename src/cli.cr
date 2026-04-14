@@ -1,6 +1,5 @@
 require "./generator/app_generator"
 require "./generator/rbs_generator"
-require "./generator/python_generator"
 require "./generator/python2_generator"
 
 # Ensure Crystal stdlib is findable at runtime for semantic analysis.
@@ -19,7 +18,6 @@ TARGET_ALIASES = {
   "typescript" => "typescript",
   "ts"         => "typescript",
   "rbs"        => "rbs",
-  "python0"    => "python0",
 }
 
 # Detect target from ARGV flags (--python, --cr, --target=ts, etc.)
@@ -77,7 +75,4 @@ when "typescript"
 when "rbs"
   app = Railcar::AppModel.extract(rails_dir)
   Railcar::RbsGenerator.new(app, rails_dir).generate(output_dir)
-when "python0"
-  app = Railcar::AppModel.extract(rails_dir)
-  Railcar::PythonGenerator.new(app, rails_dir).generate(output_dir)
 end
