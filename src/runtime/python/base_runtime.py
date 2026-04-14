@@ -3,8 +3,16 @@
 # Crystal base.cr is used only for program.semantic() type checking.
 
 from datetime import datetime
+import json
+import base64
 
 MODEL_REGISTRY = {}
+
+
+def _turbo_stream_html(action, target, content=""):
+    if content:
+        return f'<turbo-stream action="{action}" target="{target}"><template>{content}</template></turbo-stream>'
+    return f'<turbo-stream action="{action}" target="{target}"></turbo-stream>'
 
 
 class ValidationErrors:
@@ -103,6 +111,88 @@ class ApplicationRecord:
         super().__init_subclass__(**kwargs)
         MODEL_REGISTRY[cls.__name__] = cls
 
+    # --- Callback registration (class-level) ---
+
+    @classmethod
+    def after_save(cls, callback):
+        if '_after_save_callbacks' not in cls.__dict__:
+            cls._after_save_callbacks = []
+        cls._after_save_callbacks.append(callback)
+
+    @classmethod
+    def after_destroy(cls, callback):
+        if '_after_destroy_callbacks' not in cls.__dict__:
+            cls._after_destroy_callbacks = []
+        cls._after_destroy_callbacks.append(callback)
+
+    def _run_callbacks(self, name):
+        callbacks = getattr(self.__class__, f'_{name}_callbacks', [])
+        for cb in callbacks:
+            cb(self)
+
+    # --- Broadcasting ---
+
+    _broadcaster = None  # Set to CableServer instance by app.py
+
+    def broadcast_replace_to(self, channel, target=None):
+        if not ApplicationRecord._broadcaster:
+            return
+        target = target or self._dom_id()
+        html = self._render_broadcast_partial()
+        stream = _turbo_stream_html("replace", target, html)
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            asyncio.ensure_future(ApplicationRecord._broadcaster.broadcast(channel, stream))
+        except RuntimeError:
+            pass
+
+    def broadcast_append_to(self, channel, target=None):
+        if not ApplicationRecord._broadcaster:
+            return
+        target = target or self.__class__.TABLE
+        html = self._render_broadcast_partial()
+        stream = _turbo_stream_html("append", target, html)
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            asyncio.ensure_future(ApplicationRecord._broadcaster.broadcast(channel, stream))
+        except RuntimeError:
+            pass
+
+    def broadcast_prepend_to(self, channel, target=None):
+        if not ApplicationRecord._broadcaster:
+            return
+        target = target or self.__class__.TABLE
+        html = self._render_broadcast_partial()
+        stream = _turbo_stream_html("prepend", target, html)
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            asyncio.ensure_future(ApplicationRecord._broadcaster.broadcast(channel, stream))
+        except RuntimeError:
+            pass
+
+    def broadcast_remove_to(self, channel, target=None):
+        if not ApplicationRecord._broadcaster:
+            return
+        target = target or self._dom_id()
+        stream = _turbo_stream_html("remove", target)
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            asyncio.ensure_future(ApplicationRecord._broadcaster.broadcast(channel, stream))
+        except RuntimeError:
+            pass
+
+    def _dom_id(self):
+        name = self.__class__.__name__.lower()
+        return f"{name}_{self.id}"
+
+    def _render_broadcast_partial(self):
+        """Override in model subclass to render the actual partial."""
+        return ""
+
     def __init__(self, attrs=None, **kwargs):
         if attrs:
             kwargs.update(attrs)
@@ -174,6 +264,7 @@ class ApplicationRecord:
             db.execute(
                 f"UPDATE {self.__class__.TABLE} SET {sets} WHERE id = ?", values)
         db.commit()
+        self._run_callbacks('after_save')
         return True
 
     def destroy(self):
@@ -183,6 +274,7 @@ class ApplicationRecord:
         db.execute(f"DELETE FROM {self.__class__.TABLE} WHERE id = ?", (self.id,))
         db.commit()
         self._persisted = False
+        self._run_callbacks('after_destroy')
         return True
 
     def reload(self):

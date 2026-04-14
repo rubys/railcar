@@ -197,6 +197,32 @@ module Railcar
     def run_validations
     end
 
+    # Callback stubs — the Python runtime has a real callback system.
+    # These exist only so program.semantic() can resolve the calls.
+    def self.after_save(&block)
+    end
+
+    def self.after_create_commit(&block)
+    end
+
+    def self.after_destroy(&block)
+    end
+
+    def self.after_destroy_commit(&block)
+    end
+
+    def broadcast_replace_to(channel : String, target : String? = nil)
+    end
+
+    def broadcast_append_to(channel : String, target : String? = nil)
+    end
+
+    def broadcast_prepend_to(channel : String, target : String? = nil)
+    end
+
+    def broadcast_remove_to(channel : String, target : String? = nil)
+    end
+
     def self.table_name : String
       ""
     end

@@ -642,6 +642,13 @@ module Cr2Py
         end
       end
 
+      # after_save/after_destroy { expr } → ClassName.after_save(lambda self: expr)
+      if block && !obj && (name == "after_save" || name == "after_destroy")
+        body_expr = to_expr(block.body)
+        cls_name = @current_class_name.try(&.split("::").last) || "self.__class__"
+        return [PyAST::Statement.new("#{cls_name}.#{name}(lambda self: #{body_expr})")] of PyAST::Node
+      end
+
       # General block → call + indented body
       if block
         return block_call_to_nodes(node, block)

@@ -73,18 +73,19 @@ module Railcar
         class_body << build_association_method(assoc)
       end
 
-      # Copy custom methods from original class (not associations/validations)
+      # Copy custom methods (skip DSL calls and callbacks)
       case body = node.body
       when Crystal::Expressions
         body.expressions.each do |expr|
           next if expr.is_a?(Crystal::Nop)
           next if Railcar.rails_model_dsl?(expr)
+          next if is_callback?(expr)
           class_body << expr
         end
       when Crystal::Nop
         # empty
       else
-        if body && !Railcar.rails_model_dsl?(body)
+        if body && !Railcar.rails_model_dsl?(body) && !is_callback?(body)
           class_body << body
         end
       end
@@ -186,5 +187,9 @@ module Railcar
       Crystal::Parser.parse("def destroy : Bool\n#{stmts.join("\n")}\nend").as(Crystal::Def)
     end
 
+    private def is_callback?(node : Crystal::ASTNode) : Bool
+      return false unless node.is_a?(Crystal::Call)
+      Railcar::RAILS_MODEL_CALLBACKS.includes?(node.as(Crystal::Call).name)
+    end
   end
 end

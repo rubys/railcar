@@ -13,10 +13,16 @@ module Railcar
   RAILS_MODEL_DSL = Set{
     "has_many", "has_one", "belongs_to", "validates",
     "broadcasts_to", "broadcasts",
+    "scope", "enum", "delegate", "accepts_nested_attributes_for",
+  }
+
+  # Callbacks — BroadcastsTo converts broadcasts_to into after_save/after_destroy.
+  # Crystal ModelBoilerplate preserves these (handled by the macro runtime).
+  # Python ModelBoilerplatePython extracts broadcast info and strips the rest.
+  RAILS_MODEL_CALLBACKS = Set{
     "after_save", "after_destroy", "after_create", "after_update",
     "after_create_commit", "after_update_commit", "after_destroy_commit",
     "before_save", "before_destroy", "before_create", "before_update",
-    "scope", "enum", "delegate", "accepts_nested_attributes_for",
   }
 
   RAILS_CONTROLLER_DSL = Set{

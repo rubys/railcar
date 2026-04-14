@@ -16,7 +16,7 @@ module Railcar
     end
   end
 
-  LAYOUT_HEAD = "<!DOCTYPE html>\n<html>\n<head>\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n  <link rel=\"stylesheet\" href=\"/static/app.css\">\n  <script type=\"module\" src=\"/static/turbo.min.js\"></script>\n</head>\n<body>\n  <main class=\"container mx-auto mt-28 px-5 flex flex-col\">"
+  LAYOUT_HEAD = "<!DOCTYPE html>\n<html>\n<head>\n  <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n  <meta name=\"action-cable-url\" content=\"/cable\">\n  <link rel=\"stylesheet\" href=\"/static/app.css\">\n  <script type=\"module\" src=\"/static/turbo.min.js\"></script>\n</head>\n<body>\n  <main class=\"container mx-auto mt-28 px-5 flex flex-col\">"
   LAYOUT_TAIL = "  </main>\n</body>\n</html>"
 
   def self.layout(content : String, title : String = "Blog") : String
@@ -62,9 +62,8 @@ module Railcar
     end
   end
 
-  def self.turbo_stream_from(channel : String) : String
-    ""
-  end
+  # turbo_stream_from is emitted as hand-written Python by the generator
+  # (requires base64/json which don't transpile from Crystal)
 
   def self.content_for(name : String, value : String)
   end

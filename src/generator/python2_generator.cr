@@ -126,6 +126,7 @@ module Railcar
 
         # Parse Rails model → Crystal AST → filter chain (no macros)
         ast = SourceParser.parse(source_path)
+        ast = ast.transform(BroadcastsTo.new)
         ast = ast.transform(ModelBoilerplatePython.new(schema, model))
 
         asts << ast
@@ -285,7 +286,12 @@ module Railcar
         f << "\n# Route helpers\n"
         append_route_helpers(f)
         f << "\n# Python-specific helpers\n"
+        f << "import json as _json\n"
+        f << "import base64 as _base64\n"
         f << "from urllib.parse import parse_qs, urlencode\n\n"
+        f << "def turbo_stream_from(channel):\n"
+        f << "    signed = _base64.b64encode(_json.dumps(channel).encode()).decode()\n"
+        f << "    return f'<turbo-cable-stream-source channel=\"Turbo::StreamsChannel\" signed-stream-name=\"{signed}\"></turbo-cable-stream-source>'\n\n"
         f << "def truncate(text, length=30, omission='...'):\n"
         f << "    if text is None:\n"
         f << "        return ''\n"
@@ -383,9 +389,101 @@ module Railcar
 
         py_path = "models/#{Inflector.underscore(class_name)}.py"
         emit_file([node], py_path, output_dir, emitter, serializer, filters)
+
+        # Append broadcast callbacks extracted from the original Rails source
+        append_broadcast_callbacks(class_name, output_dir, py_path)
       end
 
       File.write(File.join(models_dir, "__init__.py"), "")
+    end
+
+    private def append_broadcast_callbacks(class_name : String, output_dir : String, py_path : String)
+      source_path = File.join(rails_dir, "app/models/#{Inflector.underscore(class_name)}.rb")
+      return unless File.exists?(source_path)
+
+      # Parse and run BroadcastsTo to get after_save/after_destroy nodes
+      ast = SourceParser.parse(source_path)
+      ast = ast.transform(BroadcastsTo.new)
+
+      callbacks = [] of String
+      exprs = case ast
+              when Crystal::ClassDef
+                case ast.body
+                when Crystal::Expressions then ast.body.as(Crystal::Expressions).expressions
+                else [ast.body]
+                end
+              else [] of Crystal::ASTNode
+              end
+
+      exprs.each do |expr|
+        next unless expr.is_a?(Crystal::Call)
+        call = expr.as(Crystal::Call)
+        next unless {"after_save", "after_destroy"}.includes?(call.name)
+        next unless block = call.block
+
+        # Extract the broadcast call from the block body
+        broadcast_call = extract_broadcast_expr(block.body)
+        next unless broadcast_call
+
+        callback_type = call.name
+        callbacks << "#{class_name}.#{callback_type}(lambda self: self.#{broadcast_call})"
+      end
+
+      return if callbacks.empty?
+
+      out_path = File.join(output_dir, py_path)
+      File.open(out_path, "a") do |f|
+        f << "\n# Turbo Streams broadcast callbacks\n"
+        callbacks.each { |cb| f << cb << "\n" }
+      end
+    end
+
+    private def extract_broadcast_expr(body : Crystal::ASTNode) : String?
+      call = case body
+             when Crystal::Call then body
+             when Crystal::ExceptionHandler
+               body.body.is_a?(Crystal::Call) ? body.body.as(Crystal::Call) : nil
+             when Crystal::Expressions
+               first = body.as(Crystal::Expressions).expressions.first?
+               first.is_a?(Crystal::Call) ? first.as(Crystal::Call) : nil
+             else nil
+             end
+      return nil unless call
+      return nil unless call.name.starts_with?("broadcast_")
+
+      # Build Python expression: broadcast_replace_to("channel") or article.broadcast_replace_to("channel")
+      args = call.args.map do |a|
+        case a
+        when Crystal::StringLiteral
+          a.value.inspect
+        when Crystal::StringInterpolation
+          # Convert Crystal interpolation to Python f-string
+          parts = a.expressions.map do |part|
+            case part
+            when Crystal::StringLiteral then part.value
+            when Crystal::Call
+              # article_id → self.article_id (rewrite bare calls to self)
+              if part.obj.nil? && part.args.empty?
+                "{self.#{part.name}}"
+              else
+                "{self.#{part.name}}"
+              end
+            else "{#{part}}"
+            end
+          end
+          "f\"#{parts.join}\""
+        else
+          a.to_s.inspect
+        end
+      end
+
+      method = call.name
+      if obj = call.obj
+        # article.broadcast_replace_to(...) → self.article().broadcast_replace_to(...)
+        "#{obj.to_s}().#{method}(#{args.join(", ")})"
+      else
+        "#{method}(#{args.join(", ")})"
+      end
     end
 
     # ── Emit controllers ──
@@ -632,7 +730,8 @@ module Railcar
       io << "            except Exception:\n"
       io << "                pass\n"
       io << "\n"
-      io << "cable = CableServer()\n\n"
+      io << "cable = CableServer()\n"
+      io << "ApplicationRecord._broadcaster = cable\n\n"
 
       io << "async def cable_handler(request):\n"
       io << "    ws = web.WebSocketResponse(protocols=['actioncable-v1-json'])\n"
