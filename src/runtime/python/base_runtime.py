@@ -133,65 +133,52 @@ class ApplicationRecord:
     # --- Broadcasting ---
 
     _broadcaster = None  # Set to CableServer instance by app.py
+    render_partial = None  # Set by app.py to the view's render_*_partial function
+
+    def _broadcast(self, action, channel, target=None):
+        if not ApplicationRecord._broadcaster:
+            return
+        if target is None:
+            target = self._dom_id() if action in ('replace', 'remove') else self.__class__.TABLE
+        if action == 'remove':
+            html = ''
+        elif self.__class__.render_partial:
+            html = self.__class__.render_partial(self)
+        else:
+            html = self.to_html()
+        stream = _turbo_stream_html(action, target, html)
+        import asyncio
+        try:
+            asyncio.get_running_loop()
+            asyncio.ensure_future(ApplicationRecord._broadcaster.broadcast(channel, stream))
+        except RuntimeError:
+            pass
 
     def broadcast_replace_to(self, channel, target=None):
-        if not ApplicationRecord._broadcaster:
-            return
-        target = target or self._dom_id()
-        html = self._render_broadcast_partial()
-        stream = _turbo_stream_html("replace", target, html)
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            asyncio.ensure_future(ApplicationRecord._broadcaster.broadcast(channel, stream))
-        except RuntimeError:
-            pass
+        self._broadcast('replace', channel, target)
 
     def broadcast_append_to(self, channel, target=None):
-        if not ApplicationRecord._broadcaster:
-            return
-        target = target or self.__class__.TABLE
-        html = self._render_broadcast_partial()
-        stream = _turbo_stream_html("append", target, html)
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            asyncio.ensure_future(ApplicationRecord._broadcaster.broadcast(channel, stream))
-        except RuntimeError:
-            pass
+        self._broadcast('append', channel, target)
 
     def broadcast_prepend_to(self, channel, target=None):
-        if not ApplicationRecord._broadcaster:
-            return
-        target = target or self.__class__.TABLE
-        html = self._render_broadcast_partial()
-        stream = _turbo_stream_html("prepend", target, html)
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            asyncio.ensure_future(ApplicationRecord._broadcaster.broadcast(channel, stream))
-        except RuntimeError:
-            pass
+        self._broadcast('prepend', channel, target)
 
     def broadcast_remove_to(self, channel, target=None):
-        if not ApplicationRecord._broadcaster:
-            return
-        target = target or self._dom_id()
-        stream = _turbo_stream_html("remove", target)
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-            asyncio.ensure_future(ApplicationRecord._broadcaster.broadcast(channel, stream))
-        except RuntimeError:
-            pass
+        self._broadcast('remove', channel, target)
 
     def _dom_id(self):
         name = self.__class__.__name__.lower()
         return f"{name}_{self.id}"
 
-    def _render_broadcast_partial(self):
-        """Override in model subclass to render the actual partial."""
-        return ""
+    def to_html(self):
+        """Fallback HTML for broadcasts when no partial is available."""
+        dom_id = self._dom_id()
+        attrs = ' '.join(
+            f'<span class="{k}">{getattr(self, k, "")}</span>'
+            for k in self.__class__.COLUMNS
+            if k not in ('created_at', 'updated_at')
+        )
+        return f'<div id="{dom_id}">{attrs}</div>'
 
     def __init__(self, attrs=None, **kwargs):
         if attrs:

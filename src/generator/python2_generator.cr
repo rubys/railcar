@@ -818,6 +818,14 @@ module Railcar
 
       # Route dispatch
       io << "def create_app():\n"
+      # Wire broadcast partials
+      app.models.each_key do |name|
+        singular = Inflector.underscore(name)
+        plural = Inflector.pluralize(singular)
+        io << "    from views.#{plural} import render_#{singular}_partial\n"
+        io << "    from models.#{singular} import #{name}\n"
+        io << "    #{name}.render_partial = render_#{singular}_partial\n"
+      end
       io << "    application = web.Application()\n"
 
       app.routes.routes.each do |route|
