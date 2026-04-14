@@ -321,8 +321,11 @@ module Railcar
             stmts << Crystal::Assign.new(node.target,
               Crystal::Call.new(call.obj, "find", new_args))
           elsif call.name == "includes" || call.name == "order"
-            # Article.includes(:comments).order(...) → Article.all()
-            stmts << Crystal::Assign.new(node.target, Crystal::Call.new(Crystal::Path.new(@model_name), "all"))
+            # Article.includes(:comments).order(created_at: :desc) → Article.all(order_by='created_at DESC')
+            order_arg = extract_order_arg(call)
+            all_args = order_arg ? [Crystal::NamedArgument.new("order_by", Crystal::StringLiteral.new(order_arg))] : nil
+            stmts << Crystal::Assign.new(node.target,
+              Crystal::Call.new(Crystal::Path.new(@model_name), "all", named_args: all_args))
           else
             stmts << node
           end
@@ -410,6 +413,29 @@ module Railcar
         Crystal::Call.new(Crystal::Path.new(["web", "Response"]), "new",
           named_args: response_args)
       )
+    end
+
+    # Extract ORDER BY clause from .order(field: :direction) call chain
+    private def extract_order_arg(call : Crystal::Call) : String?
+      # Walk the chain to find an "order" call
+      node = call
+      while node.is_a?(Crystal::Call)
+        if node.name == "order"
+          # order(created_at: :desc) → named args
+          if named = node.named_args
+            if na = named.first?
+              dir = na.value.to_s.strip(':').strip('"').upcase
+              return "#{na.name} #{dir}"
+            end
+          end
+          # order(:created_at) → positional arg
+          if !node.args.empty?
+            return node.args[0].to_s.strip(':').strip('"')
+          end
+        end
+        node = node.obj
+      end
+      nil
     end
 
     private def replace_params_with_data(node : Crystal::ASTNode) : Crystal::ASTNode
