@@ -66,6 +66,7 @@ module Railcar
         LinkToPathHelper.new,
         ButtonToPathHelper.new,
         RenderToPartial.new,
+        FormToHTML.new,
       ] of Crystal::Transformer
     end
 

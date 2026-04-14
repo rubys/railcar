@@ -205,6 +205,7 @@ module Railcar
       io << "import path from \"path\";\n"
       io << "import { fileURLToPath } from \"url\";\n"
       io << "import type { Response } from \"express\";\n"
+      io << "import { MODEL_REGISTRY } from \"./runtime/base.js\";\n"
       io << "\n"
       io << "const __helpers_dir = path.dirname(fileURLToPath(import.meta.url));\n\n"
 
@@ -246,7 +247,7 @@ module Railcar
         helper_names << ts_name
       end
       io << "// Helpers object for EJS template locals\n"
-      io << "export const helpers = { #{helper_names.join(", ")} } as Record<string, unknown>;\n\n"
+      io << "export const helpers = { #{helper_names.join(", ")}, MODEL_REGISTRY } as Record<string, unknown>;\n\n"
 
       File.write(File.join(output_dir, "helpers.ts"), io.to_s)
       puts "  helpers.ts"
@@ -394,7 +395,7 @@ module Railcar
       const locals: Record<string, unknown> = {
         ...helpers, helpers,
         [varName]: data, [singular]: data, [plural]: data,
-        notice: null, flash: {},
+        notice: null, flash: {}, MODEL_REGISTRY,
       };
       const content = ejs.render(
         fs.readFileSync(templatePath, "utf-8"),

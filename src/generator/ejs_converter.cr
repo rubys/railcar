@@ -449,6 +449,10 @@ module Railcar
       case name
       when "new"
         obj_str = obj ? to_js(obj) : "Object"
+        # Use MODEL_REGISTRY for model constructors in EJS templates
+        if obj.is_a?(Crystal::Path)
+          return "new MODEL_REGISTRY[#{obj_str.inspect}](#{args.join(", ")})"
+        end
         return "new #{obj_str}(#{args.join(", ")})"
       when "to_s"
         return obj ? "String(#{to_js(obj)})" : "String()"
@@ -474,7 +478,8 @@ module Railcar
 
       # Helper function calls → helpers.camelCase()
       if !obj && {"link_to", "button_to", "truncate", "dom_id", "pluralize",
-                   "turbo_stream_from", "content_for"}.includes?(name)
+                   "turbo_stream_from", "content_for",
+                   "form_with_open_tag", "form_submit_tag"}.includes?(name)
         ts_name = name.gsub(/_([a-z])/) { |_, m| m[1].upcase }
         return "helpers.#{ts_name}(#{args.join(", ")})"
       end
