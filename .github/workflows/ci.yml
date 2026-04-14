@@ -63,3 +63,10 @@ jobs:
           cd src/runtime/typescript
           npm install
           npx tsx base_runtime_test.ts
+
+      - name: Generate and test TypeScript blog (--typescript)
+        run: |
+          build/railcar --typescript build/demo/blog build/ts-blog
+          cd build/ts-blog
+          npm install
+          npx tsx --test tests/*.test.ts
