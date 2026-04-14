@@ -50,7 +50,6 @@ module Railcar
           io << "import { #{parent_model} } from \"../models/#{nested_parent}.js\";\n"
         end
         io << "import * as helpers from \"../helpers.js\";\n"
-        io << "import * as views from \"../views/#{plural}.js\";\n"
         io << "\n"
 
         # Emit each function from the filtered AST
@@ -240,6 +239,11 @@ module Railcar
       # Path helpers → helpers.namePath()
       if name.ends_with?("Path")
         return "helpers.#{name}(#{args.join(", ")})"
+      end
+
+      # renderView(res, template, data, status?) → helpers.renderView(...)
+      if name == "renderView"
+        return "helpers.renderView(#{args.join(", ")})"
       end
 
       # View render functions → views.renderName()

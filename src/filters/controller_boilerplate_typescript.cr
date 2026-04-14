@@ -364,22 +364,23 @@ module Railcar
     end
 
     private def build_response(template : String, singular : String, status : Int32) : Crystal::ASTNode
-      var_name = template == "index" ? Inflector.pluralize(singular) : singular
-      # Capitalize template name for function: renderIndex, renderShow, etc.
-      func_name = "render#{template.capitalize}"
-      render_call = Crystal::Call.new(nil, func_name,
-        [Crystal::Var.new(var_name)] of Crystal::ASTNode)
-      layout_call = Crystal::Call.new(nil, "layout", [render_call] of Crystal::ASTNode)
+      plural = Inflector.pluralize(singular)
+      # Template path: "articles/index", "articles/new", etc.
+      template_path = "#{plural}/#{template}"
+      var_name = template == "index" ? plural : singular
+
+      # renderView(res, "articles/index", { articles, helpers })
+      render_args = [
+        Crystal::Var.new("res"),
+        Crystal::StringLiteral.new(template_path),
+        Crystal::Var.new(var_name),
+      ] of Crystal::ASTNode
 
       if status != 200
-        # res.status(422).send(layout(renderNew(article)))
-        status_call = Crystal::Call.new(Crystal::Var.new("res"), "status",
-          [Crystal::NumberLiteral.new(status.to_s)] of Crystal::ASTNode)
-        Crystal::Call.new(status_call, "send", [layout_call] of Crystal::ASTNode)
-      else
-        # res.send(layout(renderIndex(articles)))
-        Crystal::Call.new(Crystal::Var.new("res"), "send", [layout_call] of Crystal::ASTNode)
+        render_args << Crystal::NumberLiteral.new(status.to_s)
       end
+
+      Crystal::Call.new(nil, "renderView", render_args)
     end
 
     private def extract_order_arg(call : Crystal::Call) : String?

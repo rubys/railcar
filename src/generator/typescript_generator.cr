@@ -49,7 +49,7 @@ module Railcar
       emit_helpers(output_dir)
       emit_models(typed_ast, output_dir, emitter)
       emit_broadcast_callbacks(output_dir)
-      TypeScriptViewGenerator.new(app, rails_dir, emitter).generate(output_dir)
+      TypeScriptViewGenerator.new(app, rails_dir).generate(output_dir)
       TypeScriptControllerGenerator.new(app, rails_dir, emitter).generate(output_dir)
       emit_app(output_dir)
       copy_static_assets(output_dir)
@@ -201,6 +201,12 @@ module Railcar
     private def emit_helpers(output_dir : String)
       io = IO::Memory.new
       io << "// View and route helpers for railcar-generated TypeScript apps.\n\n"
+      io << "import ejs from \"ejs\";\n"
+      io << "import path from \"path\";\n"
+      io << "import { fileURLToPath } from \"url\";\n"
+      io << "import type { Response } from \"express\";\n"
+      io << "\n"
+      io << "const __helpers_dir = path.dirname(fileURLToPath(import.meta.url));\n\n"
 
       # Route helpers from route data model
       io << "// Route helpers\n"
@@ -353,6 +359,26 @@ module Railcar
       }
       return parts.join("&");
     }
+
+    const viewsDir = path.join(__helpers_dir, "views");
+    const layoutPath = path.join(viewsDir, "layouts", "application.ejs");
+
+    export function renderView(res: Response, template: string, data: unknown, status: number = 200): void {
+      const templatePath = path.join(viewsDir, template + ".ejs");
+      const self = exports;
+      const locals = { ...self, data, [template.split("/").pop()!.replace(/^_/, "")]: data };
+      const content = ejs.render(
+        require("fs").readFileSync(templatePath, "utf-8"),
+        locals,
+        { filename: templatePath }
+      );
+      const html = ejs.render(
+        require("fs").readFileSync(layoutPath, "utf-8"),
+        { content, title: (locals as Record<string, unknown>).title || "Blog" },
+        { filename: layoutPath }
+      );
+      res.status(status).send(html);
+    }
     TS
 
     # ── Emit models ──
@@ -484,12 +510,8 @@ module Railcar
         io << "import { #{name} } from \"./models/#{Inflector.underscore(name)}.js\";\n"
       end
 
-      # Import view partials for broadcast wiring
-      app.models.each_key do |name|
-        singular = Inflector.underscore(name)
-        plural = Inflector.pluralize(singular)
-        io << "import { render#{Inflector.classify(singular)}Partial } from \"./views/#{plural}.js\";\n"
-      end
+      io << "import ejs from \"ejs\";\n"
+      io << "import fs from \"fs\";\n"
       io << "\n"
 
       io << "const __dirname = path.dirname(fileURLToPath(import.meta.url));\n\n"
@@ -525,9 +547,14 @@ module Railcar
 
       # Create app
       io << "function createApp(): express.Application {\n"
+      io << "  const viewsDir = path.join(__dirname, \"views\");\n"
       app.models.each_key do |name|
         singular = Inflector.underscore(name)
-        io << "  #{name}.renderPartial = render#{Inflector.classify(singular)}Partial;\n"
+        plural = Inflector.pluralize(singular)
+        io << "  #{name}.renderPartial = (record) => {\n"
+        io << "    const tmpl = fs.readFileSync(path.join(viewsDir, \"#{plural}/_#{singular}.ejs\"), \"utf-8\");\n"
+        io << "    return ejs.render(tmpl, { #{singular}: record, helpers: require(\"./helpers.js\") }, { filename: path.join(viewsDir, \"#{plural}/_#{singular}.ejs\") });\n"
+        io << "  };\n"
       end
       io << "  const app = express();\n"
       io << "  app.use(express.urlencoded({ extended: true }));\n"
@@ -688,10 +715,12 @@ module Railcar
         "type": "module",
         "dependencies": {
           "better-sqlite3": "^11.0.0",
+          "ejs": "^3.1.0",
           "express": "^4.21.0"
         },
         "devDependencies": {
           "@types/better-sqlite3": "^7.6.0",
+          "@types/ejs": "^3.1.0",
           "@types/express": "^5.0.0",
           "tsx": "^4.0.0",
           "typescript": "^5.0.0"
