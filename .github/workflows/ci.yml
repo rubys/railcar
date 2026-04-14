@@ -52,8 +52,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
-      - name: Generate and test Python blog
+      - name: Generate and test Python blog (--python)
         run: |
-          build/railcar --python0 build/demo/blog build/python-blog
+          build/railcar --python build/demo/blog build/python-blog
           cd build/python-blog
-          uv run --extra test pytest tests/ -v
+          uv run --extra test python -m pytest tests/ -v
