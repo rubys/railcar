@@ -23,6 +23,7 @@ require "../filters/broadcasts_to"
 require "../filters/controller_boilerplate_python"
 require "./erb_compiler"
 require "../filters/instance_var_to_local"
+require "../filters/view_cleanup"
 require "../filters/params_expect"
 require "../filters/respond_to_html"
 require "../filters/strong_params"
@@ -439,11 +440,20 @@ module Railcar
           begin
             ast = SourceParser.parse_source(ruby_code)
             ast = ast.transform(InstanceVarToLocal.new)
+            ast = ast.transform(ViewCleanup.new)
+            # Convert bare calls matching parameter names to Var nodes
+            ast = ViewCleanup.calls_to_vars(ast, [singular, "_buf", "notice", "flash"])
 
-            # Wrap in a function
+            # Wrap in a function (strip any remaining def render wrapper)
+            body = if ast.is_a?(Crystal::Def) && ast.name == "render"
+                     ast.body
+                   else
+                     ast
+                   end
+
             arg = Crystal::Arg.new(singular)
             func_def = Crystal::Def.new(func_name, [arg] of Crystal::Arg,
-              ast, return_type: Crystal::Path.new("String"))
+              body, return_type: Crystal::Path.new("String"))
 
             py_func_nodes = emitter.to_nodes(func_def)
             view_nodes.concat(py_func_nodes)
