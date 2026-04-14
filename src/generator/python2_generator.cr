@@ -287,7 +287,7 @@ module Railcar
         f << "\n# Python-specific helpers\n"
         f << "from urllib.parse import parse_qs, urlencode\n\n"
         f << "def parse_form(body_bytes):\n"
-        f << "    return parse_qs(body_bytes.decode('utf-8'))\n\n"
+        f << "    return parse_qs(body_bytes.decode('utf-8'), keep_blank_values=True)\n\n"
         f << "def form_value(data, key):\n"
         f << "    return data.get(key, [''])[0]\n\n"
         f << "def extract_model_params(data, model):\n"

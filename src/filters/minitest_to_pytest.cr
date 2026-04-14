@@ -284,8 +284,10 @@ module Railcar
           # assert_select("selector") → assert "selector-fragment" in body
           selector = args[0].to_s.strip('"')
           # Convert CSS selector to a string fragment to search for
+          # Extract just the first ID/class/tag from a compound selector
           fragment = if selector.starts_with?("#")
-                       "id=\"#{selector.lstrip('#')}\""
+                       id_part = selector.lstrip('#').split(/[\s\.\#\[]/, 2).first
+                       "id=\"#{id_part}\""
                      elsif selector.starts_with?(".")
                        "class=\"#{selector.lstrip('.')}"
                      else

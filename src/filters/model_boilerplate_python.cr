@@ -122,7 +122,7 @@ module Railcar
         target = Inflector.classify(assoc.name)
         fk = assoc.options["foreign_key"]? || "#{assoc.name}_id"
         Crystal::Parser.parse(
-          "def #{assoc.name}\n  MODEL_REGISTRY[\"#{target}\"].find(@#{fk}.as(Int64))\nend"
+          "def #{assoc.name} : ApplicationRecord\n  MODEL_REGISTRY[\"#{target}\"].find(@#{fk}.as(Int64))\nend"
         )
       else
         Crystal::Nop.new
