@@ -265,6 +265,34 @@ module Railcar
 
       return if helper_nodes.empty?
       emit_file(helper_nodes, "helpers.py", output_dir, emitter, serializer, filters)
+
+      # Append Python-specific helpers (not transpiled from Crystal)
+      helpers_path = File.join(output_dir, "helpers.py")
+      File.open(helpers_path, "a") do |f|
+        f << "\n# Python-specific helpers\n"
+        f << "from urllib.parse import parse_qs, urlencode\n\n"
+        f << "def parse_form(body_bytes):\n"
+        f << "    return parse_qs(body_bytes.decode('utf-8'))\n\n"
+        f << "def form_value(data, key):\n"
+        f << "    return data.get(key, [''])[0]\n\n"
+        f << "def extract_model_params(data, model):\n"
+        f << "    result = {}\n"
+        f << "    prefix = f'{model}['\n"
+        f << "    for key, values in data.items():\n"
+        f << "        if key.startswith(prefix) and key.endswith(']'):\n"
+        f << "            field = key[len(prefix):-1]\n"
+        f << "            result[field] = values[0]\n"
+        f << "    return result\n\n"
+        f << "def encode_params(params):\n"
+        f << "    flat = {}\n"
+        f << "    for outer_key, inner in params.items():\n"
+        f << "        if isinstance(inner, dict):\n"
+        f << "            for k, v in inner.items():\n"
+        f << "                flat[f'{outer_key}[{k}]'] = v\n"
+        f << "        else:\n"
+        f << "            flat[outer_key] = inner\n"
+        f << "    return urlencode(flat)\n"
+      end
     end
 
     private def build_route_helpers : Array(Crystal::ASTNode)
@@ -381,6 +409,17 @@ module Railcar
           end
         end
         imports = import_lines.join("\n") + "\n\n"
+
+        # Controllers are async — add async/await
+        content = content
+          .gsub("def index(", "async def index(")
+          .gsub("def show(", "async def show(")
+          .gsub("def new(", "async def new(")
+          .gsub("def edit(", "async def edit(")
+          .gsub("def create(", "async def create(")
+          .gsub("def update(", "async def update(")
+          .gsub("def destroy(", "async def destroy(")
+          .gsub("parse_form(request.read())", "parse_form(await request.read())")
 
         out_path = File.join(controllers_dir, "#{controller_name}.py")
         File.write(out_path, imports + content)
@@ -692,6 +731,18 @@ module Railcar
             io << "from helpers import *\n"
             io << "from tests.conftest import *\n\n"
           end
+
+          # Controller tests need async/await
+          content = content
+            .gsub("def test_", "async def test_")
+            .gsub(/client = .*$/) { "client = await aiohttp_client(app_module.create_app())" }
+            .gsub("client.get(", "await client.get(")
+            .gsub("client.post(", "await client.post(")
+            .gsub("client.patch(", "await client.patch(")
+            .gsub("client.delete(", "await client.delete(")
+            .gsub("response.text", "await response.text()")
+            .gsub("(app_client)", "(aiohttp_client)")
+            .gsub("app_module()", "app_module")
 
           out_path = File.join(tests_dir, py_name)
           File.write(out_path, imports + content)

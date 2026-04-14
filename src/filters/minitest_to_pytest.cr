@@ -98,9 +98,11 @@ module Railcar
       # Build function body: setup + test body
       all_stmts = [] of Crystal::ASTNode
 
-      # For integration tests, add client setup
+      # For integration tests, create test client
       if is_integration
-        all_stmts << Crystal::Parser.parse("client = app_client()")
+        all_stmts << Crystal::Assign.new(
+          Crystal::Var.new("client"),
+          Crystal::Call.new(nil, "create_test_client"))
       end
 
       # Inline setup block

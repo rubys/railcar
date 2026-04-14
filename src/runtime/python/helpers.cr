@@ -4,9 +4,8 @@
 # Emitted as Python via cr2py.
 
 module Railcar
-  def self.parse_form(body_bytes : String) : Hash(String, Array(String))
-    {} of String => Array(String)
-  end
+  # parse_form and encode_params are Python-specific — emitted as raw Python
+  # by the generator, not transpiled from Crystal.
 
   def self.form_value(data : Hash(String, Array(String)), key : String) : String
     arr = data[key]?
