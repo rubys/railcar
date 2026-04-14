@@ -823,20 +823,41 @@ module Railcar
       end
       io << "    application = web.Application()\n"
 
+      # Group routes by path for _method dispatch
+      routes_by_path = {} of String => Hash(String, {String, String})
       app.routes.routes.each do |route|
         controller = Inflector.underscore(route.controller)
-        action = route.action
         path = route.path.gsub(/:(\w+)/, "{\\1}")
+        routes_by_path[path] ||= {} of String => {String, String}
+        routes_by_path[path][route.method.upcase] = {controller, route.action}
+      end
 
-        case route.method.upcase
-        when "GET"
-          io << "    application.router.add_get('#{path}', #{controller}_controller.#{action})\n"
-        when "POST"
-          io << "    application.router.add_post('#{path}', #{controller}_controller.#{action})\n"
-        when "PATCH", "PUT"
-          io << "    application.router.add_patch('#{path}', #{controller}_controller.#{action})\n"
-        when "DELETE"
-          io << "    application.router.add_delete('#{path}', #{controller}_controller.#{action})\n"
+      routes_by_path.each do |path, methods|
+        if get = methods["GET"]?
+          io << "    application.router.add_get('#{path}', #{get[0]}_controller.#{get[1]})\n"
+        end
+
+        has_dispatch = methods.has_key?("PATCH") || methods.has_key?("PUT") || methods.has_key?("DELETE")
+        if has_dispatch
+          # POST dispatch: read _method from body, route to create/update/destroy
+          dispatch_name = "_dispatch#{path.gsub("/", "_").gsub("{", "").gsub("}", "")}"
+          io << "    async def #{dispatch_name}(request):\n"
+          io << "        data = parse_form(await request.read())\n"
+          io << "        method = form_value(data, '_method').upper() if '_method' in data else 'POST'\n"
+          if del = methods["DELETE"]?
+            io << "        if method == 'DELETE':\n"
+            io << "            return await #{del[0]}_controller.#{del[1]}(request, data)\n"
+          end
+          if patch = (methods["PATCH"]? || methods["PUT"]?)
+            io << "        if method in ('PATCH', 'PUT'):\n"
+            io << "            return await #{patch[0]}_controller.#{patch[1]}(request, data)\n"
+          end
+          if post = methods["POST"]?
+            io << "        return await #{post[0]}_controller.#{post[1]}(request, data)\n"
+          end
+          io << "    application.router.add_post('#{path}', #{dispatch_name})\n"
+        elsif post = methods["POST"]?
+          io << "    application.router.add_post('#{path}', #{post[0]}_controller.#{post[1]})\n"
         end
       end
 

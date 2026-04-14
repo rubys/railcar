@@ -69,13 +69,11 @@ module Cr2Py
       AWAIT_METHODS.each do |method|
         result = result.gsub(/(\w+)\.#{method}\(/) { "await #{$1}.#{method}(" }
       end
-      # Add allow_redirects=False to POST/PATCH/PUT/DELETE calls
-      # and data= keyword for body data (not for DELETE which has no body)
-      %w[post patch put delete].each do |method|
-        next unless result.includes?("await client.#{method}(")
-        result = result.gsub(/await client\.#{method}\((.+)\)\s*$/) do |match|
+      # Convert client.patch/delete to client.post with _method (Rails convention)
+      # POST keeps data= and allow_redirects=False
+      if result.includes?("await client.post(")
+        result = result.gsub(/await client\.post\((.+)\)\s*$/) do |match|
           inner = $1
-          # Count parens to find the real end of the client call args
           depth = 0
           split_pos = nil
           inner.each_char_with_index do |c, i|
@@ -85,13 +83,42 @@ module Cr2Py
               split_pos = i
             end
           end
-          if split_pos && method != "delete"
+          if split_pos
             url = inner[0...split_pos]
-            body = inner[split_pos + 2..]  # skip ", "
-            "await client.#{method}(#{url}, data=#{body}, allow_redirects=False)"
+            body = inner[split_pos + 2..]
+            "await client.post(#{url}, data=#{body}, allow_redirects=False)"
           else
-            "await client.#{method}(#{inner}, allow_redirects=False)"
+            "await client.post(#{inner}, allow_redirects=False)"
           end
+        end
+      end
+      %w[patch put].each do |method|
+        next unless result.includes?("await client.#{method}(")
+        result = result.gsub(/await client\.#{method}\((.+)\)\s*$/) do |match|
+          inner = $1
+          depth = 0
+          split_pos = nil
+          inner.each_char_with_index do |c, i|
+            depth += 1 if c == '('
+            depth -= 1 if c == ')'
+            if c == ',' && depth == 0 && split_pos.nil?
+              split_pos = i
+            end
+          end
+          if split_pos
+            url = inner[0...split_pos]
+            body = inner[split_pos + 2..]
+            "await client.post(#{url}, data=#{body} + \"&_method=#{method}\", allow_redirects=False)"
+          else
+            "await client.post(#{inner}, data=\"_method=#{method}\", allow_redirects=False)"
+          end
+        end
+      end
+      %w[delete].each do |method|
+        next unless result.includes?("await client.#{method}(")
+        result = result.gsub(/await client\.#{method}\((.+)\)\s*$/) do |match|
+          inner = $1
+          "await client.post(#{inner}, data=\"_method=delete\", allow_redirects=False)"
         end
       end
       # response.text (property) → await response.text() (coroutine in aiohttp)
