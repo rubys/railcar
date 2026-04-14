@@ -200,9 +200,9 @@ class ApplicationRecord:
         return cls.from_row(row)
 
     @classmethod
-    def all(cls):
+    def all(cls, order_by='id'):
         rows = cls.db.execute(
-            f"SELECT * FROM {cls.TABLE} ORDER BY id").fetchall()
+            f"SELECT * FROM {cls.TABLE} ORDER BY {order_by}").fetchall()
         return [cls.from_row(r) for r in rows]
 
     @classmethod
