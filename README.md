@@ -12,6 +12,13 @@ These mix and match. Both Ruby and Crystal input files are supported in the same
 
 **Status:** Early proof of concept -- see [Status](#status) below.
 
+## Demo
+
+Railcar transpiles a [Rails blog app](https://ruby2js.github.io/ruby2js/releases/demo-blog.tar.gz) (built by this [creation script](https://github.com/ruby2js/ruby2js/blob/master/test/blog/create-blog)) into Crystal, Python, and TypeScript.
+
+- **[Browse the generated code](https://rubys.github.io/railcar/)** -- compare the original Ruby source side-by-side with each target's output
+- **[Run the blog in your browser](https://ruby2js.github.io/ruby2js/blog/)** -- an in-browser version of the same app, powered by ruby2js
+
 ## What it does
 
 Given a Rails app directory, Railcar parses the source code, applies a chain of AST transformations, and generates a Crystal, Python, or TypeScript application.
@@ -90,6 +97,39 @@ make test
 
 Downloads a sample Rails blog app and runs the spec suite (313 Crystal specs). CI also generates and tests the Crystal blog (compiled + crystal spec), the Python blog (21 pytest tests), and the TypeScript blog (21 node:test tests).
 
+## Try it
+
+```bash
+git clone https://github.com/rubys/railcar
+cd railcar
+make
+make test
+npx github:ruby2js/juntos --demo blog
+```
+
+Generate and run each target:
+
+```bash
+# Crystal
+./build/railcar blog crystal-blog
+cd crystal-blog && shards install
+crystal build src/app.cr -o blog && crystal spec && ./blog
+
+# Python
+./build/railcar --python blog python-blog
+cd python-blog
+uv run --extra test python -m pytest tests/ -v
+uv run python app.py
+
+# TypeScript
+./build/railcar --typescript blog ts-blog
+cd ts-blog && npm install
+npx tsx --test tests/*.test.ts
+npx tsx app.ts
+```
+
+Open multiple browser tabs to see real-time Turbo Streams updates.
+
 ## What works
 
 The blog demo exercises these patterns across Crystal, Python, and TypeScript targets:
@@ -149,7 +189,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the filter pipeline details.
 
 ## Relationship to ruby2js
 
-Railcar is a sibling project to [ruby2js](https://www.ruby2js.com/), which transpiles Ruby to JavaScript. They share the same Prism parser, the same inflector, and the same architectural philosophy: parse source, transform an AST through composable filters, serialize the result. Knowledge from one project transfers to the other.
+Railcar is a sibling project to [ruby2js](https://www.ruby2js.com/), which transpiles Ruby to JavaScript. They share the same Prism parser, the same inflector, and the same architectural philosophy: parse source, transform an AST through composable filters, serialize the result. Knowledge from one project transfers to the other. The demo blog used as Railcar's test input is built by the [ruby2js CI](https://github.com/ruby2js/ruby2js/blob/master/test/blog/create-blog) and can be [run in the browser](https://ruby2js.github.io/ruby2js/blog/).
 
 ## License
 
