@@ -59,7 +59,9 @@ module Railcar
       when Crystal::Assign
         target = node.target
         return if target.is_a?(Crystal::Var) && target.name == "_buf"
-        io << "{{" << to_go(node) << "}}\n"
+        go_val = to_go(node)
+        return if go_val.empty? || go_val.ends_with?(":= ")
+        io << "{{" << go_val << "}}\n"
       when Crystal::OpAssign
         target = node.target
         if target.is_a?(Crystal::Var) && target.name == "_buf" && node.op == "+"
@@ -316,15 +318,30 @@ module Railcar
         ".#{node.name.lchop("@")}"
       when Crystal::Path then node.names.join(".")
       when Crystal::StringInterpolation
-        # Go templates don't have string interpolation — use printf or concat
-        parts = node.expressions.map do |part|
+        # Go templates: use printf for string interpolation
+        format_parts = [] of String
+        go_args = [] of String
+        node.expressions.each do |part|
           case part
-          when Crystal::StringLiteral then part.value
-          else "{{#{to_go(part)}}}"
+          when Crystal::StringLiteral
+            format_parts << part.value.gsub("%", "%%")
+          when Crystal::Call
+            if part.name == "id" || part.name =~ /.*_id$/
+              format_parts << "%d"
+            else
+              format_parts << "%s"
+            end
+            go_args << to_go(part)
+          else
+            format_parts << "%v"
+            go_args << to_go(part)
           end
         end
-        # Return as raw text (will be inside a template)
-        parts.join
+        if go_args.empty?
+          format_parts.join.inspect
+        else
+          "(printf #{format_parts.join.inspect} #{go_args.join(" ")})"
+        end
       when Crystal::Call then to_go_call(node)
       when Crystal::Assign then "$#{to_go(node.target)} := #{to_go(node.value)}"
       when Crystal::Not then "not #{to_go(node.exp)}"
