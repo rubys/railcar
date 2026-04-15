@@ -16,14 +16,15 @@ module Railcar
     getter template_name : String
     getter controller : String
     getter app_module : String
+    getter known_fields : Set(String)
 
-    def initialize(@template_name, @controller, @app_module = "Blog")
+    def initialize(@template_name, @controller, @app_module = "Blog", @known_fields = Set(String).new)
     end
 
     def self.convert_file(path : String, template_name : String, controller : String,
                           view_filters : Array(Crystal::Transformer) = [] of Crystal::Transformer,
-                          app_module : String = "Blog") : String
-      new(template_name, controller, app_module).convert(File.read(path), path, view_filters)
+                          app_module : String = "Blog", known_fields : Set(String) = Set(String).new) : String
+      new(template_name, controller, app_module, known_fields).convert(File.read(path), path, view_filters)
     end
 
     def convert(source : String, path : String = "",
@@ -479,8 +480,10 @@ module Railcar
       if obj
         obj_str = to_ex(obj)
         # Struct field access
-        if {"title", "body", "commenter", "id", "errors", "persisted", "article_id",
-            "created_at", "updated_at"}.includes?(name)
+        # Known properties: struct fields and common accessors
+        is_field = @known_fields.includes?(name) ||
+                   {"id", "errors", "persisted"}.includes?(name)
+        if is_field
           return "#{obj_str}.#{name}"
         end
         # Known helper methods on objects

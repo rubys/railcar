@@ -475,12 +475,20 @@ module Railcar
           eex_name = "#{basename}.eex"
 
           eex_source = EexConverter.convert_file(erb_path, basename, controller_name,
-            view_filters: build_view_filters, app_module: app_module)
+            view_filters: build_view_filters, app_module: app_module, known_fields: all_column_names)
 
           File.write(File.join(views_dir, eex_name), eex_source)
           puts "  priv/views/#{Inflector.pluralize(controller_name)}/#{eex_name}"
         end
       end
+    end
+
+    private def all_column_names : Set(String)
+      fields = Set(String).new
+      app.schemas.each do |schema|
+        schema.columns.each { |c| fields << c.name }
+      end
+      fields
     end
 
     private def build_view_filters : Array(Crystal::Transformer)

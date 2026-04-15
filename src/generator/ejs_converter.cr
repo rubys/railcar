@@ -20,13 +20,15 @@ module Railcar
   class EjsConverter
     getter template_name : String
     getter controller : String
+    getter known_fields : Set(String)
 
-    def initialize(@template_name, @controller)
+    def initialize(@template_name, @controller, @known_fields = Set(String).new)
     end
 
     def self.convert_file(path : String, template_name : String, controller : String,
-                          view_filters : Array(Crystal::Transformer) = [] of Crystal::Transformer) : String
-      new(template_name, controller).convert(File.read(path), path, view_filters)
+                          view_filters : Array(Crystal::Transformer) = [] of Crystal::Transformer,
+                          known_fields : Set(String) = Set(String).new) : String
+      new(template_name, controller, known_fields).convert(File.read(path), path, view_filters)
     end
 
     def convert(source : String, path : String = "",
@@ -547,8 +549,10 @@ module Railcar
         obj_str = to_js(obj)
         ts_name = name.gsub(/_([a-z])/) { |_, m| m[1].upcase }
         # Known properties vs method calls
-        if args.empty? && {"title", "body", "commenter", "id", "errors",
-                           "length", "persisted"}.includes?(ts_name)
+        # Known properties: struct fields and common accessors
+        is_field = @known_fields.includes?(ts_name) ||
+                   {"id", "errors", "length", "persisted"}.includes?(ts_name)
+        if args.empty? && is_field
           return "#{obj_str}.#{ts_name}"
         end
         return "#{obj_str}.#{ts_name}(#{args.join(", ")})"
