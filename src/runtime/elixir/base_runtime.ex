@@ -280,8 +280,11 @@ defmodule Railcar.CableHandler do
   @moduledoc "WebSocket handler for Action Cable protocol."
   @behaviour WebSock
 
+  require Logger
+
   @impl true
   def init(_opts) do
+    Logger.debug("ActionCable: client connected")
     send(self(), :welcome)
     send(self(), :start_ping)
     {:ok, %{}}
@@ -295,6 +298,7 @@ defmodule Railcar.CableHandler do
         signed = Map.get(id_data, "signed_stream_name", "")
         channel = signed |> String.split("--") |> List.first() |> Base.decode64!() |> Jason.decode!()
         Railcar.CableServer.subscribe(channel, self(), identifier)
+        Logger.debug("ActionCable: subscribed to #{inspect(channel)}")
         confirm = Jason.encode!(%{type: "confirm_subscription", identifier: identifier})
         {:push, {:text, confirm}, state}
 
@@ -323,7 +327,8 @@ defmodule Railcar.CableHandler do
   end
 
   @impl true
-  def terminate(_reason, _state) do
+  def terminate(reason, _state) do
+    Logger.debug("ActionCable: client disconnected (#{inspect(reason)})")
     Railcar.CableServer.unsubscribe_all(self())
     :ok
   end
