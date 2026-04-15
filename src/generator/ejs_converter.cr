@@ -122,8 +122,16 @@ module Railcar
         emit_call_with_block(actual_expr, io)
       else
         js = to_js(actual_expr)
-        # Use <%- for includes (unescaped HTML)
-        tag = js.starts_with?("include(") ? "<%-" : "<%="
+        # Use <%- for expressions that return HTML (includes, helpers)
+        needs_raw = js.starts_with?("include(") ||
+                    js.starts_with?("helpers.linkTo(") ||
+                    js.starts_with?("helpers.buttonTo(") ||
+                    js.starts_with?("helpers.formWithOpenTag(") ||
+                    js.starts_with?("helpers.formSubmitTag(") ||
+                    js.starts_with?("helpers.turboStreamFrom(") ||
+                    js.starts_with?("helpers.turboCableStreamTag(") ||
+                    js.starts_with?("turboCableStreamTag(")
+        tag = needs_raw ? "<%-" : "<%="
         io << "#{tag} " << js << " %>"
       end
     end
@@ -510,7 +518,10 @@ module Railcar
           partial_path = "./_#{partial_name}"
         end
 
-        return "include(\"#{partial_path}\", { #{partial_name}: #{var_name}, helpers })"
+        # Pass the variable with its actual name as the local key
+        # render_form_partial(article) → { article: article, helpers }
+        # render_comment_partial(article, comment) → { comment: comment, helpers }
+        return "include(\"#{partial_path}\", { #{var_name}: #{var_name}, helpers })"
       end
 
       # Method calls on objects

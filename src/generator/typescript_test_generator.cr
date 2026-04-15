@@ -162,8 +162,8 @@ module Railcar
         if post = methods["POST"]?
           if has_dispatch
             io << "  app.post(\"#{route_path}\", (req, res) => {\n"
-            io << "    const data = helpers.parseForm(req.body?.toString() ?? \"\");\n"
-            io << "    const method = (data._method?.[0] ?? \"POST\").toUpperCase();\n"
+            io << "    const data = req.body ?? {};\n"
+            io << "    const method = (data._method ?? \"POST\").toString().toUpperCase();\n"
             if del = methods["DELETE"]?
               io << "    if (method === \"DELETE\") return #{del[0]}Controller.destroy(req, res, data);\n"
             end
@@ -177,8 +177,8 @@ module Railcar
           end
         elsif has_dispatch
           io << "  app.post(\"#{route_path}\", (req, res) => {\n"
-          io << "    const data = helpers.parseForm(req.body?.toString() ?? \"\");\n"
-          io << "    const method = (data._method?.[0] ?? \"POST\").toUpperCase();\n"
+          io << "    const data = req.body ?? {};\n"
+          io << "    const method = (data._method ?? \"POST\").toString().toUpperCase();\n"
           if del = methods["DELETE"]?
             io << "    if (method === \"DELETE\") return #{del[0]}Controller.destroy(req, res, data);\n"
           end
@@ -195,6 +195,11 @@ module Railcar
         io << "  app.get(\"/\", #{root_ctrl}Controller.#{root_action});\n"
       end
 
+      # Error handler — surfaces EJS/controller errors in test output
+      io << "  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {\n"
+      io << "    console.error(err.message);\n"
+      io << "    res.status(500).send(err.message);\n"
+      io << "  });\n"
       io << "  return app;\n"
       io << "}\n"
 
@@ -482,10 +487,10 @@ module Railcar
                  end
 
       if value.is_a?(Crystal::Call) && value.args.size == 1 && value.args[0].is_a?(Crystal::SymbolLiteral)
-        # @article = articles(:one) → const article = articles("one")
+        # @article = articles(:one) → let article = articles("one") (let for potential reload)
         func = value.name
         label = value.args[0].as(Crystal::SymbolLiteral).value
-        io << "    const #{var_name} = #{func}(#{label.inspect});\n"
+        io << "    let #{var_name} = #{func}(#{label.inspect});\n"
       else
         io << "    const #{var_name} = #{test_expr(value, singular, plural)};\n"
       end
@@ -573,7 +578,9 @@ module Railcar
       elsif args.size >= 1
         selector = args[0].to_s.strip('"')
         if selector.starts_with?("#")
-          io << "    assert.ok(response.text.includes('id=\"#{selector.lchop("#")}\"'));\n"
+          # Extract just the id part (before any space/descendant selector)
+          id = selector.lchop("#").split(" ").first
+          io << "    assert.ok(response.text.includes('id=\"#{id}\"'));\n"
         else
           io << "    assert.ok(response.text.includes(\"<#{selector}\"));\n"
         end

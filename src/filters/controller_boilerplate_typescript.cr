@@ -98,8 +98,7 @@ module Railcar
           Crystal::Call.new(Crystal::Var.new("data"), "nil?"),
           Crystal::Assign.new(
             Crystal::Var.new("data"),
-            Crystal::Call.new(nil, "parseForm",
-              [Crystal::Call.new(Crystal::Var.new("req"), "body")] of Crystal::ASTNode)
+            Crystal::Call.new(Crystal::Var.new("req"), "body")
           )
         )
       end
@@ -422,7 +421,7 @@ module Railcar
       last = stmts.last
       return true if last.is_a?(Crystal::Return)
       str = last.to_s
-      return true if str.includes?("redirect") || str.includes?("send") || str.includes?("status")
+      return true if str.includes?("redirect") || str.includes?("send") || str.includes?("status") || str.includes?("renderView")
       return true if last.is_a?(Crystal::If)
       false
     end

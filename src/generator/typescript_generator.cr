@@ -354,13 +354,22 @@ module Railcar
       return data[key]?.[0] ?? "";
     }
 
-    export function extractModelParams(data: Record<string, string[]>, model: string): Record<string, string> {
+    export function extractModelParams(data: Record<string, unknown>, model: string): Record<string, string> {
       const result: Record<string, string> = {};
+      // Handle Express extended parser (nested objects): { article: { title: "..." } }
+      const nested = (data as Record<string, unknown>)[model];
+      if (nested && typeof nested === "object") {
+        for (const [k, v] of Object.entries(nested as Record<string, unknown>)) {
+          result[k] = String(v);
+        }
+        return result;
+      }
+      // Handle flat URL-encoded: { "article[title]": ["..."] }
       const prefix = `${model}[`;
       for (const [key, values] of Object.entries(data)) {
         if (key.startsWith(prefix) && key.endsWith("]")) {
           const field = key.slice(prefix.length, -1);
-          result[field] = values[0];
+          result[field] = Array.isArray(values) ? values[0] : String(values);
         }
       }
       return result;
@@ -386,6 +395,7 @@ module Railcar
     import fs from "fs";
 
     export function renderView(res: Response, template: string, data: unknown, status: number = 200): void {
+      try {
       const templatePath = path.join(viewsDir, template + ".ejs");
       const varName = template.split("/").pop()!.replace(/^_/, "");
       // Make data available under multiple names: the template-derived name,
@@ -408,6 +418,10 @@ module Railcar
         { filename: layoutPath }
       );
       res.status(status).send(html);
+      } catch (e) {
+        console.error(`renderView error (${template}):`, (e as Error).message);
+        if (!res.headersSent) res.status(500).send((e as Error).message);
+      }
     }
     TS
 
@@ -609,8 +623,8 @@ module Railcar
           controller = post[0]
           if has_dispatch
             io << "  app.post(\"#{route_path}\", (req, res) => {\n"
-            io << "    const data = helpers.parseForm(req.body?.toString() ?? \"\");\n"
-            io << "    const method = (data._method?.[0] ?? \"POST\").toUpperCase();\n"
+            io << "    const data = req.body ?? {};\n"
+            io << "    const method = (data._method ?? \"POST\").toString().toUpperCase();\n"
             if del = methods["DELETE"]?
               del_ctrl = del[0]
               io << "    if (method === \"DELETE\") return #{del_ctrl}Controller.destroy(req, res, data);\n"
