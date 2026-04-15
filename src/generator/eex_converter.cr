@@ -15,13 +15,15 @@ module Railcar
   class EexConverter
     getter template_name : String
     getter controller : String
+    getter app_module : String
 
-    def initialize(@template_name, @controller)
+    def initialize(@template_name, @controller, @app_module = "Blog")
     end
 
     def self.convert_file(path : String, template_name : String, controller : String,
-                          view_filters : Array(Crystal::Transformer) = [] of Crystal::Transformer) : String
-      new(template_name, controller).convert(File.read(path), path, view_filters)
+                          view_filters : Array(Crystal::Transformer) = [] of Crystal::Transformer,
+                          app_module : String = "Blog") : String
+      new(template_name, controller, app_module).convert(File.read(path), path, view_filters)
     end
 
     def convert(source : String, path : String = "",
@@ -432,8 +434,9 @@ module Railcar
 
       # Helper functions
       if !obj && {"link_to", "button_to", "truncate", "dom_id", "pluralize",
-                   "turbo_stream_from", "content_for"}.includes?(name)
-        return "Helpers.#{name}(#{args.join(", ")})"
+                   "turbo_stream_from", "turbo_cable_stream_tag", "content_for"}.includes?(name)
+        fn_name = name == "turbo_cable_stream_tag" ? "turbo_stream_from" : name
+        return "#{@app_module}.Helpers.#{fn_name}(#{args.join(", ")})"
       end
 
       # Form helpers — extract model as first positional arg
@@ -444,28 +447,25 @@ module Railcar
           call_args = [] of String
           call_args << to_ex(model_arg.value) if model_arg
           other_args.each { |na| call_args << "#{na.name}: #{to_ex(na.value)}" }
-          return "Helpers.#{name}(#{call_args.join(", ")})"
+          return "#{@app_module}.Helpers.#{name}(#{call_args.join(", ")})"
         end
-        return "Helpers.#{name}(#{args.join(", ")})"
+        return "#{@app_module}.Helpers.#{name}(#{args.join(", ")})"
       end
 
       # Path helpers
       if !obj && name.ends_with?("_path")
-        return "Helpers.#{name}(#{args.join(", ")})"
+        return "#{@app_module}.Helpers.#{name}(#{args.join(", ")})"
       end
 
-      # Render partials → EEx render
+      # Render partials → Helpers.render_partial
       if !obj && name.starts_with?("render_") && name.ends_with?("_partial")
         partial_name = name.lchop("render_").chomp("_partial")
         var_name = args.last? || partial_name
         controller_plural = Inflector.pluralize(@controller)
         partial_model_plural = Inflector.pluralize(partial_name)
         is_model_partial = partial_name != "form" && partial_model_plural != controller_plural
-        if is_model_partial
-          return "EEx.eval_file(\"views/#{partial_model_plural}/_#{partial_name}.eex\", [#{partial_name}: #{var_name}, helpers: Helpers])"
-        else
-          return "EEx.eval_file(\"views/#{controller_plural}/_#{partial_name}.eex\", [#{partial_name}: #{var_name}, helpers: Helpers])"
-        end
+        template_dir = is_model_partial ? partial_model_plural : controller_plural
+        return "#{@app_module}.Helpers.render_partial(\"#{template_dir}/_#{partial_name}\", [{:#{partial_name}, #{var_name}}])"
       end
 
       # Bare name with no args — local variable
@@ -473,13 +473,18 @@ module Railcar
         return name
       end
 
-      # Method calls on objects — Elixir uses Module.function(obj, args)
+      # Method calls on objects
       if obj
         obj_str = to_ex(obj)
-        if {"title", "body", "commenter", "id", "errors", "persisted"}.includes?(name)
+        # Struct field access
+        if {"title", "body", "commenter", "id", "errors", "persisted", "article_id",
+            "created_at", "updated_at"}.includes?(name)
           return "#{obj_str}.#{name}"
         end
-        return "#{obj_str}.#{name}(#{args.join(", ")})"
+        # Association/method calls → Module.function(obj) pattern
+        # Infer module from variable name: article → Blog.Article
+        model_name = Inflector.classify(obj_str.split(".").last)
+        return "#{@app_module}.#{model_name}.#{name}(#{([obj_str] + args).join(", ")})"
       end
 
       "#{name}(#{args.join(", ")})"

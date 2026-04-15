@@ -420,7 +420,7 @@ module Railcar
       io << "  def render_view(conn, template, assigns) do\n"
       io << "    views_dir = Path.join(:code.priv_dir(:#{app_name}) |> to_string(), \"views\")\n"
       io << "    template_path = Path.join(views_dir, template <> \".eex\")\n"
-      io << "    all_assigns = Keyword.merge([helpers: #{app_module}.Helpers, notice: nil], assigns)\n"
+      io << "    all_assigns = Keyword.merge([notice: nil], assigns)\n"
       io << "    content = EEx.eval_file(template_path, all_assigns)\n"
       io << "    html = layout(content)\n"
       io << "    conn |> Plug.Conn.put_resp_content_type(\"text/html\") |> Plug.Conn.send_resp(200, html)\n"
@@ -429,10 +429,17 @@ module Railcar
       io << "  def render_view(conn, template, assigns, status) do\n"
       io << "    views_dir = Path.join(:code.priv_dir(:#{app_name}) |> to_string(), \"views\")\n"
       io << "    template_path = Path.join(views_dir, template <> \".eex\")\n"
-      io << "    all_assigns = Keyword.merge([helpers: #{app_module}.Helpers, notice: nil], assigns)\n"
+      io << "    all_assigns = Keyword.merge([notice: nil], assigns)\n"
       io << "    content = EEx.eval_file(template_path, all_assigns)\n"
       io << "    html = layout(content)\n"
       io << "    conn |> Plug.Conn.put_resp_content_type(\"text/html\") |> Plug.Conn.send_resp(status, html)\n"
+      io << "  end\n\n"
+
+      io << "  def render_partial(template, assigns) do\n"
+      io << "    views_dir = Path.join(:code.priv_dir(:#{app_name}) |> to_string(), \"views\")\n"
+      io << "    template_path = Path.join(views_dir, template <> \".eex\")\n"
+      io << "    all_assigns = assigns\n"
+      io << "    EEx.eval_file(template_path, all_assigns)\n"
       io << "  end\n"
 
       io << "end\n"
@@ -445,6 +452,7 @@ module Railcar
 
     private def emit_views(output_dir : String)
       app_name = app.name.downcase.gsub("-", "_")
+      app_module = Inflector.classify(app_name)
       priv_dir = File.join(output_dir, "priv/views")
 
       rails_views = File.join(rails_dir, "app/views")
@@ -463,7 +471,7 @@ module Railcar
           eex_name = "#{basename}.eex"
 
           eex_source = EexConverter.convert_file(erb_path, basename, controller_name,
-            view_filters: build_view_filters)
+            view_filters: build_view_filters, app_module: app_module)
 
           File.write(File.join(views_dir, eex_name), eex_source)
           puts "  priv/views/#{Inflector.pluralize(controller_name)}/#{eex_name}"
