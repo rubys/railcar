@@ -531,7 +531,13 @@ module Railcar
         end
       end
 
-      "#{method}(#{args.join(", ")})"
+      if obj = call.obj
+        # article.broadcast_replace_to → record.article().broadcastReplaceTo(...)
+        obj_name = obj.to_s.lchop("@")
+        "#{obj_name}().#{method}(#{args.join(", ")})"
+      else
+        "#{method}(#{args.join(", ")})"
+      end
     end
 
     # ── Emit app entry point ──
