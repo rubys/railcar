@@ -546,7 +546,7 @@ module Railcar
       io << "import { fileURLToPath } from \"url\";\n"
       io << "import ejs from \"ejs\";\n"
       io << "import fs from \"fs\";\n"
-      io << "import { ApplicationRecord } from \"./runtime/base.js\";\n"
+      io << "import { ApplicationRecord, log } from \"./runtime/base.js\";\n"
       io << "import { helpers } from \"./helpers.js\";\n"
 
       app.controllers.each do |info|
@@ -645,6 +645,12 @@ module Railcar
 
       io << "  const app = express();\n"
       io << "  app.use(express.urlencoded({ extended: true }));\n"
+      io << "  // Request logging (like Rails development mode)\n"
+      io << "  app.use((req, _res, next) => {\n"
+      io << "    log.info(`\\n  ${req.method} ${req.path}`);\n"
+      io << "    if (req.body && Object.keys(req.body).length > 0) log.debug(\"  Parameters:\", req.body);\n"
+      io << "    next();\n"
+      io << "  });\n"
       io << "  app.use(\"/static\", express.static(path.join(__dirname, \"static\")));\n\n"
 
       # Routes
@@ -710,6 +716,7 @@ module Railcar
       io << "const wss = new WebSocketServer({ server, path: \"/cable\" });\n\n"
 
       io << "wss.on(\"connection\", (ws) => {\n"
+      io << "  log.debug(\"  ActionCable: client connected\");\n"
       io << "  ws.send(JSON.stringify({ type: \"welcome\" }));\n"
       io << "  const pingInterval = setInterval(() => {\n"
       io << "    if (ws.readyState === WebSocket.OPEN) {\n"
@@ -724,6 +731,7 @@ module Railcar
       io << "      const signed = idData.signed_stream_name || \"\";\n"
       io << "      const channel = JSON.parse(Buffer.from(signed.split(\"--\")[0], \"base64\").toString());\n"
       io << "      cable.subscribe(ws, channel, identifier);\n"
+      io << "      log.debug(`  ActionCable: subscribed to \"${channel}\"`);\n"
       io << "      ws.send(JSON.stringify({ type: \"confirm_subscription\", identifier }));\n"
       io << "    }\n"
       io << "  });\n"

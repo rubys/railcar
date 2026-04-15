@@ -4,6 +4,20 @@
 
 import Database from "better-sqlite3";
 
+// --- Logging ---
+// Set LOG_LEVEL=debug for verbose output (like Rails development mode).
+// Levels: debug < info < warn < error
+
+const LOG_LEVELS: Record<string, number> = { debug: 0, info: 1, warn: 2, error: 3 };
+const currentLevel = LOG_LEVELS[process.env.LOG_LEVEL ?? "info"] ?? 1;
+
+export const log = {
+  debug: (...args: unknown[]) => { if (currentLevel <= 0) console.debug(...args); },
+  info:  (...args: unknown[]) => { if (currentLevel <= 1) console.log(...args); },
+  warn:  (...args: unknown[]) => { if (currentLevel <= 2) console.warn(...args); },
+  error: (...args: unknown[]) => { if (currentLevel <= 3) console.error(...args); },
+};
+
 // --- Model Registry ---
 
 export const MODEL_REGISTRY: Record<string, typeof ApplicationRecord> = {};
@@ -325,12 +339,18 @@ export class ApplicationRecord {
     if (action !== "remove") {
       const cls = this.constructor as typeof ApplicationRecord;
       if (cls.renderPartial) {
-        html = cls.renderPartial(this);
+        try {
+          html = cls.renderPartial(this);
+        } catch (e) {
+          log.error(`broadcast renderPartial error (${cls.name}):`, (e as Error).message);
+          html = this._toHtml();
+        }
       } else {
         html = this._toHtml();
       }
     }
     const stream = turboStreamHtml(action, target, html);
+    log.debug(`  Broadcast ${action} on "${channel}" → target="${target}" (${html.length} bytes)`);
     ApplicationRecord._broadcaster.broadcast(channel, stream);
   }
 
