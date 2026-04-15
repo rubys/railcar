@@ -25,8 +25,9 @@ module Railcar
 
       emit_mix_exs(output_dir)
       emit_application(output_dir)
+      emit_runtime(output_dir)
+      emit_models(output_dir)
       emit_router(output_dir)
-      emit_repo(output_dir)
 
       puts "Done! Output in #{output_dir}/"
       puts "  cd #{output_dir} && mix deps.get && mix run --no-halt"
@@ -97,6 +98,111 @@ module Railcar
       end
       EX
       puts "  lib/#{app_name}/application.ex"
+    end
+
+    # ── Runtime ──
+
+    private def emit_runtime(output_dir : String)
+      app_name = app.name.downcase.gsub("-", "_")
+      lib_dir = File.join(output_dir, "lib/#{app_name}")
+      Dir.mkdir_p(lib_dir)
+
+      runtime_source = File.join(File.dirname(__FILE__), "..", "runtime", "elixir", "base_runtime.ex")
+      File.copy(runtime_source, File.join(lib_dir, "railcar.ex"))
+      puts "  lib/#{app_name}/railcar.ex"
+    end
+
+    # ── Models ──
+
+    private def emit_models(output_dir : String)
+      app_name = app.name.downcase.gsub("-", "_")
+      app_module = Inflector.classify(app_name)
+      lib_dir = File.join(output_dir, "lib/#{app_name}")
+
+      schema_map = {} of String => TableSchema
+      app.schemas.each { |s| schema_map[s.name] = s }
+
+      app.models.each do |name, model|
+        table_name = Inflector.pluralize(Inflector.underscore(name))
+        schema = schema_map[table_name]?
+        next unless schema
+
+        io = IO::Memory.new
+        columns = schema.columns.reject { |c| c.name == "id" }.map { |c| ":#{c.name}" }
+
+        io << "defmodule #{app_module}.#{name} do\n"
+        io << "  use Railcar.Record, table: \"#{table_name}\", columns: [#{columns.join(", ")}]\n\n"
+
+        # Associations
+        model.associations.each do |assoc|
+          case assoc.kind
+          when :has_many
+            target = Inflector.classify(Inflector.singularize(assoc.name))
+            fk = assoc.options["foreign_key"]? || "#{Inflector.underscore(name)}_id"
+            io << "  def #{assoc.name}(record) do\n"
+            io << "    #{app_module}.#{target}.where(%{#{fk}: record.id})\n"
+            io << "  end\n\n"
+
+            # dependent: :destroy
+            if assoc.options["dependent"]? == "destroy"
+              # Will be handled in delete override
+            end
+          when :belongs_to
+            target = Inflector.classify(assoc.name)
+            fk = assoc.options["foreign_key"]? || "#{assoc.name}_id"
+            io << "  def #{assoc.name}(record) do\n"
+            io << "    #{app_module}.#{target}.find(record.#{fk})\n"
+            io << "  end\n\n"
+          end
+        end
+
+        # Validations
+        presence_validations = model.validations.select { |v| v.kind == "presence" }
+        length_validations = model.validations.select { |v| v.kind == "length" }
+        belongs_to_assocs = model.associations.select { |a| a.kind == :belongs_to }
+
+        unless presence_validations.empty? && length_validations.empty? && belongs_to_assocs.empty?
+          io << "  def run_validations(record) do\n"
+          io << "    errors = []\n"
+
+          belongs_to_assocs.each do |a|
+            target = Inflector.classify(a.name)
+            io << "    errors = errors ++ Railcar.Validation.validate_belongs_to(record, :#{a.name}, #{app_module}.#{target})\n"
+          end
+
+          presence_validations.each do |v|
+            io << "    errors = errors ++ Railcar.Validation.validate_presence(record, :#{v.field})\n"
+          end
+
+          length_validations.each do |v|
+            if min = v.options["minimum"]?
+              io << "    errors = errors ++ Railcar.Validation.validate_length(record, :#{v.field}, minimum: #{min})\n"
+            end
+          end
+
+          io << "    errors\n"
+          io << "  end\n\n"
+        end
+
+        # Destroy override for dependent: :destroy
+        destroy_assocs = model.associations.select { |a| a.options["dependent"]? == "destroy" }
+        unless destroy_assocs.empty?
+          io << "  def delete(record) do\n"
+          destroy_assocs.each do |a|
+            target = Inflector.classify(Inflector.singularize(a.name))
+            fk = a.options["foreign_key"]? || "#{Inflector.underscore(name)}_id"
+            io << "    #{assoc_name = a.name}(record) |> Enum.each(&#{app_module}.#{target}.delete/1)\n"
+          end
+          io << "    super(record)\n"
+          io << "  end\n\n"
+        end
+
+        io << "end\n"
+
+        out_path = File.join(lib_dir, "#{Inflector.underscore(name)}.ex")
+        File.write(out_path, io.to_s)
+        puts "  lib/#{app_name}/#{Inflector.underscore(name)}.ex"
+      end
     end
 
     # ── Plug Router ──
@@ -182,31 +288,5 @@ module Railcar
       puts "  lib/#{app_name}/router.ex"
     end
 
-    # ── Repo (SQLite) ──
-
-    private def emit_repo(output_dir : String)
-      app_name = app.name.downcase.gsub("-", "_")
-      app_module = Inflector.classify(app_name)
-      lib_dir = File.join(output_dir, "lib/#{app_name}")
-
-      File.write(File.join(lib_dir, "repo.ex"), <<-EX)
-      defmodule #{app_module}.Repo do
-        @db_path Path.join(:code.priv_dir(:#{app_name}) |> to_string(), "#{app_name}.db")
-
-        def start_link do
-          File.mkdir_p!(Path.dirname(@db_path))
-          {:ok, db} = Exqlite.Sqlite3.open(@db_path)
-          Exqlite.Sqlite3.execute(db, "PRAGMA foreign_keys = ON")
-          Process.put(:railcar_db, db)
-          {:ok, db}
-        end
-
-        def db do
-          Process.get(:railcar_db) || raise "Database not started"
-        end
-      end
-      EX
-      puts "  lib/#{app_name}/repo.ex"
-    end
   end
 end
