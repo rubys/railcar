@@ -15,6 +15,7 @@
   --accent-crystal: #bb9af7;
   --accent-python: #7aa2f7;
   --accent-typescript: #e0af68;
+  --accent-elixir: #a855f7;
   --accent: var(--accent-ruby);
   --tree-hover: #292e42;
   --tree-active: #3b4261;
@@ -78,6 +79,7 @@ header h1 {
 .tab[data-lang="crystal"].active { color: var(--accent-crystal); border-bottom-color: var(--accent-crystal); }
 .tab[data-lang="python"].active { color: var(--accent-python); border-bottom-color: var(--accent-python); }
 .tab[data-lang="typescript"].active { color: var(--accent-typescript); border-bottom-color: var(--accent-typescript); }
+.tab[data-lang="elixir"].active { color: var(--accent-elixir); border-bottom-color: var(--accent-elixir); }
 
 /* Main layout */
 main {
