@@ -95,18 +95,35 @@ defmodule Railcar.Record do
         save(record)
       end
 
+      # --- Callbacks (override in model) ---
+
+      def after_save(_record), do: :ok
+      def after_delete(_record), do: :ok
+
+      defoverridable after_save: 1, after_delete: 1
+
       # --- Persistence ---
 
       def save(%{_persisted: true} = record) do
         case run_validations(record) do
-          [] -> do_update(record)
+          [] ->
+            result = do_update(record)
+            case result do
+              {:ok, saved} -> after_save(saved); result
+              _ -> result
+            end
           errors -> {:error, %{record | errors: errors}}
         end
       end
 
       def save(record) do
         case run_validations(record) do
-          [] -> do_insert(record)
+          [] ->
+            result = do_insert(record)
+            case result do
+              {:ok, saved} -> after_save(saved); result
+              _ -> result
+            end
           errors -> {:error, %{record | errors: errors}}
         end
       end
@@ -122,6 +139,7 @@ defmodule Railcar.Record do
         Exqlite.Sqlite3.bind(stmt, [record.id])
         Exqlite.Sqlite3.step(db, stmt)
         Exqlite.Sqlite3.release(db, stmt)
+        after_delete(record)
         :ok
       end
 
@@ -345,6 +363,10 @@ defmodule Railcar.Broadcast do
     end
   end
 
+  def broadcast_replace_to(record, channel, target) when is_binary(target) do
+    broadcast_replace_to(record, channel, target: target)
+  end
+
   def broadcast_replace_to(record, channel, opts \\ []) do
     target = opts[:target] || dom_id(record)
     html = render_partial(record)
@@ -352,11 +374,19 @@ defmodule Railcar.Broadcast do
     Railcar.CableServer.broadcast(channel, stream)
   end
 
+  def broadcast_prepend_to(record, channel, target) when is_binary(target) do
+    broadcast_prepend_to(record, channel, target: target)
+  end
+
   def broadcast_prepend_to(record, channel, opts \\ []) do
     target = opts[:target] || table_name(record)
     html = render_partial(record)
     stream = turbo_stream_html("prepend", target, html)
     Railcar.CableServer.broadcast(channel, stream)
+  end
+
+  def broadcast_remove_to(record, channel, target) when is_binary(target) do
+    broadcast_remove_to(record, channel, target: target)
   end
 
   def broadcast_remove_to(record, channel, opts \\ []) do

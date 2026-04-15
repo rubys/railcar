@@ -21,6 +21,7 @@ require "../filters/render_to_partial"
 require "../filters/form_to_html"
 require "../filters/turbo_stream_connect"
 require "../filters/shared_controller_filters"
+require "../filters/broadcasts_to"
 
 module Railcar
   class ElixirGenerator
@@ -117,7 +118,7 @@ module Railcar
             opts = [strategy: :one_for_one, name: #{app_module}.Supervisor]
             result = Supervisor.start_link(children, opts)
 
-            # Initialize database and seed data
+            # Initialize database, wire broadcast partials, seed data
             #{app_module}.Database.init()
             #{app_module}.Seeds.run()
 
@@ -227,6 +228,9 @@ module Railcar
           io << "  end\n\n"
         end
 
+        # Broadcast callbacks from BroadcastsTo filter
+        emit_broadcast_callbacks(name, io, app_module)
+
         io << "end\n"
 
         out_path = File.join(lib_dir, "#{Inflector.underscore(name)}.ex")
@@ -330,6 +334,105 @@ module Railcar
 
       File.write(File.join(lib_dir, "router.ex"), io.to_s)
       puts "  lib/#{app_name}/router.ex"
+    end
+
+    # ── Broadcast callbacks ──
+
+    private def emit_broadcast_callbacks(name : String, io : IO, app_module : String)
+      source_path = File.join(rails_dir, "app/models/#{Inflector.underscore(name)}.rb")
+      return unless File.exists?(source_path)
+
+      ast = SourceParser.parse(source_path)
+      ast = ast.transform(BroadcastsTo.new)
+
+      save_callbacks = [] of String
+      delete_callbacks = [] of String
+
+      exprs = case ast
+              when Crystal::ClassDef
+                case ast.body
+                when Crystal::Expressions then ast.body.as(Crystal::Expressions).expressions
+                else [ast.body]
+                end
+              else [] of Crystal::ASTNode
+              end
+
+      exprs.each do |expr|
+        next unless expr.is_a?(Crystal::Call)
+        call = expr.as(Crystal::Call)
+        next unless {"after_save", "after_destroy"}.includes?(call.name)
+        next unless block = call.block
+
+        broadcast_expr = extract_elixir_broadcast(block.body, name, app_module)
+        next unless broadcast_expr
+
+        if call.name == "after_save"
+          save_callbacks << broadcast_expr
+        else
+          delete_callbacks << broadcast_expr
+        end
+      end
+
+      unless save_callbacks.empty?
+        io << "  def after_save(record) do\n"
+        save_callbacks.each { |cb| io << "    #{cb}\n" }
+        io << "    :ok\n"
+        io << "  end\n\n"
+      end
+
+      unless delete_callbacks.empty?
+        io << "  def after_delete(record) do\n"
+        delete_callbacks.each { |cb| io << "    #{cb}\n" }
+        io << "    :ok\n"
+        io << "  end\n\n"
+      end
+    end
+
+    private def extract_elixir_broadcast(body : Crystal::ASTNode, model_name : String, app_module : String) : String?
+      call = case body
+             when Crystal::Call then body
+             when Crystal::ExceptionHandler
+               body.body.is_a?(Crystal::Call) ? body.body.as(Crystal::Call) : nil
+             when Crystal::Expressions
+               first = body.as(Crystal::Expressions).expressions.first?
+               first.is_a?(Crystal::Call) ? first.as(Crystal::Call) : nil
+             else nil
+             end
+      return nil unless call
+      return nil unless call.name.starts_with?("broadcast_")
+
+      method = case call.name
+               when "broadcast_replace_to" then "broadcast_replace_to"
+               when "broadcast_append_to"  then "broadcast_append_to"
+               when "broadcast_prepend_to" then "broadcast_prepend_to"
+               when "broadcast_remove_to"  then "broadcast_remove_to"
+               else call.name
+               end
+
+      args = call.args.map do |a|
+        case a
+        when Crystal::StringLiteral then a.value.inspect
+        when Crystal::StringInterpolation
+          parts = a.expressions.map do |part|
+            case part
+            when Crystal::StringLiteral then part.value
+            when Crystal::Call then "\#{record.#{part.name}}"
+            else "\#{#{part}}"
+            end
+          end
+          "\"#{parts.join}\""
+        else a.to_s.inspect
+        end
+      end
+
+      # Check if call has a receiver (e.g., article.broadcast_replace_to)
+      if obj = call.obj
+        # article.broadcast_replace_to("articles") → get parent via current model's association
+        obj_name = obj.to_s.lchop("@")
+        "#{app_module}.#{model_name}.#{obj_name}(record) |> Railcar.Broadcast.#{method}(#{args.join(", ")})"
+      else
+        "Railcar.Broadcast.#{method}(record, #{args.join(", ")})"
+      end
     end
 
     # ── Helpers ──
