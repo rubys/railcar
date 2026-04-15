@@ -773,7 +773,7 @@ module Railcar
         when /^(\w+)\.(\w+)\.create!\(\s*(.+)\s*\)$/m
           attrs = $3.gsub(/\s+/, " ").gsub(/(\w+):\s*/, "\\1: ")
           ts_assoc = $2.gsub(/_([a-z])/) { |_, m| m[1].upcase }
-          io << "  (#{$1} as any).#{ts_assoc}().create({ #{attrs} });\n"
+          io << "  #{$1}.#{ts_assoc}().create({ #{attrs} });\n"
         end
       end
     end

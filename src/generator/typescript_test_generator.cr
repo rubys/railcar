@@ -88,21 +88,24 @@ module Railcar
       end
       io << "}\n\n"
 
-      # Export fixture variables
+      # Export fixture variables — typed to specific model classes
       sorted_fixtures.each do |table|
+        singular = Inflector.singularize(table.name)
+        model_name = Inflector.classify(singular)
+        type = app.models.has_key?(model_name) ? model_name : "ApplicationRecord"
         table.records.each do |record|
-          io << "export let #{table.name}_#{record.label}: ApplicationRecord;\n"
+          io << "export let #{table.name}_#{record.label}: #{type};\n"
         end
       end
       io << "\n"
 
-      # Fixture accessor functions
+      # Fixture accessor functions — return specific model types
       app.models.each_key do |name|
         table_name = Inflector.pluralize(Inflector.underscore(name))
         fixture_table = app.fixtures.find { |t| t.name == table_name }
         next unless fixture_table
 
-        io << "export function #{table_name}(name: string): ApplicationRecord {\n"
+        io << "export function #{table_name}(name: string): #{name} {\n"
         fixture_table.records.each_with_index do |record, i|
           keyword = i == 0 ? "if" : "} else if"
           io << "  #{keyword} (name === #{record.label.inspect}) {\n"
@@ -285,9 +288,9 @@ module Railcar
         when /^assert_not_nil\s+(\w+)\.(\w+)$/
           io << "    assert.notStrictEqual(#{$1}.#{$2}, null);\n"
         when /^assert_equal\s+"([^"]+)",\s*(\w+)\.(\w+)$/
-          io << "    assert.strictEqual((#{$2} as any).#{$3}, #{$1.inspect});\n"
+          io << "    assert.strictEqual(#{$2}.#{$3}, #{$1.inspect});\n"
         when /^assert_equal\s+(\w+)\(:(\w+)\)\.(\w+),\s*(\w+)\.(\w+)$/
-          io << "    assert.strictEqual((#{$4} as any).#{$5}, #{$1}(#{$2.inspect}).#{$3});\n"
+          io << "    assert.strictEqual(#{$4}.#{$5}, #{$1}(#{$2.inspect}).#{$3});\n"
         when /^(\w+)\s*=\s*(\w+)\.new\((.+)\)$/
           attrs = convert_ruby_hash($3)
           io << "    const #{$1} = new #{$2}({ #{attrs} });\n"
@@ -295,15 +298,15 @@ module Railcar
           ts_method = ts_method_name($2)
           io << "    assert.strictEqual(#{$1}.#{ts_method}(), false);\n"
         when /^assert_equal\s+(\w+)\.(\w+),\s*(\w+)\.(\w+)$/
-          io << "    assert.strictEqual((#{$3} as any).#{$4}, (#{$1} as any).#{$2});\n"
+          io << "    assert.strictEqual(#{$3}.#{$4}, #{$1}.#{$2});\n"
         when /^(\w+)\s*=\s*(\w+)\.(\w+)\.create\((.+)\)$/
           attrs = convert_ruby_hash($4)
           ts_assoc = ts_method_name($3)
-          io << "    const #{$1} = (#{$2} as any).#{ts_assoc}().create({ #{attrs} });\n"
+          io << "    const #{$1} = #{$2}.#{ts_assoc}().create({ #{attrs} });\n"
         when /^(\w+)\s*=\s*(\w+)\.(\w+)\.build\((.+)\)$/
           attrs = convert_ruby_hash($4)
           ts_assoc = ts_method_name($3)
-          io << "    const #{$1} = (#{$2} as any).#{ts_assoc}().build({ #{attrs} });\n"
+          io << "    const #{$1} = #{$2}.#{ts_assoc}().build({ #{attrs} });\n"
         when /^assert_difference\("(\w+)\.count",\s*(-?\d+)\)\s+do$/
           io << "    const _before = #{$1}.count();\n"
         when /^(\w+)\.destroy$/
@@ -552,7 +555,7 @@ module Railcar
         if obj = node.obj
           var = obj.to_s.lchop("@")
           cls = Inflector.classify(var)
-          io << "    #{var} = #{cls}.find(#{var}.id!) as any;\n"
+          io << "    #{var} = #{cls}.find(#{var}.id!);\n"
         end
 
       else
@@ -562,7 +565,7 @@ module Railcar
           if obj_str.starts_with?("@") && name == "reload"
             var = obj_str.lchop("@")
             cls = Inflector.classify(var)
-            io << "    #{var} = #{cls}.find(#{var}.id!) as any;\n"
+            io << "    #{var} = #{cls}.find(#{var}.id!);\n"
             return
           end
         end
@@ -711,9 +714,9 @@ module Railcar
         if obj
           obj_str = test_expr(obj, singular, plural)
           if node.name == "last"
-            "(#{obj_str}.last() as any)"
+            "#{obj_str}.last()!"
           else
-            "(#{obj_str} as any).#{node.name}"
+            "#{obj_str}.#{node.name}"
           end
         else
           if node.args.size == 1 && node.args[0].is_a?(Crystal::SymbolLiteral)

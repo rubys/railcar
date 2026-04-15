@@ -201,7 +201,9 @@ module Railcar
       when "parseForm"
         return "helpers.parseForm(#{args.join(", ")})"
       when "extractModelParams"
-        return "helpers.extractModelParams(#{args.join(", ")})"
+        # data parameter may be optional — assert non-null after guard
+        fixed_args = args.map { |a| a == "data" ? "data!" : a }
+        return "helpers.extractModelParams(#{fixed_args.join(", ")})"
       when "layout"
         return "helpers.layout(#{args.join(", ")})"
       when "find"
@@ -251,11 +253,11 @@ module Railcar
         return "views.#{name}(#{args.join(", ")})"
       end
 
-      # Association calls need cast (article.comments() etc.)
+      # Association calls — typed models have these methods directly
       if obj && {"comments", "articles", "build", "destroy_all"}.includes?(name)
         obj_str = emit_value(obj)
         ts_name = name.gsub(/_([a-z])/) { |_, m| m[1].upcase }
-        return "(#{obj_str} as any).#{ts_name}(#{args.join(", ")})"
+        return "#{obj_str}.#{ts_name}(#{args.join(", ")})"
       end
 
       # Generic call

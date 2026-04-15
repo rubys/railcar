@@ -119,6 +119,14 @@ module Railcar
           io << "\n"
         end
 
+        # Typed static method overrides — return the specific model type
+        io << "  static override find(id: number): #{class_name} { return super.find(id) as #{class_name}; }\n"
+        io << "  static override all(orderBy?: string): #{class_name}[] { return super.all(orderBy) as #{class_name}[]; }\n"
+        io << "  static override create(attrs?: Record<string, unknown>): #{class_name} { return super.create(attrs) as #{class_name}; }\n"
+        io << "  static override last(): #{class_name} | null { return super.last() as #{class_name} | null; }\n"
+        io << "  static override where(conditions: Record<string, unknown>): #{class_name}[] { return super.where(conditions) as #{class_name}[]; }\n"
+        io << "  static override fromRow(row: Record<string, unknown>): #{class_name} { return super.fromRow(row) as #{class_name}; }\n"
+
         io << "}\n"
         io << "MODEL_REGISTRY[\"#{class_name}\"] = #{class_name};\n"
 
