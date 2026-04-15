@@ -311,6 +311,13 @@ module Railcar
 
       # WebSocket for ActionCable/Turbo Streams
       io << "  get \"/cable\" do\n"
+      io << "    # Echo the Action Cable subprotocol for turbo-rails client\n"
+      io << "    conn = case Plug.Conn.get_req_header(conn, \"sec-websocket-protocol\") do\n"
+      io << "      [protocols | _] ->\n"
+      io << "        protocol = protocols |> String.split(\",\") |> List.first() |> String.trim()\n"
+      io << "        Plug.Conn.put_resp_header(conn, \"sec-websocket-protocol\", protocol)\n"
+      io << "      _ -> conn\n"
+      io << "    end\n"
       io << "    conn\n"
       io << "    |> WebSockAdapter.upgrade(Railcar.CableHandler, [], timeout: 60_000)\n"
       io << "    |> halt()\n"
