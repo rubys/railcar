@@ -127,6 +127,10 @@ export class CollectionProxy {
     return this.all().length;
   }
 
+  get length(): number {
+    return this.size();
+  }
+
   find(id: number): ApplicationRecord {
     return this.modelClass().find(id);
   }

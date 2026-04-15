@@ -211,7 +211,9 @@ module Railcar
         if obj.is_a?(Crystal::Var) && obj.name == "_buf"
           emit_statement(node, io)
         else
-          io << "<%= " << to_js(node) << " %>\n"
+          js = to_js(node)
+          tag = js.starts_with?("include(") ? "<%-" : "<%="
+          io << "#{tag} " << js << " %>\n"
         end
       when Crystal::If
         emit_if(node, io)
