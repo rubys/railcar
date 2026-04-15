@@ -42,6 +42,7 @@ module Railcar
       emit_views(output_dir)
       emit_controllers(output_dir)
       emit_router(output_dir)
+      emit_database_init(output_dir)
       emit_seeds(output_dir)
       copy_static_assets(output_dir)
       emit_tests(output_dir)
@@ -82,7 +83,8 @@ module Railcar
             {:bandit, "~> 1.6"},
             {:plug, "~> 1.16"},
             {:exqlite, "~> 0.27"},
-            {:jason, "~> 1.4"}
+            {:jason, "~> 1.4"},
+            {:websock_adapter, "~> 0.5"}
           ]
         end
       end
@@ -108,12 +110,19 @@ module Railcar
             Supervisor.start_link([], strategy: :one_for_one, name: #{app_module}.Supervisor)
           else
             children = [
+              Railcar.CableServer,
               {Bandit, plug: #{app_module}.Router, port: 3000}
             ]
 
             opts = [strategy: :one_for_one, name: #{app_module}.Supervisor]
+            result = Supervisor.start_link(children, opts)
+
+            # Initialize database and seed data
+            #{app_module}.Database.init()
+            #{app_module}.Seeds.run()
+
             IO.puts("#{app_name} running at http://localhost:3000")
-            Supervisor.start_link(children, opts)
+            result
           end
         end
       end
@@ -299,6 +308,13 @@ module Railcar
           io << "  end\n\n"
         end
       end
+
+      # WebSocket for ActionCable/Turbo Streams
+      io << "  get \"/cable\" do\n"
+      io << "    conn\n"
+      io << "    |> WebSockAdapter.upgrade(Railcar.CableHandler, [], timeout: 60_000)\n"
+      io << "    |> halt()\n"
+      io << "  end\n\n"
 
       io << "  match _ do\n"
       io << "    send_resp(conn, 404, \"Not found\")\n"
@@ -640,6 +656,42 @@ module Railcar
       io << "        end)\n"
       io << "    end\n"
       io << "  end\n"
+    end
+
+    # ── Database init ──
+
+    private def emit_database_init(output_dir : String)
+      app_name = app.name.downcase.gsub("-", "_")
+      app_module = Inflector.classify(app_name)
+      lib_dir = File.join(output_dir, "lib/#{app_name}")
+
+      io = IO::Memory.new
+      io << "defmodule #{app_module}.Database do\n"
+      io << "  def init do\n"
+      io << "    db_path = Path.join(File.cwd!(), \"#{app_name}.db\")\n"
+      io << "    Railcar.Repo.start(db_path)\n"
+
+      app.schemas.each do |schema|
+        all_cols = [{name: "id", type: "INTEGER"}]
+        schema.columns.each { |c| all_cols << {name: c.name, type: c.type} }
+        col_defs = all_cols.map do |c|
+          parts = "#{c[:name]} #{c[:type]}"
+          parts += " PRIMARY KEY AUTOINCREMENT" if c[:name] == "id"
+          parts += " NOT NULL" unless c[:name] == "id"
+          parts
+        end
+        io << "    Railcar.Repo.execute(\"\"\"\n"
+        io << "      CREATE TABLE IF NOT EXISTS #{schema.name} (\n"
+        io << "        #{col_defs.join(",\n        ")}\n"
+        io << "      )\n"
+        io << "    \"\"\")\n"
+      end
+
+      io << "  end\n"
+      io << "end\n"
+
+      File.write(File.join(lib_dir, "database.ex"), io.to_s)
+      puts "  lib/#{app_name}/database.ex"
     end
 
     # ── Seeds ──

@@ -225,6 +225,160 @@ defmodule Railcar.Repo do
   end
 end
 
+defmodule Railcar.CableServer do
+  @moduledoc "ActionCable WebSocket server for Turbo Streams broadcasting."
+  use GenServer
+
+  def start_link(_opts \\ []) do
+    GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
+  end
+
+  def init(_) do
+    {:ok, %{channels: %{}}}
+  end
+
+  def subscribe(channel, ws_pid, identifier) do
+    GenServer.cast(__MODULE__, {:subscribe, channel, ws_pid, identifier})
+  end
+
+  def unsubscribe_all(ws_pid) do
+    GenServer.cast(__MODULE__, {:unsubscribe_all, ws_pid})
+  end
+
+  def broadcast(channel, html) do
+    GenServer.cast(__MODULE__, {:broadcast, channel, html})
+  end
+
+  def handle_cast({:subscribe, channel, ws_pid, identifier}, state) do
+    subs = Map.get(state.channels, channel, MapSet.new())
+    subs = MapSet.put(subs, {ws_pid, identifier})
+    {:noreply, %{state | channels: Map.put(state.channels, channel, subs)}}
+  end
+
+  def handle_cast({:unsubscribe_all, ws_pid}, state) do
+    channels = Enum.reduce(state.channels, %{}, fn {channel, subs}, acc ->
+      filtered = MapSet.reject(subs, fn {pid, _} -> pid == ws_pid end)
+      if MapSet.size(filtered) > 0, do: Map.put(acc, channel, filtered), else: acc
+    end)
+    {:noreply, %{state | channels: channels}}
+  end
+
+  def handle_cast({:broadcast, channel, html}, state) do
+    subs = Map.get(state.channels, channel, MapSet.new())
+    for {ws_pid, identifier} <- subs do
+      msg = Jason.encode!(%{type: "message", identifier: identifier, message: html})
+      send(ws_pid, {:send_text, msg})
+    end
+    {:noreply, state}
+  end
+end
+
+defmodule Railcar.CableHandler do
+  @moduledoc "WebSocket handler for Action Cable protocol."
+  @behaviour WebSock
+
+  @impl true
+  def init(_opts) do
+    send(self(), :welcome)
+    send(self(), :start_ping)
+    {:ok, %{}}
+  end
+
+  @impl true
+  def handle_in({text, [opcode: :text]}, state) do
+    case Jason.decode(text) do
+      {:ok, %{"command" => "subscribe", "identifier" => identifier}} ->
+        id_data = Jason.decode!(identifier)
+        signed = Map.get(id_data, "signed_stream_name", "")
+        channel = signed |> String.split("--") |> List.first() |> Base.decode64!() |> Jason.decode!()
+        Railcar.CableServer.subscribe(channel, self(), identifier)
+        confirm = Jason.encode!(%{type: "confirm_subscription", identifier: identifier})
+        {:push, {:text, confirm}, state}
+
+      _ ->
+        {:ok, state}
+    end
+  end
+
+  @impl true
+  def handle_info(:welcome, state) do
+    {:push, {:text, Jason.encode!(%{type: "welcome"})}, state}
+  end
+
+  def handle_info(:start_ping, state) do
+    Process.send_after(self(), :ping, 3000)
+    {:ok, state}
+  end
+
+  def handle_info(:ping, state) do
+    Process.send_after(self(), :ping, 3000)
+    {:push, {:text, Jason.encode!(%{type: "ping", message: System.system_time(:second)})}, state}
+  end
+
+  def handle_info({:send_text, msg}, state) do
+    {:push, {:text, msg}, state}
+  end
+
+  @impl true
+  def terminate(_reason, _state) do
+    Railcar.CableServer.unsubscribe_all(self())
+    :ok
+  end
+end
+
+defmodule Railcar.Broadcast do
+  @moduledoc "Turbo Streams broadcast helpers for models."
+
+  def turbo_stream_html(action, target, content \\ "") do
+    if content != "" do
+      ~s(<turbo-stream action="#{action}" target="#{target}"><template>#{content}</template></turbo-stream>)
+    else
+      ~s(<turbo-stream action="#{action}" target="#{target}"></turbo-stream>)
+    end
+  end
+
+  def broadcast_replace_to(record, channel, opts \\ []) do
+    target = opts[:target] || dom_id(record)
+    html = render_partial(record)
+    stream = turbo_stream_html("replace", target, html)
+    Railcar.CableServer.broadcast(channel, stream)
+  end
+
+  def broadcast_prepend_to(record, channel, opts \\ []) do
+    target = opts[:target] || table_name(record)
+    html = render_partial(record)
+    stream = turbo_stream_html("prepend", target, html)
+    Railcar.CableServer.broadcast(channel, stream)
+  end
+
+  def broadcast_remove_to(record, channel, opts \\ []) do
+    target = opts[:target] || dom_id(record)
+    stream = turbo_stream_html("remove", target)
+    Railcar.CableServer.broadcast(channel, stream)
+  end
+
+  defp dom_id(record) do
+    name = record.__struct__ |> Module.split() |> List.last() |> String.downcase()
+    "#{name}_#{record.id}"
+  end
+
+  defp table_name(record) do
+    record.__struct__.table_name()
+  end
+
+  defp render_partial(record) do
+    module = record.__struct__
+    case Process.get({:render_partial, module}) do
+      nil -> "<div>#{inspect(record)}</div>"
+      func -> func.(record)
+    end
+  end
+
+  def register_partial(module, func) do
+    Process.put({:render_partial, module}, func)
+  end
+end
+
 defmodule Railcar.Validation do
   @moduledoc "Validation helpers for railcar models."
 
