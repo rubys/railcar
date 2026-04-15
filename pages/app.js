@@ -12,7 +12,7 @@
   // Load all three manifests
   async function loadManifests() {
     treeEl.innerHTML = '<div class="loading">Loading...</div>';
-    const langs = ["ruby", "crystal", "python", "typescript"];
+    const langs = ["ruby", "crystal", "python", "typescript", "elixir"];
     await Promise.all(
       langs.map(async (lang) => {
         try {
@@ -113,7 +113,7 @@
 
   // Map file extensions to highlight.js language names
   const EXT_TO_LANG = {
-    ".rb": "ruby", ".cr": "crystal", ".py": "python", ".ts": "typescript", ".tsx": "typescript",
+    ".rb": "ruby", ".cr": "crystal", ".py": "python", ".ts": "typescript", ".tsx": "typescript", ".ex": "elixir", ".exs": "elixir", ".eex": "elixir",
     ".js": "javascript", ".jsx": "javascript", ".json": "json", ".yml": "yaml",
     ".yaml": "yaml", ".toml": "toml", ".sql": "sql", ".html": "xml",
     ".htm": "xml", ".xml": "xml", ".erb": "erb", ".ecr": "erb",
