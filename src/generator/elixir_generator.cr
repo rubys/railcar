@@ -742,6 +742,7 @@ module Railcar
 
       emit_test_helper(test_dir, app_name, app_module)
       emit_model_tests(test_dir, app_name, app_module)
+      emit_controller_tests(test_dir, app_name, app_module)
     end
 
     private def emit_test_helper(test_dir : String, app_name : String, app_module : String)
@@ -1037,7 +1038,11 @@ module Railcar
         obj = node.obj
         if obj
           obj_str = elixir_expr(obj, app_module, singular)
-          if node.name == "id"
+          # Calls on model classes need module prefix
+          if obj.is_a?(Crystal::Path) && {"last", "find", "count", "all"}.includes?(node.name)
+            args = node.args.map { |a| elixir_expr(a, app_module, singular) }
+            "#{app_module}.#{obj_str}.#{node.name}(#{args.join(", ")})"
+          elsif node.name == "id"
             "#{obj_str}.id"
           elsif node.name == "save"
             "#{app_module}.#{Inflector.classify(obj_str)}.save(#{obj_str})"
@@ -1084,6 +1089,264 @@ module Railcar
       end
 
       "%{}"
+    end
+
+    # ── Controller tests ──
+
+    private def emit_controller_tests(test_dir : String, app_name : String, app_module : String)
+      rails_test_dir = File.join(rails_dir, "test/controllers")
+      return unless Dir.exists?(rails_test_dir)
+
+      Dir.glob(File.join(rails_test_dir, "*_test.rb")).sort.each do |path|
+        basename = File.basename(path, "_test.rb")
+        controller_name = basename.chomp("_controller")
+        singular = Inflector.singularize(controller_name)
+        plural = Inflector.pluralize(controller_name)
+        model_name = Inflector.classify(singular)
+
+        ast = SourceParser.parse(path)
+
+        io = IO::Memory.new
+        io << "defmodule #{app_module}.#{model_name}ControllerTest do\n"
+        io << "  use ExUnit.Case\n"
+        io << "  use Plug.Test\n\n"
+
+        io << "  setup do\n"
+        io << "    #{app_module}.TestHelper.setup_db()\n"
+        io << "    fixtures = #{app_module}.TestHelper.setup_fixtures()\n"
+        io << "    fixtures\n"
+        io << "  end\n\n"
+
+        io << "  defp dispatch(conn) do\n"
+        io << "    #{app_module}.Router.call(conn, #{app_module}.Router.init([]))\n"
+        io << "  end\n\n"
+
+        io << "  defp encode_params(params) do\n"
+        io << "    Enum.flat_map(params, fn {outer_key, inner} ->\n"
+        io << "      if is_map(inner) do\n"
+        io << "        Enum.map(inner, fn {k, v} -> {\"\#{outer_key}[\#{k}]\", v} end)\n"
+        io << "      else\n"
+        io << "        [{\"\#{outer_key}\", inner}]\n"
+        io << "      end\n"
+        io << "    end)\n"
+        io << "    |> URI.encode_query()\n"
+        io << "  end\n\n"
+
+        class_body = find_class_body(ast)
+        if class_body
+          emit_controller_test_methods(class_body, io, app_module, model_name, singular, plural)
+        end
+
+        io << "end\n"
+
+        out_path = File.join(test_dir, "#{controller_name}_controller_test.exs")
+        File.write(out_path, io.to_s)
+        puts "  test/#{controller_name}_controller_test.exs"
+      end
+    end
+
+    private def emit_controller_test_methods(body : Crystal::ASTNode, io : IO, app_module : String,
+                                              model_name : String, singular : String, plural : String)
+      exprs = case body
+              when Crystal::Expressions then body.expressions
+              else [body]
+              end
+
+      # Find setup block for preamble
+      setup_stmts = IO::Memory.new
+      exprs.each do |expr|
+        if expr.is_a?(Crystal::Call) && expr.as(Crystal::Call).name == "setup" && expr.as(Crystal::Call).block
+          emit_test_body(expr.as(Crystal::Call).block.not_nil!.body, setup_stmts, app_module, model_name, singular)
+        end
+      end
+      setup_code = setup_stmts.to_s
+
+      exprs.each do |expr|
+        next unless expr.is_a?(Crystal::Call)
+        call = expr.as(Crystal::Call)
+        next unless call.name == "test" && call.args.size == 1 && call.block
+        test_name = call.args[0].to_s.strip('"')
+
+        io << "  test #{test_name.inspect}, fixtures do\n"
+        io << setup_code unless setup_code.empty?
+        begin
+          emit_controller_test_body(call.block.not_nil!.body, io, app_module, model_name, singular, plural)
+        rescue ex
+          STDERR.puts "  WARN: test #{test_name.inspect}: #{ex.message}"
+          io << "    # ERROR: #{ex.message}\n"
+        end
+        io << "  end\n\n"
+      end
+    end
+
+    private def emit_controller_test_body(node : Crystal::ASTNode, io : IO, app_module : String,
+                                           model_name : String, singular : String, plural : String)
+      exprs = case node
+              when Crystal::Expressions then node.expressions
+              else [node]
+              end
+
+      exprs.each do |expr|
+        emit_controller_test_stmt(expr, io, app_module, model_name, singular, plural)
+      end
+    end
+
+    private def emit_controller_test_stmt(node : Crystal::ASTNode, io : IO, app_module : String,
+                                           model_name : String, singular : String, plural : String)
+      case node
+      when Crystal::Assign
+        target = node.target
+        value = node.value
+        var_name = case target
+                   when Crystal::InstanceVar then target.name.lchop("@")
+                   when Crystal::Var then target.name
+                   else target.to_s
+                   end
+
+        if value.is_a?(Crystal::Call) && value.args.size == 1 && value.args[0].is_a?(Crystal::SymbolLiteral)
+          func = value.name
+          label = value.args[0].as(Crystal::SymbolLiteral).value
+          io << "    #{var_name} = fixtures.#{func}_#{label}\n"
+        else
+          io << "    # TODO: assign #{node}\n"
+        end
+
+      when Crystal::Call
+        name = node.name
+        args = node.args
+
+        case name
+        when "get"
+          path = url_to_elixir_path(args[0], app_module, singular, plural)
+          io << "    conn = conn(:get, #{path}) |> dispatch()\n"
+        when "post"
+          path = url_to_elixir_path(args[0], app_module, singular, plural)
+          params = extract_elixir_params(node, singular)
+          io << "    conn = conn(:post, #{path}, #{params}) |> dispatch()\n"
+        when "patch"
+          path = url_to_elixir_path(args[0], app_module, singular, plural)
+          params = extract_elixir_params(node, singular)
+          io << "    conn = conn(:post, #{path}, #{params} <> \"&_method=patch\") |> dispatch()\n"
+        when "delete"
+          path = url_to_elixir_path(args[0], app_module, singular, plural)
+          io << "    conn = conn(:post, #{path}, \"_method=delete\") |> dispatch()\n"
+        when "assert_response"
+          status = args[0].to_s.strip(':')
+          case status
+          when "success" then io << "    assert conn.status == 200\n"
+          when "unprocessable_entity" then io << "    assert conn.status == 422\n"
+          end
+        when "assert_redirected_to"
+          io << "    assert conn.status in [301, 302, 303]\n"
+        when "assert_select"
+          if args.size >= 2 && args[1].is_a?(Crystal::StringLiteral)
+            text = args[1].as(Crystal::StringLiteral).value
+            io << "    assert conn.resp_body =~ #{text.inspect}\n"
+          elsif args.size >= 1
+            selector = args[0].to_s.strip('"')
+            if selector.starts_with?("#")
+              id = selector.lchop("#").split(" ").first
+              io << "    assert conn.resp_body =~ \"id=\\\"#{id}\\\"\"\n"
+            else
+              io << "    assert conn.resp_body =~ \"<#{selector}\"\n"
+            end
+          end
+          # Skip nested assert_select blocks
+        when "assert_equal"
+          if args.size == 2
+            expected = elixir_expr(args[0], app_module, singular)
+            actual = elixir_expr(args[1], app_module, singular)
+            io << "    assert #{actual} == #{expected}\n"
+          end
+        when "assert_difference", "assert_no_difference"
+          if args.size >= 1 && node.block
+            count_expr = args[0].to_s.strip('"')
+            model = count_expr.split(".").first
+            diff = args.size > 1 ? args[1].to_s.to_i : (name == "assert_difference" ? 1 : 0)
+            io << "    before_count = #{app_module}.#{model}.count()\n"
+            emit_controller_test_body(node.block.not_nil!.body, io, app_module, model_name, singular, plural)
+            if name == "assert_difference"
+              io << "    assert #{app_module}.#{model}.count() - before_count == #{diff}\n"
+            else
+              io << "    assert #{app_module}.#{model}.count() == before_count\n"
+            end
+          end
+        else
+          if obj = node.obj
+            obj_str = obj.to_s.lchop("@")
+            if name == "reload"
+              cls = Inflector.classify(obj_str)
+              io << "    #{obj_str} = #{app_module}.#{cls}.find(#{obj_str}.id)\n"
+            end
+          end
+        end
+      when Crystal::Nop
+        # skip
+      end
+    end
+
+    private def url_to_elixir_path(node : Crystal::ASTNode, app_module : String, singular : String, plural : String) : String
+      case node
+      when Crystal::Call
+        url_name = node.name.chomp("_url")
+        if node.args.empty?
+          "#{app_module}.Helpers.#{url_name}_path()"
+        else
+          args = node.args.map do |a|
+            case a
+            when Crystal::InstanceVar then a.name.lchop("@")
+            when Crystal::Var then a.name
+            else a.to_s.lchop("@")
+            end
+          end
+          "#{app_module}.Helpers.#{url_name}_path(#{args.join(", ")})"
+        end
+      else
+        node.to_s.inspect
+      end
+    end
+
+    private def extract_elixir_params(node : Crystal::Call, singular : String) : String
+      if named = node.named_args
+        params_arg = named.find { |na| na.name == "params" }
+        if params_arg
+          return "encode_params(#{hash_to_elixir_map(params_arg.value)})"
+        end
+      end
+      "\"\""
+    end
+
+    private def hash_to_elixir_map(node : Crystal::ASTNode) : String
+      case node
+      when Crystal::HashLiteral
+        entries = node.entries.map do |entry|
+          key = case entry.key
+                when Crystal::SymbolLiteral then "\"#{entry.key.as(Crystal::SymbolLiteral).value}\""
+                when Crystal::StringLiteral then entry.key.as(Crystal::StringLiteral).value.inspect
+                else entry.key.to_s.inspect
+                end
+          "#{key} => #{hash_to_elixir_map(entry.value)}"
+        end
+        "%{#{entries.join(", ")}}"
+      when Crystal::NamedTupleLiteral
+        entries = node.entries.map { |e| "\"#{e.key}\" => #{hash_to_elixir_map(e.value)}" }
+        "%{#{entries.join(", ")}}"
+      when Crystal::StringLiteral then node.value.inspect
+      when Crystal::NumberLiteral then node.value.to_s
+      when Crystal::Call
+        if obj = node.obj
+          obj_str = case obj
+                    when Crystal::InstanceVar then obj.as(Crystal::InstanceVar).name.lchop("@")
+                    when Crystal::Var then obj.as(Crystal::Var).name
+                    else obj.to_s.lchop("@")
+                    end
+          "#{obj_str}.#{node.name}"
+        else
+          node.name
+        end
+      when Crystal::InstanceVar then node.name.lchop("@")
+      else node.to_s.gsub("@", "")
+      end
     end
 
     private def elixir_value(node : Crystal::ASTNode) : String
