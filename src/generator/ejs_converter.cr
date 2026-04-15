@@ -486,10 +486,26 @@ module Railcar
         return "#{obj_str}[#{args.join}]"
       end
 
+      # Form helpers — extract model as first positional arg, rest as opts
+      if !obj && (name == "form_with_open_tag" || name == "form_submit_tag")
+        ts_name = name.gsub(/_([a-z])/) { |_, m| m[1].upcase }
+        if named = node.named_args
+          model_arg = named.find { |na| na.name == "model" }
+          other_args = named.reject { |na| na.name == "model" }
+          call_args = [] of String
+          call_args << to_js(model_arg.value) if model_arg
+          unless other_args.empty?
+            opts = other_args.map { |na| "#{na.name}: #{to_js(na.value)}" }
+            call_args << "{ #{opts.join(", ")} }"
+          end
+          return "helpers.#{ts_name}(#{call_args.join(", ")})"
+        end
+        return "helpers.#{ts_name}(#{args.join(", ")})"
+      end
+
       # Helper function calls → helpers.camelCase()
       if !obj && {"link_to", "button_to", "truncate", "dom_id", "pluralize",
-                   "turbo_stream_from", "content_for",
-                   "form_with_open_tag", "form_submit_tag"}.includes?(name)
+                   "turbo_stream_from", "content_for"}.includes?(name)
         ts_name = name.gsub(/_([a-z])/) { |_, m| m[1].upcase }
         return "helpers.#{ts_name}(#{args.join(", ")})"
       end
