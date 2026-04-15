@@ -16,7 +16,8 @@ if (!dir || !language) {
 
 const SKIP_DIRS = new Set([
   "node_modules", ".git", "lib", "_build", "__pycache__",
-  ".pytest_cache", ".mypy_cache", ".venv", "deps", "shard.lock"
+  ".pytest_cache", ".mypy_cache", ".venv", "deps", "shard.lock",
+  "vendor", "tmp", "log", "storage", "bin"
 ]);
 
 const SKIP_EXTENSIONS = new Set([

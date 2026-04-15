@@ -251,6 +251,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Download original Rails blog
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-blog
+          path: artifacts/ruby
+
       - name: Download Crystal blog
         uses: actions/download-artifact@v4
         with:
@@ -271,7 +277,7 @@ jobs:
 
       - name: Build file manifests
         run: |
-          for lang in crystal python typescript; do
+          for lang in ruby crystal python typescript; do
             node pages/build-manifest.js "artifacts/$lang" "$lang" > "artifacts/${lang}.json"
           done
 
@@ -281,6 +287,7 @@ jobs:
           cp pages/index.html _site/
           cp pages/style.css _site/
           cp pages/app.js _site/
+          cp artifacts/ruby.json _site/
           cp artifacts/crystal.json _site/
           cp artifacts/python.json _site/
           cp artifacts/typescript.json _site/

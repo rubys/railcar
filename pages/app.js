@@ -1,7 +1,7 @@
 // Railcar demo output browser
 (function () {
   const manifests = {};
-  let currentLang = "crystal";
+  let currentLang = "ruby";
   let currentFile = null;
 
   const treeEl = document.getElementById("file-tree");
@@ -12,7 +12,7 @@
   // Load all three manifests
   async function loadManifests() {
     treeEl.innerHTML = '<div class="loading">Loading...</div>';
-    const langs = ["crystal", "python", "typescript"];
+    const langs = ["ruby", "crystal", "python", "typescript"];
     await Promise.all(
       langs.map(async (lang) => {
         try {
@@ -113,17 +113,23 @@
 
   // Map file extensions to highlight.js language names
   const EXT_TO_LANG = {
-    ".cr": "crystal", ".py": "python", ".ts": "typescript", ".tsx": "typescript",
+    ".rb": "ruby", ".cr": "crystal", ".py": "python", ".ts": "typescript", ".tsx": "typescript",
     ".js": "javascript", ".jsx": "javascript", ".json": "json", ".yml": "yaml",
     ".yaml": "yaml", ".toml": "toml", ".sql": "sql", ".html": "xml",
-    ".htm": "xml", ".xml": "xml", ".erb": "erb", ".ecr": "xml",
+    ".htm": "xml", ".xml": "xml", ".erb": "erb", ".ecr": "erb",
     ".css": "css", ".scss": "scss", ".sh": "bash", ".bash": "bash",
     ".md": "markdown", ".txt": "plaintext", ".lock": "plaintext",
-    ".cfg": "ini", ".ini": "ini", ".env": "bash",
+    ".cfg": "ini", ".ini": "ini", ".env": "bash", ".gemspec": "ruby",
+  };
+
+  const NAME_TO_LANG = {
+    "Gemfile": "ruby", "Rakefile": "ruby", "Dockerfile": "dockerfile",
   };
 
   function detectLanguage(filePath) {
-    const ext = "." + filePath.split(".").pop().toLowerCase();
+    const fileName = filePath.split("/").pop();
+    if (NAME_TO_LANG[fileName]) return NAME_TO_LANG[fileName];
+    const ext = "." + fileName.split(".").pop().toLowerCase();
     return EXT_TO_LANG[ext] || null;
   }
 
