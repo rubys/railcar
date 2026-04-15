@@ -41,9 +41,6 @@ jobs:
           sudo make build/lib/libprism.a
           sudo chown -R $(id -u):$(id -g) build
 
-      - name: Run unit tests
-        run: make test
-
       - name: Build binary
         run: make
 
@@ -53,6 +50,33 @@ jobs:
           name: railcar-binary
           path: build/railcar
           retention-days: 7
+
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+
+      - name: Install SQLite3 dev headers
+        run: sudo apt-get install -y libsqlite3-dev
+
+      - name: Install prism gem
+        run: sudo gem install prism
+
+      - name: Install Crystal dependencies
+        run: shards install
+
+      - name: Build libprism
+        run: |
+          sudo make build/lib/libprism.a
+          sudo chown -R $(id -u):$(id -g) build
+
+      - name: Run unit tests
+        run: make test
 
   download-demo:
     runs-on: ubuntu-latest
@@ -125,6 +149,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+
       - name: Download railcar binary
         uses: actions/download-artifact@v4
         with:
@@ -163,6 +192,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
 
       - name: Download railcar binary
         uses: actions/download-artifact@v4
