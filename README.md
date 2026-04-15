@@ -1,11 +1,12 @@
 # Railcar
 
-Four things in one:
+Five things in one:
 
 1. **Crystal transpiler** -- converts a Ruby on Rails application into a Crystal web application
 2. **Python transpiler** -- converts a Ruby on Rails application into a Python web application
-3. **Framework** -- a Rails-compatible runtime for Crystal, currently covering ActiveRecord and Hotwire, with more to come
-4. **RBS generator** -- produces RBS type signatures for existing Rails apps, using Crystal's semantic type inference to determine method return types and instance variable types
+3. **TypeScript transpiler** -- converts a Ruby on Rails application into a TypeScript web application
+4. **Framework** -- a Rails-compatible runtime for Crystal, currently covering ActiveRecord and Hotwire, with more to come
+5. **RBS generator** -- produces RBS type signatures for existing Rails apps, using Crystal's semantic type inference to determine method return types and instance variable types
 
 These mix and match. Both Ruby and Crystal input files are supported in the same project, so you can start with a Rails app, generate the Crystal version, then gradually rewrite individual files in Crystal. The pipeline handles both seamlessly.
 
@@ -13,7 +14,7 @@ These mix and match. Both Ruby and Crystal input files are supported in the same
 
 ## What it does
 
-Given a Rails app directory, Railcar parses the source code, applies a chain of AST transformations, and generates a Crystal or Python application.
+Given a Rails app directory, Railcar parses the source code, applies a chain of AST transformations, and generates a Crystal, Python, or TypeScript application.
 
 ```
 Source (.rb or .cr)
@@ -27,9 +28,11 @@ Crystal AST (canonical intermediate representation)
     v
 Shared filter chain (Rails-specific transformations)
     |
-    +--> Crystal filters --> Crystal.format --> .cr output
+    +--> Crystal filters --> Crystal.format --> .cr/.ecr output
     |
-    +--> Python filters --> PythonEmitter --> .py output
+    +--> Python filters --> Cr2Py --> PyAST --> .py output
+    |
+    +--> TypeScript filters --> Cr2Ts --> .ts/.ejs output
 ```
 
 The shared filters normalize Rails conventions (instance variables, params, respond_to, strong params, redirects, render calls) into a target-neutral AST. Target-specific filters and emitters handle the language differences.
@@ -39,6 +42,8 @@ The shared filters normalize Rails conventions (instance variables, params, resp
 - [Crystal](https://crystal-lang.org/install/) >= 1.10.0
 - Ruby with the [prism](https://rubygems.org/gems/prism) gem installed (`gem install prism`)
 - SQLite3 development headers
+- Optional: [Node.js](https://nodejs.org/) >= 18 (for TypeScript target)
+- Optional: [uv](https://docs.astral.sh/uv/) (for Python target)
 - Optional: [tailwindcss](https://tailwindcss.com/docs/installation) or `gem install tailwindcss-rails` for styled output
 
 ## Build
@@ -65,26 +70,17 @@ build/railcar --python /path/to/rails/app /path/to/output
 cd /path/to/output
 uv run python3 app.py
 
-# Run Python tests
-uv run --extra test pytest tests/ -v
+# Generate a TypeScript app
+build/railcar --typescript /path/to/rails/app /path/to/output
+cd /path/to/output
+npm install
+npx tsx app.ts
 
 # Generate RBS type signatures
 build/railcar --rbs /path/to/rails/app /path/to/output
 ```
 
-The RBS generator uses Crystal's type inference engine to produce accurate type signatures. For a blog app's controller, it infers:
-
-```rbs
-class ArticlesController < ApplicationController
-  @articles: ActiveRecord::Relation[Article]?
-  @article: Article?
-
-  def index: ActiveRecord::Relation[Article]
-  def new: Article
-  def set_article: Article
-  def article_params: ActionController::Parameters
-end
-```
+Target flags also accept short forms: `--cr`, `--py`, `--ts`, or `--target=typescript`.
 
 ## Test
 
@@ -92,26 +88,28 @@ end
 make test
 ```
 
-Downloads a sample Rails blog app and runs the spec suite (321 Crystal specs). CI also generates and tests the Python blog (21 pytest tests).
+Downloads a sample Rails blog app and runs the spec suite (313 Crystal specs). CI also generates and tests the Crystal blog (compiled + crystal spec), the Python blog (21 pytest tests), and the TypeScript blog (21 node:test tests).
 
 ## What works
 
-The blog demo exercises these patterns across both Crystal and Python targets:
+The blog demo exercises these patterns across Crystal, Python, and TypeScript targets:
 
 - **Models** -- `has_many`, `belongs_to`, `validates` (presence, length), `dependent: :destroy`
 - **Controllers** -- CRUD actions, `before_action`, strong params, `respond_to`, `redirect_to` with flash, `render` with status codes
-- **Views** -- ERB to ECR (Crystal) or Python string functions, `link_to`, `button_to`, `form_with`, partials, `render @collection`
+- **Views** -- ERB to ECR (Crystal), Python string functions, or EJS templates (TypeScript); `link_to`, `button_to`, `form_with`, partials, `render @collection`
 - **Routes** -- `resources`, nested resources, `root`
-- **Tests** -- Minitest to Crystal spec or pytest, model and controller tests, fixtures
+- **Tests** -- Minitest to Crystal spec, pytest, or node:test; model and controller tests; fixtures
 - **Real-time** -- ActionCable/WebSocket with Turbo Streams broadcasting
 
-**Crystal:** 243 specs passing, compiled binary, full ActiveRecord-like runtime with macros.
+**Crystal:** 313 specs passing, compiled binary, full ActiveRecord-like runtime with macros.
 
-**Python:** 21 tests passing (9 model + 9 article controller + 3 comment controller), aiohttp async server, hand-written ORM runtime with direct attribute access, Tailwind CSS, Turbo Streams with ActionCable WebSocket.
+**Python:** 21 tests passing (9 model + 12 controller), aiohttp async server, hand-written ORM runtime with direct attribute access, Tailwind CSS, Turbo Streams with ActionCable WebSocket.
+
+**TypeScript:** 21 tests passing (9 model + 12 controller), Express server, hand-written ORM runtime with better-sqlite3, EJS templates, Tailwind CSS, Turbo Streams with ActionCable WebSocket via ws.
 
 ## Status
 
-The architecture is solid: a clean pipeline from Prism parse through composable AST filters to Crystal output, with a language-agnostic intermediate representation that separates concerns well. The filter chain is the right abstraction -- each new Rails pattern is a small, testable transformer.
+The architecture is solid: a clean pipeline from Prism parse through composable AST filters to target output, with a language-agnostic intermediate representation that separates concerns well. The filter chain is the right abstraction -- each new Rails pattern is a small, testable transformer.
 
 The implementation, however, is held together with bailing wire and chewing gum. A non-exhaustive list:
 
@@ -119,14 +117,11 @@ The implementation, however, is held together with bailing wire and chewing gum.
 - **Hard-coded layout** -- a single inline HTML template rather than converting the Rails layout
 - **Hard-coded import map** -- Turbo JS served as a static file, no asset pipeline
 - **Hard-coded port** -- always binds to 0.0.0.0:3000
-- **Flash as a global hash** -- `FLASH_STORE` is a process-global `Hash`, not per-request
-- **Form builder in the ERB converter** -- ~150 lines of Rails form semantics embedded in what should be a structural pass
-- **`content_for` silently dropped** -- stripped inside the Turbo Stream filter because it was convenient
-- **Duplicate `model_to_path` logic** -- copy-pasted between `LinkToPathHelper` and `ButtonToPathHelper`
+- **Flash as a global hash** -- `FLASH_STORE` is a process-global `Hash`, not per-request (Crystal); flash not yet implemented (Python/TypeScript)
 
 These shortcuts are in place not because the problems are hard, but because they are known to be solvable -- each has a clear path to a proper implementation. The goal at this stage was to prove the pipeline works end to end.
 
-Despite all of this, the proof of concept produces real, observable results: a Rails blog app with models, controllers, views, nested resources, validations, and tests compiles to Crystal and runs.
+Despite all of this, the proof of concept produces real, observable results: a Rails blog app with models, controllers, views, nested resources, validations, and tests transpiles to three languages and runs.
 
 ## What needs work
 
@@ -134,9 +129,9 @@ Many common Rails patterns are not yet implemented:
 
 - **Models** -- scopes, enums, callbacks (beyond stripping), polymorphic associations, `has_one :through`, custom validators
 - **Controllers** -- filters beyond `before_action`, rescue_from, streaming, multi-format responses
-- **Views** -- Turbo Streams (currently stripped), Action Text, complex form builders, content_for
+- **Views** -- Action Text, complex form builders, content_for
 - **Gems** -- Devise, Pundit, Sidekiq, and other common gems each need their own filters
-- **Infrastructure** -- ActionCable/WebSockets, ActiveStorage, ActionMailer, background jobs
+- **Infrastructure** -- ActiveStorage, ActionMailer, background jobs
 - **Runtime metaprogramming** -- `eval`, `method_missing`, dynamic `send` cannot be transpiled
 
 The filter architecture is designed so each of these can be added incrementally. See [ARCHITECTURE.md](ARCHITECTURE.md) for how to contribute.
