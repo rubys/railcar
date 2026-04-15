@@ -22,6 +22,9 @@ require "../filters/form_to_html"
 require "../filters/turbo_stream_connect"
 require "../filters/shared_controller_filters"
 require "../filters/broadcasts_to"
+require "../filters/model_boilerplate_elixir"
+require "../filters/controller_boilerplate_elixir"
+require "../emitter/elixir/cr2ex"
 
 module Railcar
   class ElixirGenerator
@@ -150,7 +153,7 @@ module Railcar
       puts "  lib/#{app_name}/railcar.ex"
     end
 
-    # ── Models ──
+    # ── Models (AST-based) ──
 
     private def emit_models(output_dir : String)
       app_name = app.name.downcase.gsub("-", "_")
@@ -160,85 +163,35 @@ module Railcar
       schema_map = {} of String => TableSchema
       app.schemas.each { |s| schema_map[s.name] = s }
 
+      emitter = Cr2Ex::Emitter.new(app_module)
+
       app.models.each do |name, model|
         table_name = Inflector.pluralize(Inflector.underscore(name))
         schema = schema_map[table_name]?
         next unless schema
 
+        source_path = File.join(rails_dir, "app/models/#{Inflector.underscore(name)}.rb")
+        next unless File.exists?(source_path)
+
+        # Parse Rails model → Crystal AST → filter chain
+        ast = SourceParser.parse(source_path)
+        ast = ast.transform(BroadcastsTo.new)
+        ast = ast.transform(ModelBoilerplateElixir.new(schema, model, app_module))
+
+        # Emit via Cr2Ex
+        next unless ast.is_a?(Crystal::ClassDef)
+        source = emitter.emit_model(ast.as(Crystal::ClassDef), name, schema)
+
+        # Append broadcast callbacks (still structural — uses extracted metadata)
         io = IO::Memory.new
-        columns = schema.columns.reject { |c| c.name == "id" }.map { |c| ":#{c.name}" }
-
-        io << "defmodule #{app_module}.#{name} do\n"
-        io << "  use Railcar.Record, table: \"#{table_name}\", columns: [#{columns.join(", ")}]\n\n"
-
-        # Associations
-        model.associations.each do |assoc|
-          case assoc.kind
-          when :has_many
-            target = Inflector.classify(Inflector.singularize(assoc.name))
-            fk = assoc.options["foreign_key"]? || "#{Inflector.underscore(name)}_id"
-            io << "  def #{assoc.name}(record) do\n"
-            io << "    #{app_module}.#{target}.where(%{#{fk}: record.id})\n"
-            io << "  end\n\n"
-
-            # dependent: :destroy
-            if assoc.options["dependent"]? == "destroy"
-              # Will be handled in delete override
-            end
-          when :belongs_to
-            target = Inflector.classify(assoc.name)
-            fk = assoc.options["foreign_key"]? || "#{assoc.name}_id"
-            io << "  def #{assoc.name}(record) do\n"
-            io << "    #{app_module}.#{target}.find(record.#{fk})\n"
-            io << "  end\n\n"
-          end
+        # Insert broadcast callbacks before the closing "end"
+        if source.ends_with?("\nend\n")
+          io << source.rchop("end\n")
+          emit_broadcast_callbacks(name, io, app_module)
+          io << "end\n"
+        else
+          io << source
         end
-
-        # Validations
-        presence_validations = model.validations.select { |v| v.kind == "presence" }
-        length_validations = model.validations.select { |v| v.kind == "length" }
-        belongs_to_assocs = model.associations.select { |a| a.kind == :belongs_to }
-
-        unless presence_validations.empty? && length_validations.empty? && belongs_to_assocs.empty?
-          io << "  def run_validations(record) do\n"
-          io << "    errors = []\n"
-
-          belongs_to_assocs.each do |a|
-            target = Inflector.classify(a.name)
-            io << "    errors = errors ++ Railcar.Validation.validate_belongs_to(record, :#{a.name}, #{app_module}.#{target})\n"
-          end
-
-          presence_validations.each do |v|
-            io << "    errors = errors ++ Railcar.Validation.validate_presence(record, :#{v.field})\n"
-          end
-
-          length_validations.each do |v|
-            if min = v.options["minimum"]?
-              io << "    errors = errors ++ Railcar.Validation.validate_length(record, :#{v.field}, minimum: #{min})\n"
-            end
-          end
-
-          io << "    errors\n"
-          io << "  end\n\n"
-        end
-
-        # Destroy override for dependent: :destroy
-        destroy_assocs = model.associations.select { |a| a.options["dependent"]? == "destroy" }
-        unless destroy_assocs.empty?
-          io << "  def delete(record) do\n"
-          destroy_assocs.each do |a|
-            target = Inflector.classify(Inflector.singularize(a.name))
-            fk = a.options["foreign_key"]? || "#{Inflector.underscore(name)}_id"
-            io << "    #{assoc_name = a.name}(record) |> Enum.each(&#{app_module}.#{target}.delete/1)\n"
-          end
-          io << "    super(record)\n"
-          io << "  end\n\n"
-        end
-
-        # Broadcast callbacks from BroadcastsTo filter
-        emit_broadcast_callbacks(name, io, app_module)
-
-        io << "end\n"
 
         out_path = File.join(lib_dir, "#{Inflector.underscore(name)}.ex")
         File.write(out_path, io.to_s)
@@ -644,6 +597,8 @@ module Railcar
       app_module = Inflector.classify(app_name)
       lib_dir = File.join(output_dir, "lib/#{app_name}")
 
+      emitter = Cr2Ex::Emitter.new(app_module)
+
       app.controllers.each do |info|
         controller_name = Inflector.underscore(info.name).chomp("_controller")
         singular = Inflector.singularize(controller_name)
@@ -651,15 +606,29 @@ module Railcar
         model_name = Inflector.classify(singular)
         nested_parent = app.routes.nested_parent_for(plural)
 
+        source_path = File.join(rails_dir, "app/controllers/#{controller_name}_controller.rb")
+        next unless File.exists?(source_path)
+
+        # Parse and filter through AST pipeline
+        ast = SourceParser.parse(source_path)
+        ast = SharedControllerFilters.apply(ast)
+        ast = ast.transform(ControllerBoilerplateElixir.new(
+          controller_name, model_name, app_module, nested_parent, info.before_actions))
+
         io = IO::Memory.new
         io << "defmodule #{app_module}.#{Inflector.classify(controller_name)}Controller do\n"
         io << "  import Plug.Conn\n"
         io << "  alias #{app_module}.Helpers\n\n"
 
-        # Generate each action
-        info.actions.each do |action|
-          next if action.is_private
-          emit_controller_action(action.name, io, app_module, model_name, singular, plural, nested_parent)
+        # Emit each function from the filtered AST
+        defs = case ast
+               when Crystal::Expressions then ast.as(Crystal::Expressions).expressions
+               else [ast]
+               end
+
+        defs.each do |node|
+          next unless node.is_a?(Crystal::Def)
+          emitter.emit_controller_function(node.as(Crystal::Def), io)
         end
 
         # Private helper for extracting model params from form data
@@ -672,83 +641,7 @@ module Railcar
       end
     end
 
-    private def emit_controller_action(action_name : String, io : IO, app_module : String,
-                                        model_name : String, singular : String, plural : String,
-                                        nested_parent : String?)
-      full_model = "#{app_module}.#{model_name}"
 
-      case action_name
-      when "index"
-        io << "  def index(conn) do\n"
-        io << "    #{plural} = #{full_model}.all(\"created_at DESC\")\n"
-        io << "    Helpers.render_view(conn, \"#{plural}/index\", [{:#{plural}, #{plural}}])\n"
-        io << "  end\n\n"
-      when "show"
-        io << "  def show(conn) do\n"
-        if nested_parent
-          io << "    #{nested_parent} = #{app_module}.#{Inflector.classify(nested_parent)}.find(String.to_integer(conn.path_params[\"#{nested_parent}_id\"]))\n"
-        end
-        io << "    #{singular} = #{full_model}.find(String.to_integer(conn.path_params[\"id\"]))\n"
-        io << "    Helpers.render_view(conn, \"#{plural}/show\", [{:#{singular}, #{singular}}])\n"
-        io << "  end\n\n"
-      when "new"
-        io << "  def new(conn) do\n"
-        io << "    #{singular} = %#{full_model}{}\n"
-        io << "    Helpers.render_view(conn, \"#{plural}/new\", [{:#{singular}, #{singular}}])\n"
-        io << "  end\n\n"
-      when "edit"
-        io << "  def edit(conn) do\n"
-        io << "    #{singular} = #{full_model}.find(String.to_integer(conn.path_params[\"id\"]))\n"
-        io << "    Helpers.render_view(conn, \"#{plural}/edit\", [{:#{singular}, #{singular}}])\n"
-        io << "  end\n\n"
-      when "create"
-        if nested_parent
-          parent_model = "#{app_module}.#{Inflector.classify(nested_parent)}"
-          io << "  def create(conn) do\n"
-          io << "    #{nested_parent} = #{parent_model}.find(String.to_integer(conn.path_params[\"#{nested_parent}_id\"]))\n"
-          io << "    params = extract_model_params(conn.body_params, \"#{singular}\")\n"
-          io << "    params = Map.put(params, :#{nested_parent}_id, #{nested_parent}.id)\n"
-          io << "    case #{full_model}.create(params) do\n"
-          io << "      {:ok, _#{singular}} -> conn |> put_resp_header(\"location\", Helpers.#{nested_parent}_path(#{nested_parent})) |> send_resp(302, \"\")\n"
-          io << "      {:error, _errors} -> conn |> put_resp_header(\"location\", Helpers.#{nested_parent}_path(#{nested_parent})) |> send_resp(302, \"\")\n"
-          io << "    end\n"
-          io << "  end\n\n"
-        else
-          io << "  def create(conn) do\n"
-          io << "    params = extract_model_params(conn.body_params, \"#{singular}\")\n"
-          io << "    case #{full_model}.create(params) do\n"
-          io << "      {:ok, #{singular}} -> conn |> put_resp_header(\"location\", Helpers.#{singular}_path(#{singular})) |> send_resp(302, \"\")\n"
-          io << "      {:error, #{singular}} -> Helpers.render_view(conn, \"#{plural}/new\", [{:#{singular}, #{singular}}], 422)\n"
-          io << "    end\n"
-          io << "  end\n\n"
-        end
-      when "update"
-        io << "  def update(conn) do\n"
-        io << "    #{singular} = #{full_model}.find(String.to_integer(conn.path_params[\"id\"]))\n"
-        io << "    params = extract_model_params(conn.body_params, \"#{singular}\")\n"
-        io << "    case #{full_model}.update(#{singular}, params) do\n"
-        io << "      {:ok, #{singular}} -> conn |> put_resp_header(\"location\", Helpers.#{singular}_path(#{singular})) |> send_resp(302, \"\")\n"
-        io << "      {:error, #{singular}} -> Helpers.render_view(conn, \"#{plural}/edit\", [{:#{singular}, #{singular}}], 422)\n"
-        io << "    end\n"
-        io << "  end\n\n"
-      when "destroy"
-        if nested_parent
-          parent_model = "#{app_module}.#{Inflector.classify(nested_parent)}"
-          io << "  def destroy(conn) do\n"
-          io << "    #{nested_parent} = #{parent_model}.find(String.to_integer(conn.path_params[\"#{nested_parent}_id\"]))\n"
-          io << "    #{singular} = #{full_model}.find(String.to_integer(conn.path_params[\"id\"]))\n"
-          io << "    #{full_model}.delete(#{singular})\n"
-          io << "    conn |> put_resp_header(\"location\", Helpers.#{nested_parent}_path(#{nested_parent})) |> send_resp(302, \"\")\n"
-          io << "  end\n\n"
-        else
-          io << "  def destroy(conn) do\n"
-          io << "    #{singular} = #{full_model}.find(String.to_integer(conn.path_params[\"id\"]))\n"
-          io << "    #{full_model}.delete(#{singular})\n"
-          io << "    conn |> put_resp_header(\"location\", Helpers.#{plural}_path()) |> send_resp(302, \"\")\n"
-          io << "  end\n\n"
-        end
-      end
-    end
 
     private def extract_model_params_helper(io : IO)
       io << "  defp extract_model_params(body_params, model_name) do\n"

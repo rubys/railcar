@@ -25,8 +25,8 @@ Source file (.rb or .cr)
        +---> TypeScript filters -> Cr2Ts -> .ts output
        |                       -> EjsConverter -> .ejs templates
        |
-       +---> Elixir generator -> .ex output
-       |                      -> EexConverter -> .eex templates
+       +---> Elixir filters -> Cr2Ex -> .ex output
+       |                           -> EexConverter -> .eex templates
 ```
 
 Crystal AST (`Crystal::ASTNode`) is the canonical intermediate representation. All filters operate on it, regardless of whether the source was Ruby or Crystal, and regardless of the target language.
@@ -107,13 +107,20 @@ Each filter is a `Crystal::Transformer` subclass that pattern-matches on AST nod
 |--------|-------------|
 | `ControllerBoilerplateTypeScript` | Transforms Rails controller class into Express handler functions: inlines before_actions, transforms redirects to `res.redirect()`, renders to `helpers.renderView()` |
 
+**Elixir controller filter:**
+
+| Filter | What it does |
+|--------|-------------|
+| `ControllerBoilerplateElixir` | Transforms Rails controller class into Plug handler functions: inlines before_actions, converts `if article.save` to `case Model.create(params) do {:ok,} / {:error,}`, transforms redirects to `conn \|> put_resp_header \|> send_resp`, resolves association chains for nested resources |
+
 **Model filters:**
 
 | Filter | What it does |
 |--------|-------------|
 | `BroadcastsTo` | Converts `broadcasts_to`/`after_*_commit` to broadcast calls |
 | `ModelBoilerplate` | Wraps body in `model("table") { columns + declarations }`, adds validations (Crystal) |
-| `ModelBoilerplatePython` | Produces macro-free Crystal AST with TABLE, COLUMNS, property declarations (Python and TypeScript) |
+| `ModelBoilerplatePython` | Produces macro-free Crystal AST with TABLE, COLUMNS, property declarations (Python, TypeScript, and Go) |
+| `ModelBoilerplateElixir` | Produces Elixir-shaped Crystal AST with module functions taking `record` param, `Railcar.Validation` calls, association methods |
 
 **View filters** (shared, applied to template AST before target-specific emission):
 
@@ -159,6 +166,10 @@ A two-stage Crystal AST -> Python pipeline:
 
 **Cr2Ts Emitter** (`cr2ts.cr`) -- walks typed Crystal AST and emits TypeScript directly. Handles model class definitions, typed property declarations, validation methods, and association methods. No intermediate AST -- Crystal-to-TypeScript syntax is close enough for direct emission.
 
+### Elixir Emitter (`src/emitter/elixir/`)
+
+**Cr2Ex Emitter** (`cr2ex.cr`) -- walks Crystal AST (post-filter) and emits Elixir. Two entry points: `emit_model` (ClassDef -> defmodule with module functions) and `emit_controller_function` (Def -> Plug handler). Handles Elixir-specific patterns: `case` result expressions from `if save/update`, pipe chains for redirects, struct literals, property access without parens, keyword list formatting for `render_view`, and `Railcar.Validation` calls in run_validations.
+
 ### Generators
 
 **AppGenerator** (`src/generator/app_generator.cr`) -- orchestrates Crystal output.
@@ -170,7 +181,7 @@ A two-stage Crystal AST -> Python pipeline:
 - `TypeScriptControllerGenerator` -- Ruby source -> AST -> filters -> Express handlers
 - `TypeScriptTestGenerator` -- Minitest -> node:test via Prism AST walking
 
-**ElixirGenerator** (`src/generator/elixir_generator.cr`) -- orchestrates Elixir output: Mix project, models with `use Railcar.Record`, Plug controllers with conn piping, EEx templates via EexConverter, ExUnit tests via Prism AST walking, Plug + Bandit server with WebSock for ActionCable.
+**ElixirGenerator** (`src/generator/elixir_generator.cr`) -- orchestrates Elixir output. Models and controllers use the AST pipeline: `SourceParser.parse` -> `BroadcastsTo` / `SharedControllerFilters` -> `ModelBoilerplateElixir` / `ControllerBoilerplateElixir` -> `Cr2Ex` emitter. Views use EexConverter. Tests use Prism AST walking. Infrastructure (Mix project, router, database init, seeds) is generated structurally from AppModel metadata. Target: Plug + Bandit server with WebSock for ActionCable.
 
 ### Runtime
 
@@ -246,13 +257,14 @@ make test     # runs all Crystal specs (313)
 crystal spec spec/filters_spec.cr   # run a specific spec file
 ```
 
-CI generates and tests all three targets:
+CI generates and tests all four targets:
 
 | Target | What CI runs |
 |--------|-------------|
 | Crystal | `crystal spec` on generated blog (compiled binary) |
 | Python | `pytest tests/ -v` on generated blog (21 tests) |
 | TypeScript | `npx tsx --test tests/*.test.ts` on generated blog (21 tests) |
+| Elixir | `mix test --no-start` on generated blog (21 tests) |
 
 Crystal tests are organized by component:
 
