@@ -3,6 +3,7 @@ require "./generator/rbs_generator"
 require "./generator/python2_generator"
 require "./generator/typescript_generator"
 require "./generator/elixir_generator"
+require "./generator/go_generator"
 
 # Ensure Crystal stdlib is findable at runtime for semantic analysis.
 # CRYSTAL_STDLIB is set as an env var during `make` and baked in via macro.
@@ -21,6 +22,7 @@ TARGET_ALIASES = {
   "ts"         => "typescript",
   "elixir"     => "elixir",
   "ex"         => "elixir",
+  "go"         => "go",
   "rbs"        => "rbs",
 }
 
@@ -79,6 +81,9 @@ when "typescript"
 when "elixir"
   app = Railcar::AppModel.extract(rails_dir)
   Railcar::ElixirGenerator.new(app, rails_dir).generate(output_dir)
+when "go"
+  app = Railcar::AppModel.extract(rails_dir)
+  Railcar::GoGenerator.new(app, rails_dir).generate(output_dir)
 when "rbs"
   app = Railcar::AppModel.extract(rails_dir)
   Railcar::RbsGenerator.new(app, rails_dir).generate(output_dir)
