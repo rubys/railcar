@@ -52,6 +52,7 @@ module Railcar
       emit_app(output_dir, app_name)
       copy_static_assets(output_dir)
       emit_model_tests(output_dir, app_name)
+      emit_controller_tests(output_dir, app_name)
 
       puts "Done! Output in #{output_dir}/"
       puts "  cd #{output_dir} && go mod tidy && go test ./..."
@@ -166,7 +167,14 @@ module Railcar
       end
 
       io << "\t}\n"
-      io << "\tTemplates = template.Must(template.New(\"\").Funcs(funcMap).ParseGlob(\"templates/**/*.gohtml\"))\n"
+      io << "\tt := template.New(\"\").Funcs(funcMap)\n"
+      io << "\tglobs := []string{\"templates/*/*.gohtml\", \"templates/*.gohtml\", \"templates/*/*/*.gohtml\"}\n"
+      io << "\tfor _, g := range globs {\n"
+      io << "\t\tif files, _ := filepath.Glob(g); len(files) > 0 {\n"
+      io << "\t\t\tt = template.Must(t.ParseGlob(g))\n"
+      io << "\t\t}\n"
+      io << "\t}\n"
+      io << "\tTemplates = t\n"
       io << "}\n\n"
 
       # Route helpers
@@ -979,6 +987,420 @@ module Railcar
       end
     end
 
+    # ── Controller tests ──
+
+    private def emit_controller_tests(output_dir : String, app_name : String)
+      rails_test_dir = File.join(rails_dir, "test/controllers")
+      return unless Dir.exists?(rails_test_dir)
+
+      controllers_dir = File.join(output_dir, "controllers")
+      Dir.mkdir_p(controllers_dir)
+
+      # Test setup helper
+      emit_controller_test_helper(controllers_dir, app_name)
+
+      Dir.glob(File.join(rails_test_dir, "*_test.rb")).sort.each do |path|
+        basename = File.basename(path, "_test.rb")
+        controller_name = basename.chomp("_controller")
+        singular = Inflector.singularize(controller_name)
+        model_name = Inflector.classify(singular)
+
+        ast = SourceParser.parse(path)
+        emit_controller_test_file(controllers_dir, app_name, model_name, controller_name, singular, ast)
+      end
+    end
+
+    private def emit_controller_test_helper(controllers_dir : String, app_name : String)
+      io = IO::Memory.new
+      io << "package controllers\n\n"
+      io << "import (\n"
+      io << "\t\"database/sql\"\n"
+      io << "\t\"net/http\"\n"
+      io << "\t\"net/http/httptest\"\n"
+      io << "\t\"net/url\"\n"
+      io << "\t\"strings\"\n"
+      io << "\t\"testing\"\n"
+      io << "\t\"#{app_name}/helpers\"\n"
+      io << "\t\"#{app_name}/models\"\n"
+      io << "\t\"#{app_name}/railcar\"\n"
+      io << "\t_ \"modernc.org/sqlite\"\n"
+      io << ")\n\n"
+
+      io << "func setupControllerTest(t *testing.T) (*sql.DB, http.Handler) {\n"
+      io << "\tt.Helper()\n"
+      io << "\tdb, _ := sql.Open(\"sqlite\", \":memory:\")\n"
+      io << "\tdb.Exec(\"PRAGMA foreign_keys = ON\")\n"
+
+      app.schemas.each do |schema|
+        all_cols = [{name: "id", type: "INTEGER"}]
+        schema.columns.each { |c| all_cols << {name: c.name, type: c.type} }
+        col_defs = all_cols.map do |c|
+          parts = "#{c[:name]} #{c[:type]}"
+          parts += " PRIMARY KEY AUTOINCREMENT" if c[:name] == "id"
+          parts += " NOT NULL" unless c[:name] == "id"
+          parts
+        end
+        io << "\tdb.Exec(`CREATE TABLE #{schema.name} (\n"
+        io << "\t\t#{col_defs.join(",\n\t\t")}\n"
+        io << "\t)`)\n"
+      end
+
+      io << "\trailcar.DB = db\n"
+      io << "\thelpers.InitTemplates()\n\n"
+
+      # Setup routes
+      io << "\tmux := http.NewServeMux()\n"
+      app.routes.routes.each do |route|
+        singular = Inflector.singularize(route.controller)
+        handler = case route.action
+                  when "index"   then "Index"
+                  when "show"    then "Show#{singular.capitalize}"
+                  when "new"     then "New#{singular.capitalize}"
+                  when "edit"    then "Edit#{singular.capitalize}"
+                  when "create"  then "Create#{singular.capitalize}"
+                  when "update"  then "Update#{singular.capitalize}"
+                  when "destroy" then "Destroy#{singular.capitalize}"
+                  else next
+                  end
+        go_path = route.path.gsub(/:(\w+)/, "{\\1}")
+        io << "\tmux.HandleFunc(\"#{route.method.upcase} #{go_path}\", #{handler})\n"
+      end
+      if app.routes.root_controller
+        io << "\tmux.HandleFunc(\"GET /\", Index)\n"
+      end
+
+      io << "\n\thandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n"
+      io << "\t\tif r.Method == \"POST\" {\n"
+      io << "\t\t\tr.ParseForm()\n"
+      io << "\t\t\tif method := r.FormValue(\"_method\"); method != \"\" {\n"
+      io << "\t\t\t\tr.Method = strings.ToUpper(method)\n"
+      io << "\t\t\t}\n"
+      io << "\t\t}\n"
+      io << "\t\tmux.ServeHTTP(w, r)\n"
+      io << "\t})\n\n"
+
+      io << "\treturn db, handler\n"
+      io << "}\n\n"
+
+      # Fixtures
+      sorted_fixtures = FixtureLoader.sort_by_dependency(app.fixtures, app.models)
+
+      io << "type ctrlFixtures struct {\n"
+      sorted_fixtures.each do |table|
+        singular = Inflector.singularize(table.name)
+        model_name = Inflector.classify(singular)
+        next unless app.models.has_key?(model_name)
+        table.records.each do |record|
+          io << "\t#{table.name}_#{record.label} *models.#{model_name}\n"
+        end
+      end
+      io << "}\n\n"
+
+      io << "func setupCtrlFixtures(t *testing.T) *ctrlFixtures {\n"
+      io << "\tt.Helper()\n"
+      io << "\tf := &ctrlFixtures{}\n"
+      sorted_fixtures.each do |table|
+        singular = Inflector.singularize(table.name)
+        model_name = Inflector.classify(singular)
+        next unless app.models.has_key?(model_name)
+        table.records.each do |record|
+          attrs = [] of String
+          record.fields.each do |field, value|
+            model_info = app.models[model_name]?
+            assoc = model_info.try(&.associations.find { |a| a.name == field })
+            if assoc && assoc.kind == :belongs_to
+              ref_table = Inflector.pluralize(field)
+              attrs << "\"#{field}_id\": f.#{ref_table}_#{value}.Id"
+            else
+              if value.match(/^\d+$/)
+                attrs << "\"#{field}\": int64(#{value})"
+              else
+                attrs << "\"#{field}\": #{value.inspect}"
+              end
+            end
+          end
+          io << "\tf.#{table.name}_#{record.label}, _ = models.Create#{model_name}(map[string]any{#{attrs.join(", ")}})\n"
+        end
+      end
+      io << "\treturn f\n"
+      io << "}\n\n"
+
+      io << "func encodeParams(params map[string]map[string]string) string {\n"
+      io << "\tvalues := url.Values{}\n"
+      io << "\tfor outer, inner := range params {\n"
+      io << "\t\tfor k, v := range inner {\n"
+      io << "\t\t\tvalues.Set(outer+\"[\"+k+\"]\", v)\n"
+      io << "\t\t}\n"
+      io << "\t}\n"
+      io << "\treturn values.Encode()\n"
+      io << "}\n\n"
+
+      io << "func doRequest(handler http.Handler, method, path string, body ...string) *httptest.ResponseRecorder {\n"
+      io << "\tvar req *http.Request\n"
+      io << "\tif len(body) > 0 {\n"
+      io << "\t\treq = httptest.NewRequest(method, path, strings.NewReader(body[0]))\n"
+      io << "\t\treq.Header.Set(\"Content-Type\", \"application/x-www-form-urlencoded\")\n"
+      io << "\t} else {\n"
+      io << "\t\treq = httptest.NewRequest(method, path, nil)\n"
+      io << "\t}\n"
+      io << "\tw := httptest.NewRecorder()\n"
+      io << "\thandler.ServeHTTP(w, req)\n"
+      io << "\treturn w\n"
+      io << "}\n\n"
+
+      io << "var _ = httptest.NewRequest\n"
+      io << "var _ = strings.NewReader\n"
+
+      File.write(File.join(controllers_dir, "test_helper_test.go"), io.to_s)
+      puts "  controllers/test_helper_test.go"
+    end
+
+    private def emit_controller_test_file(controllers_dir : String, app_name : String,
+                                           model_name : String, controller_name : String,
+                                           singular : String, ast : Crystal::ASTNode)
+      plural = Inflector.pluralize(singular)
+      io = IO::Memory.new
+      io << "package controllers\n\n"
+      io << "import (\n"
+      io << "\t\"fmt\"\n"
+      io << "\t\"strings\"\n"
+      io << "\t\"testing\"\n"
+      io << "\t\"#{app_name}/helpers\"\n"
+      io << "\t\"#{app_name}/models\"\n"
+      io << ")\n\n"
+
+      class_body = find_class_body(ast)
+      return unless class_body
+
+      exprs = case class_body
+              when Crystal::Expressions then class_body.expressions
+              else [class_body]
+              end
+
+      # Extract setup block
+      setup_stmts = IO::Memory.new
+      exprs.each do |expr|
+        if expr.is_a?(Crystal::Call) && expr.as(Crystal::Call).name == "setup" && expr.as(Crystal::Call).block
+          emit_go_test_body(expr.as(Crystal::Call).block.not_nil!.body, setup_stmts, model_name, singular)
+        end
+      end
+      setup_code = setup_stmts.to_s
+
+      exprs.each do |expr|
+        next unless expr.is_a?(Crystal::Call)
+        call = expr.as(Crystal::Call)
+        next unless call.name == "test" && call.args.size == 1 && call.block
+        test_name = call.args[0].to_s.strip('"')
+        go_name = "Test" + test_name.split(" ").map(&.capitalize).join("")
+
+        io << "func #{go_name}(t *testing.T) {\n"
+        io << "\tdb, handler := setupControllerTest(t)\n"
+        io << "\tdefer db.Close()\n"
+        io << "\tf := setupCtrlFixtures(t)\n"
+        io << "\t_ = f\n"
+        io << "\t_ = handler\n\n"
+        unless setup_code.empty?
+          io << setup_code
+          # Suppress unused variable errors for setup vars
+          setup_code.scan(/\t(\w+) :=/) do |m|
+            io << "\t_ = #{m[1]}\n"
+          end
+        end
+
+        begin
+          emit_controller_test_body(call.block.not_nil!.body, io, model_name, singular, plural)
+        rescue ex
+          STDERR.puts "  WARN: test #{test_name.inspect}: #{ex.message}"
+          io << "\t// ERROR: #{ex.message}\n"
+        end
+
+        io << "}\n\n"
+      end
+
+      io << "var _ = fmt.Sprintf\n"
+      io << "var _ = strings.Contains\n"
+      io << "var _ = helpers.ArticlesPath\n"
+      io << "var _ = models.ArticleCount\n"
+
+      out_path = File.join(controllers_dir, "#{controller_name}_test.go")
+      File.write(out_path, io.to_s)
+      puts "  controllers/#{controller_name}_test.go"
+    end
+
+    private def emit_controller_test_body(node : Crystal::ASTNode, io : IO, model_name : String,
+                                           singular : String, plural : String)
+      exprs = case node
+              when Crystal::Expressions then node.expressions
+              else [node]
+              end
+
+      exprs.each do |expr|
+        emit_controller_test_stmt(expr, io, model_name, singular, plural)
+      end
+    end
+
+    private def emit_controller_test_stmt(node : Crystal::ASTNode, io : IO, model_name : String,
+                                           singular : String, plural : String)
+      case node
+      when Crystal::Assign
+        target = node.target
+        value = node.value
+        var_name = case target
+                   when Crystal::InstanceVar then target.name.lchop("@")
+                   when Crystal::Var then target.name
+                   else target.to_s
+                   end
+
+        if value.is_a?(Crystal::Call) && value.args.size == 1 && value.args[0].is_a?(Crystal::SymbolLiteral)
+          func = value.name
+          label = value.args[0].as(Crystal::SymbolLiteral).value
+          io << "\t#{var_name} := f.#{func}_#{label}\n"
+        end
+
+      when Crystal::Call
+        name = node.name
+        args = node.args
+
+        case name
+        when "get"
+          path = go_url_expr(args[0], singular, plural)
+          io << "\tresp := doRequest(handler, \"GET\", #{path})\n"
+        when "post"
+          path = go_url_expr(args[0], singular, plural)
+          params = extract_go_params(node, singular)
+          io << "\tresp := doRequest(handler, \"POST\", #{path}, #{params})\n"
+        when "patch"
+          path = go_url_expr(args[0], singular, plural)
+          params = extract_go_params(node, singular)
+          io << "\tresp := doRequest(handler, \"POST\", #{path}, #{params}+\"&_method=patch\")\n"
+        when "delete"
+          path = go_url_expr(args[0], singular, plural)
+          io << "\tresp := doRequest(handler, \"POST\", #{path}, \"_method=delete\")\n"
+        when "assert_response"
+          status = args[0].to_s.strip(':')
+          case status
+          when "success" then io << "\tif resp.Code != 200 { t.Errorf(\"expected 200, got %d\", resp.Code) }\n"
+          when "unprocessable_entity" then io << "\tif resp.Code != 422 { t.Errorf(\"expected 422, got %d\", resp.Code) }\n"
+          end
+        when "assert_redirected_to"
+          io << "\tif resp.Code < 300 || resp.Code >= 400 { t.Errorf(\"expected redirect, got %d\", resp.Code) }\n"
+        when "assert_select"
+          if args.size >= 2 && args[1].is_a?(Crystal::StringLiteral)
+            text = args[1].as(Crystal::StringLiteral).value
+            io << "\tif !strings.Contains(resp.Body.String(), #{text.inspect}) { t.Error(\"expected body to contain #{text}\") }\n"
+          elsif args.size >= 1
+            selector = args[0].to_s.strip('"')
+            if selector.starts_with?("#")
+              id = selector.lchop("#").split(" ").first
+              io << "\tif !strings.Contains(resp.Body.String(), `id=\"#{id}\"`) { t.Error(\"expected body to contain id=#{id}\") }\n"
+            else
+              io << "\tif !strings.Contains(resp.Body.String(), \"<#{selector}\") { t.Error(\"expected body to contain <#{selector}\") }\n"
+            end
+          end
+        when "assert_equal"
+          if args.size == 2
+            expected = go_expr(args[0])
+            actual = go_expr(args[1])
+            io << "\tif #{actual} != #{expected} { t.Errorf(\"expected %v, got %v\", #{expected}, #{actual}) }\n"
+          end
+        when "assert_difference", "assert_no_difference"
+          if args.size >= 1 && node.block
+            count_expr = args[0].to_s.strip('"')
+            model = count_expr.split(".").first
+            diff = args.size > 1 ? args[1].to_s.to_i : (name == "assert_difference" ? 1 : 0)
+            io << "\tbeforeCount, _ := models.#{model}Count()\n"
+            emit_controller_test_body(node.block.not_nil!.body, io, model_name, singular, plural)
+            io << "\tafterCount, _ := models.#{model}Count()\n"
+            if name == "assert_difference"
+              io << "\tif afterCount-beforeCount != #{diff} { t.Errorf(\"expected count diff %d, got %d\", #{diff}, afterCount-beforeCount) }\n"
+            else
+              io << "\tif afterCount != beforeCount { t.Errorf(\"expected count unchanged, was %d now %d\", beforeCount, afterCount) }\n"
+            end
+          end
+        else
+          if obj = node.obj
+            obj_str = obj.to_s.lchop("@")
+            if name == "reload"
+              cls = Inflector.classify(obj_str)
+              io << "\t#{obj_str}, _ = models.Find#{cls}(#{obj_str}.Id)\n"
+            end
+          end
+        end
+      end
+    end
+
+    private def go_url_expr(node : Crystal::ASTNode, singular : String, plural : String) : String
+      case node
+      when Crystal::Call
+        url_name = node.name.chomp("_url")
+        func_name = url_name.split("_").map(&.capitalize).join("") + "Path"
+        if node.args.empty?
+          "helpers.#{func_name}()"
+        else
+          args = node.args.map do |a|
+            case a
+            when Crystal::InstanceVar then a.name.lchop("@")
+            when Crystal::Var then a.name
+            else a.to_s.lchop("@")
+            end
+          end
+          "helpers.#{func_name}(#{args.join(", ")})"
+        end
+      else
+        node.to_s.inspect
+      end
+    end
+
+    private def extract_go_params(node : Crystal::Call, singular : String) : String
+      if named = node.named_args
+        params_arg = named.find { |na| na.name == "params" }
+        if params_arg
+          return "encodeParams(#{go_hash_to_map(params_arg.value)})"
+        end
+      end
+      "\"\""
+    end
+
+    private def go_hash_to_map(node : Crystal::ASTNode, depth : Int32 = 0) : String
+      case node
+      when Crystal::HashLiteral
+        entries = node.entries.map do |entry|
+          key = case entry.key
+                when Crystal::SymbolLiteral then entry.key.as(Crystal::SymbolLiteral).value.inspect
+                when Crystal::StringLiteral then entry.key.as(Crystal::StringLiteral).value.inspect
+                else entry.key.to_s.inspect
+                end
+          value = go_hash_to_map(entry.value, depth + 1)
+          "#{key}: #{value}"
+        end
+        if depth == 0
+          "map[string]map[string]string{#{entries.join(", ")}}"
+        else
+          "map[string]string{#{entries.join(", ")}}"
+        end
+      when Crystal::NamedTupleLiteral
+        entries = node.entries.map { |e| "#{e.key.inspect}: #{go_hash_to_map(e.value, depth + 1)}" }
+        if depth == 0
+          "map[string]map[string]string{#{entries.join(", ")}}"
+        else
+          "map[string]string{#{entries.join(", ")}}"
+        end
+      when Crystal::StringLiteral then node.value.inspect
+      when Crystal::Call
+        if obj = node.obj
+          obj_str = case obj
+                    when Crystal::InstanceVar then obj.as(Crystal::InstanceVar).name.lchop("@")
+                    when Crystal::Var then obj.as(Crystal::Var).name
+                    else obj.to_s
+                    end
+          "#{obj_str}.#{go_field_name(node.name)}"
+        else
+          node.name
+        end
+      else node.to_s.gsub("@", "")
+      end
+    end
+
     # ── Helpers ──
 
     private def find_class_body(ast : Crystal::ASTNode) : Crystal::ASTNode?
@@ -1004,9 +1426,22 @@ module Railcar
       when Crystal::NumberLiteral then "int64(#{node.value.to_s.gsub(/_i64|_i32/, "")})"
       when Crystal::InstanceVar then node.name.lchop("@")
       when Crystal::Var then node.name
+      when Crystal::Path then node.names.join(".")
       when Crystal::Call
         obj = node.obj
         if obj
+          # Model class method calls: Article.last → models.ArticleLast()
+          if obj.is_a?(Crystal::Path) && {"last", "find", "count", "all"}.includes?(node.name)
+            model = obj.as(Crystal::Path).names.last
+            func = go_field_name(node.name)
+            args = node.args.map { |a| go_expr(a) }
+            result = "models.#{model}#{func}(#{args.join(", ")})"
+            # Unwrap pointer for nil return: ArticleLast() returns (*Article, error)
+            if node.name == "last"
+              return "func() *models.#{model} { r, _ := #{result}; return r }()"
+            end
+            return result
+          end
           obj_str = go_expr(obj)
           field = go_field_name(node.name)
           if node.args.empty? && !node.block
