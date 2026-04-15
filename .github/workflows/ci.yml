@@ -343,6 +343,7 @@ jobs:
           cp artifacts/crystal.json _site/
           cp artifacts/python.json _site/
           cp artifacts/typescript.json _site/
+          cp artifacts/elixir.json _site/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
