@@ -31,11 +31,11 @@ defmodule Railcar.Record do
       def find(id) do
         db = Railcar.Repo.db()
         {:ok, stmt} = Exqlite.Sqlite3.prepare(db, "SELECT * FROM #{@table} WHERE id = ?")
-        Exqlite.Sqlite3.bind(db, stmt, [id])
+        Exqlite.Sqlite3.bind(stmt, [id])
 
         case Exqlite.Sqlite3.step(db, stmt) do
           {:row, row} ->
-            names = Exqlite.Sqlite3.columns(db, stmt)
+            {:ok, names} = Exqlite.Sqlite3.columns(db, stmt)
             Exqlite.Sqlite3.release(db, stmt)
             from_row(Enum.zip(names, row) |> Map.new())
 
@@ -62,7 +62,7 @@ defmodule Railcar.Record do
 
         sql = "SELECT * FROM #{@table} WHERE #{Enum.join(clauses, " AND ")}"
         {:ok, stmt} = Exqlite.Sqlite3.prepare(db, sql)
-        Exqlite.Sqlite3.bind(db, stmt, values)
+        Exqlite.Sqlite3.bind(stmt, values)
         rows = fetch_all(db, stmt)
         Exqlite.Sqlite3.release(db, stmt)
         Enum.map(rows, &from_row/1)
@@ -119,7 +119,7 @@ defmodule Railcar.Record do
       def delete(record) do
         db = Railcar.Repo.db()
         {:ok, stmt} = Exqlite.Sqlite3.prepare(db, "DELETE FROM #{@table} WHERE id = ?")
-        Exqlite.Sqlite3.bind(db, stmt, [record.id])
+        Exqlite.Sqlite3.bind(stmt, [record.id])
         Exqlite.Sqlite3.step(db, stmt)
         Exqlite.Sqlite3.release(db, stmt)
         :ok
@@ -151,7 +151,7 @@ defmodule Railcar.Record do
 
         {:ok, stmt} = Exqlite.Sqlite3.prepare(db,
           "INSERT INTO #{@table} (#{col_names}) VALUES (#{placeholders})")
-        Exqlite.Sqlite3.bind(db, stmt, values)
+        Exqlite.Sqlite3.bind(stmt, values)
         Exqlite.Sqlite3.step(db, stmt)
         Exqlite.Sqlite3.release(db, stmt)
 
@@ -170,7 +170,7 @@ defmodule Railcar.Record do
 
         {:ok, stmt} = Exqlite.Sqlite3.prepare(db,
           "UPDATE #{@table} SET #{sets} WHERE id = ?")
-        Exqlite.Sqlite3.bind(db, stmt, values)
+        Exqlite.Sqlite3.bind(stmt, values)
         Exqlite.Sqlite3.step(db, stmt)
         Exqlite.Sqlite3.release(db, stmt)
 
@@ -178,7 +178,7 @@ defmodule Railcar.Record do
       end
 
       defp fetch_all(db, stmt) do
-        names = Exqlite.Sqlite3.columns(db, stmt)
+        {:ok, names} = Exqlite.Sqlite3.columns(db, stmt)
         fetch_all_rows(db, stmt, names, [])
       end
 
