@@ -363,33 +363,36 @@ defmodule Railcar.Broadcast do
     end
   end
 
+  def broadcast_replace_to(record, channel, opts \\ [])
   def broadcast_replace_to(record, channel, target) when is_binary(target) do
     broadcast_replace_to(record, channel, target: target)
   end
 
-  def broadcast_replace_to(record, channel, opts \\ []) do
+  def broadcast_replace_to(record, channel, opts) do
     target = opts[:target] || dom_id(record)
     html = render_partial(record)
     stream = turbo_stream_html("replace", target, html)
     Railcar.CableServer.broadcast(channel, stream)
   end
 
+  def broadcast_prepend_to(record, channel, opts \\ [])
   def broadcast_prepend_to(record, channel, target) when is_binary(target) do
     broadcast_prepend_to(record, channel, target: target)
   end
 
-  def broadcast_prepend_to(record, channel, opts \\ []) do
+  def broadcast_prepend_to(record, channel, opts) do
     target = opts[:target] || table_name(record)
     html = render_partial(record)
     stream = turbo_stream_html("prepend", target, html)
     Railcar.CableServer.broadcast(channel, stream)
   end
 
+  def broadcast_remove_to(record, channel, opts \\ [])
   def broadcast_remove_to(record, channel, target) when is_binary(target) do
     broadcast_remove_to(record, channel, target: target)
   end
 
-  def broadcast_remove_to(record, channel, opts \\ []) do
+  def broadcast_remove_to(record, channel, opts) do
     target = opts[:target] || dom_id(record)
     stream = turbo_stream_html("remove", target)
     Railcar.CableServer.broadcast(channel, stream)

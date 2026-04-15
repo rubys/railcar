@@ -496,8 +496,9 @@ module Railcar
       io << "    ~s(<turbo-cable-stream-source channel=\"Turbo::StreamsChannel\" signed-stream-name=\"\#{signed}\"></turbo-cable-stream-source>)\n"
       io << "  end\n\n"
 
+      io << "  def truncate(text, opts \\\\ [])\n"
       io << "  def truncate(nil, _opts), do: \"\"\n"
-      io << "  def truncate(text, opts \\\\ []) do\n"
+      io << "  def truncate(text, opts) do\n"
       io << "    length = opts[:length] || 30\n"
       io << "    if String.length(text) <= length, do: text, else: String.slice(text, 0, length - 3) <> \"...\"\n"
       io << "  end\n\n"
@@ -653,13 +654,7 @@ module Railcar
         io = IO::Memory.new
         io << "defmodule #{app_module}.#{Inflector.classify(controller_name)}Controller do\n"
         io << "  import Plug.Conn\n"
-        io << "  alias #{app_module}.Helpers\n"
-        io << "  alias #{app_module}.#{model_name}\n"
-        if nested_parent
-          parent_model = Inflector.classify(nested_parent)
-          io << "  alias #{app_module}.#{parent_model}\n"
-        end
-        io << "\n"
+        io << "  alias #{app_module}.Helpers\n\n"
 
         # Generate each action
         info.actions.each do |action|
@@ -848,11 +843,15 @@ module Railcar
       end
       joined << current unless current.empty?
 
-      joined.each do |stmt|
+      joined.each_with_index do |stmt, idx|
         case stmt
         when /^(\w+)\s*=\s*(\w+)\.create!\(\s*(.+)\s*\)$/m
+          var_name = $1
           attrs = $3.gsub(/\s+/, " ").gsub(/(\w+):\s*/, "\\1: ")
-          io << "    {:ok, #{$1}} = #{app_module}.#{$2}.create(%{#{attrs}})\n"
+          # Check if variable is used in subsequent statements
+          used = joined[(idx + 1)..].any? { |s| s.includes?(var_name) }
+          prefix = used ? "" : "_"
+          io << "    {:ok, #{prefix}#{var_name}} = #{app_module}.#{$2}.create(%{#{attrs}})\n"
         when /^(\w+)\.(\w+)\.create!\(\s*(.+)\s*\)$/m
           attrs = $3.gsub(/\s+/, " ").gsub(/(\w+):\s*/, "\\1: ")
           singular = Inflector.singularize($2)

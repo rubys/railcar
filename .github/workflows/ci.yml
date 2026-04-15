@@ -240,12 +240,58 @@ jobs:
           npm install
           npx tsx base_runtime_test.ts
 
+  test-elixir:
+    needs: [build, download-demo]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.18'
+          otp-version: '27'
+
+      - name: Install SQLite3 dev headers
+        run: sudo apt-get install -y libsqlite3-dev
+
+      - name: Download railcar binary
+        uses: actions/download-artifact@v4
+        with:
+          name: railcar-binary
+          path: build
+
+      - name: Download demo blog
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-blog
+          path: build/demo/blog
+
+      - name: Make binary executable
+        run: chmod +x build/railcar
+
+      - name: Generate Elixir blog
+        run: build/railcar --elixir build/demo/blog build/ex-blog
+
+      - name: Test Elixir blog
+        run: |
+          cd build/ex-blog
+          mix deps.get
+          mix test --no-start
+
+      - name: Upload Elixir blog
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-elixir
+          path: build/ex-blog
+          retention-days: 7
+
   # ===========================================================================
   # Stage 3: Build GitHub Pages site
   # ===========================================================================
 
   build-site:
-    needs: [test-crystal, test-python, test-typescript]
+    needs: [test-crystal, test-python, test-typescript, test-elixir]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -275,9 +321,15 @@ jobs:
           name: generated-typescript
           path: artifacts/typescript
 
+      - name: Download Elixir blog
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-elixir
+          path: artifacts/elixir
+
       - name: Build file manifests
         run: |
-          for lang in ruby crystal python typescript; do
+          for lang in ruby crystal python typescript elixir; do
             node pages/build-manifest.js "artifacts/$lang" "$lang" > "artifacts/${lang}.json"
           done
 

@@ -24,6 +24,9 @@ Source file (.rb or .cr)
        |
        +---> TypeScript filters -> Cr2Ts -> .ts output
        |                       -> EjsConverter -> .ejs templates
+       |
+       +---> Elixir generator -> .ex output
+       |                      -> EexConverter -> .eex templates
 ```
 
 Crystal AST (`Crystal::ASTNode`) is the canonical intermediate representation. All filters operate on it, regardless of whether the source was Ruby or Crystal, and regardless of the target language.
@@ -133,13 +136,15 @@ Each filter is a `Crystal::Transformer` subclass that pattern-matches on AST nod
 
 Filter order matters. Each filter's documentation notes its dependencies.
 
-### ERBConverter / EjsConverter
+### ERBConverter / EjsConverter / EexConverter
 
-**ERBConverter** (`src/generator/erb_converter.cr`): Converts ERB/ECR templates to Crystal ECR output. Walks the `_buf`-based AST from ErbCompiler and emits `<% %>` and `<%= %>` tags with Crystal expressions.
+**ERBConverter** (`src/generator/erb_converter.cr`): Converts ERB/ECR templates to Crystal ECR output.
 
-**EjsConverter** (`src/generator/ejs_converter.cr`): Converts ERB templates to EJS output for TypeScript. Same approach as ERBConverter but emits JavaScript expressions. Handles EJS `include()` for partials and `<%-` for unescaped HTML output.
+**EjsConverter** (`src/generator/ejs_converter.cr`): Converts ERB templates to EJS output for TypeScript. Handles EJS `include()` for partials and `<%-` for unescaped HTML output.
 
-Both converters operate after view filters have normalized the AST. They handle only structural concerns -- walking the `_buf`-based AST and emitting template tags.
+**EexConverter** (`src/generator/eex_converter.cr`): Converts ERB templates to EEx output for Elixir. Emits Elixir expressions with full module paths (e.g., `Blog.Helpers.link_to`). Uses `app_module` parameter and `known_fields` from schema for property-vs-method detection.
+
+All three converters follow the same pattern: after view filters have normalized the AST, they walk the `_buf`-based AST and emit template tags in the target syntax.
 
 ### Python Emitter (`src/emitter/python/`)
 
@@ -165,6 +170,8 @@ A two-stage Crystal AST -> Python pipeline:
 - `TypeScriptControllerGenerator` -- Ruby source -> AST -> filters -> Express handlers
 - `TypeScriptTestGenerator` -- Minitest -> node:test via Prism AST walking
 
+**ElixirGenerator** (`src/generator/elixir_generator.cr`) -- orchestrates Elixir output: Mix project, models with `use Railcar.Record`, Plug controllers with conn piping, EEx templates via EexConverter, ExUnit tests via Prism AST walking, Plug + Bandit server with WebSock for ActionCable.
+
 ### Runtime
 
 **Crystal** (`src/runtime/`): A Crystal ORM mirroring ActiveRecord -- base model class with macros, Relation query builder, CollectionProxy, view helpers.
@@ -177,6 +184,9 @@ A two-stage Crystal AST -> Python pipeline:
 - `base.cr` -- Crystal source used only for `program.semantic()` type checking (not emitted)
 - `base_runtime.ts` -- hand-written TypeScript runtime with ApplicationRecord, ValidationErrors, CollectionProxy, using better-sqlite3
 - `base_runtime_test.ts` -- smoke tests (24 assertions)
+
+**Elixir** (`src/runtime/elixir/`):
+- `base_runtime.ex` -- hand-written Elixir runtime: `Railcar.Record` macro (CRUD, validations, callbacks), `Railcar.Repo` (SQLite via Exqlite with persistent_term), `Railcar.Validation` helpers, `Railcar.CableServer` (GenServer for WebSocket subscriptions), `Railcar.CableHandler` (WebSock Action Cable protocol), `Railcar.Broadcast` (turbo-stream HTML generation and delivery)
 
 ### Shared data models
 
