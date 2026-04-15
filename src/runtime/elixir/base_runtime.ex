@@ -207,17 +207,20 @@ defmodule Railcar.Record do
 end
 
 defmodule Railcar.Repo do
-  @moduledoc "Simple SQLite database connection via process dictionary."
+  @moduledoc "Simple SQLite database connection via persistent_term."
 
   def start(db_path) do
-    {:ok, db} = Exqlite.Sqlite3.open(db_path)
+    {:ok, db} = Exqlite.Sqlite3.open(to_charlist(db_path))
     Exqlite.Sqlite3.execute(db, "PRAGMA foreign_keys = ON")
-    Process.put(:railcar_db, db)
+    :persistent_term.put(:railcar_db, db)
     db
   end
 
   def db do
-    Process.get(:railcar_db) || raise "Database not started. Call Railcar.Repo.start/1 first."
+    case :persistent_term.get(:railcar_db, nil) do
+      nil -> raise "Database not started. Call Railcar.Repo.start/1 first."
+      db -> db
+    end
   end
 
   def execute(sql) do
@@ -368,14 +371,14 @@ defmodule Railcar.Broadcast do
 
   defp render_partial(record) do
     module = record.__struct__
-    case Process.get({:render_partial, module}) do
+    case :persistent_term.get({:render_partial, module}, nil) do
       nil -> "<div>#{inspect(record)}</div>"
       func -> func.(record)
     end
   end
 
   def register_partial(module, func) do
-    Process.put({:render_partial, module}, func)
+    :persistent_term.put({:render_partial, module}, func)
   end
 end
 
