@@ -311,9 +311,9 @@ module Railcar
       when Crystal::SymbolLiteral then node.value.inspect
       when Crystal::Var
         name = node.name
-        name == "self" ? "." : ".#{name.capitalize}"
+        name == "self" ? "." : ".#{name}"
       when Crystal::InstanceVar
-        ".#{go_field_name(node.name.lchop("@"))}"
+        ".#{node.name.lchop("@")}"
       when Crystal::Path then node.names.join(".")
       when Crystal::StringInterpolation
         # Go templates don't have string interpolation — use printf or concat
@@ -412,12 +412,15 @@ module Railcar
         return "#{func_name} #{args.join(" ")}"
       end
 
-      # Path helpers
+      # Path helpers — in Go templates, function calls use (funcName args...)
       if !obj && name.ends_with?("_path")
-        func_name = name.split("_").map(&.capitalize).join("") # articles_path → ArticlesPath
-        # Lowercase first char for Go convention in FuncMap
+        func_name = name.split("_").map(&.capitalize).join("")
         func_name = func_name[0].downcase + func_name[1..]
-        return "#{func_name} #{args.join(" ")}".strip
+        if args.empty?
+          return "(#{func_name})"  # Parenthesized for use as argument
+        else
+          return "(#{func_name} #{args.join(" ")})"
+        end
       end
 
       # Render partials
@@ -428,24 +431,18 @@ module Railcar
         is_model_partial = partial_name != "form" && partial_model_plural != controller_plural
         template_dir = is_model_partial ? partial_model_plural : controller_plural
         var_name = args.last?.try(&.lstrip(".")) || partial_name
-        return "template \"#{template_dir}/_#{partial_name}\" ."
+        return "template \"templates/#{template_dir}/_#{partial_name}.gohtml\" ."
       end
 
-      # Bare name with no args — local variable or template variable
+      # Bare name with no args — template variable (map key, lowercase)
       if !obj && args.empty? && !node.block && !node.named_args
-        return ".#{name.capitalize}"
+        return ".#{name}"
       end
 
-      # Method calls on objects → field access or function call
+      # Method calls on objects → struct field access (capitalized)
       if obj
         obj_str = to_go(obj)
-        field = go_field_name(name)
-        is_field = @known_fields.includes?(name) ||
-                   {"id", "errors", "persisted"}.includes?(name)
-        if args.empty? && is_field
-          return "#{obj_str}.#{field}"
-        end
-        # Association calls
+        field = go_field_name(name)  # Capitalize for Go struct fields
         return "#{obj_str}.#{field}"
       end
 
@@ -454,7 +451,7 @@ module Railcar
 
     private def to_go_condition(node : Crystal::ASTNode) : String
       case node
-      when Crystal::Var then ".#{node.name.capitalize}"
+      when Crystal::Var then ".#{node.name}"
       when Crystal::Call
         if node.name == "any?" && node.obj
           to_go(node.obj.not_nil!)

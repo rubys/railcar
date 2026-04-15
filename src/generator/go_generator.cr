@@ -171,7 +171,9 @@ module Railcar
       io << "\tglobs := []string{\"templates/*/*.gohtml\", \"templates/*.gohtml\", \"templates/*/*/*.gohtml\"}\n"
       io << "\tfor _, g := range globs {\n"
       io << "\t\tif files, _ := filepath.Glob(g); len(files) > 0 {\n"
-      io << "\t\t\tt = template.Must(t.ParseGlob(g))\n"
+      io << "\t\t\tvar err error\n"
+      io << "\t\t\tt, err = t.ParseGlob(g)\n"
+      io << "\t\t\tif err != nil { fmt.Println(\"Template parse error:\", err); }\n"
       io << "\t\t}\n"
       io << "\t}\n"
       io << "\tTemplates = t\n"
@@ -292,7 +294,7 @@ module Railcar
       func RenderViewStatus(w http.ResponseWriter, tmpl string, data map[string]any, status int) {
         // Render the content template
         var content strings.Builder
-        name := filepath.Base(tmpl) + ".gohtml"
+        name := "templates/" + tmpl + ".gohtml"
         if err := Templates.ExecuteTemplate(&content, name, data); err != nil {
           http.Error(w, err.Error(), 500)
           return
@@ -301,7 +303,7 @@ module Railcar
         layoutData := map[string]any{"Title": "Blog", "Content": template.HTML(content.String())}
         w.Header().Set("Content-Type", "text/html")
         w.WriteHeader(status)
-        Templates.ExecuteTemplate(w, "application.gohtml", layoutData)
+        Templates.ExecuteTemplate(w, "templates/layouts/application.gohtml", layoutData)
       }
 
       func ExtractModelParams(form url.Values, model string) map[string]any {
@@ -1018,6 +1020,7 @@ module Railcar
       io << "\t\"net/http\"\n"
       io << "\t\"net/http/httptest\"\n"
       io << "\t\"net/url\"\n"
+      io << "\t\"os\"\n"
       io << "\t\"strings\"\n"
       io << "\t\"testing\"\n"
       io << "\t\"#{app_name}/helpers\"\n"
@@ -1046,6 +1049,7 @@ module Railcar
       end
 
       io << "\trailcar.DB = db\n"
+      io << "\tos.Chdir(\"..\")\n"
       io << "\thelpers.InitTemplates()\n\n"
 
       # Setup routes
