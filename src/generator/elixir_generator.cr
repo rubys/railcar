@@ -12,6 +12,15 @@ require "./schema_extractor"
 require "./inflector"
 require "./source_parser"
 require "./fixture_loader"
+require "./eex_converter"
+require "../filters/instance_var_to_local"
+require "../filters/rails_helpers"
+require "../filters/link_to_path_helper"
+require "../filters/button_to_path_helper"
+require "../filters/render_to_partial"
+require "../filters/form_to_html"
+require "../filters/turbo_stream_connect"
+require "../filters/shared_controller_filters"
 
 module Railcar
   class ElixirGenerator
@@ -28,12 +37,17 @@ module Railcar
       emit_mix_exs(output_dir)
       emit_application(output_dir)
       emit_runtime(output_dir)
+      emit_helpers(output_dir)
       emit_models(output_dir)
+      emit_views(output_dir)
+      emit_controllers(output_dir)
       emit_router(output_dir)
+      emit_seeds(output_dir)
+      copy_static_assets(output_dir)
       emit_tests(output_dir)
 
       puts "Done! Output in #{output_dir}/"
-      puts "  cd #{output_dir} && mix deps.get && mix test"
+      puts "  cd #{output_dir} && mix deps.get && mix test --no-start"
     end
 
     # ── mix.exs ──
@@ -293,6 +307,429 @@ module Railcar
 
       File.write(File.join(lib_dir, "router.ex"), io.to_s)
       puts "  lib/#{app_name}/router.ex"
+    end
+
+    # ── Helpers ──
+
+    private def emit_helpers(output_dir : String)
+      app_name = app.name.downcase.gsub("-", "_")
+      app_module = Inflector.classify(app_name)
+      lib_dir = File.join(output_dir, "lib/#{app_name}")
+
+      io = IO::Memory.new
+      io << "defmodule #{app_module}.Helpers do\n\n"
+
+      # Route helpers
+      app.routes.helpers.each do |helper|
+        if helper.params.empty?
+          io << "  def #{helper.name}_path, do: #{helper.path.inspect}\n\n"
+        else
+          param_names = helper.params.map_with_index do |p, i|
+            p == "id" ? (i == 0 ? "model" : "child") : p.chomp("_id")
+          end
+          io << "  def #{helper.name}_path(#{param_names.join(", ")}) do\n"
+          path_parts = helper.path.split("/").map do |part|
+            if part.starts_with?(":")
+              param_idx = helper.params.index(part.lchop(":"))
+              param_idx ? "\#{#{param_names[param_idx]}.id}" : part
+            else
+              part
+            end
+          end
+          io << "    \"/#{path_parts.reject(&.empty?).join("/")}\"\n"
+          io << "  end\n\n"
+        end
+      end
+
+      # View helpers
+      io << "  def link_to(text, url, opts \\\\ []) do\n"
+      io << "    cls = if opts[:class], do: ~s( class=\"\#{opts[:class]}\"), else: \"\"\n"
+      io << "    ~s(<a href=\"\#{url}\"\#{cls}>\#{text}</a>)\n"
+      io << "  end\n\n"
+
+      io << "  def button_to(text, url, opts \\\\ []) do\n"
+      io << "    method = opts[:method] || \"post\"\n"
+      io << "    cls = if opts[:class], do: ~s( class=\"\#{opts[:class]}\"), else: \"\"\n"
+      io << "    form_cls = if opts[:form_class], do: ~s( class=\"\#{opts[:form_class]}\"), else: \"\"\n"
+      io << "    confirm = opts[:data_turbo_confirm] || \"\"\n"
+      io << "    confirm_attr = if confirm != \"\", do: ~s( data-turbo-confirm=\"\#{confirm}\"), else: \"\"\n"
+      io << "    ~s(<form method=\"post\" action=\"\#{url}\"\#{form_cls}\#{confirm_attr}>) <>\n"
+      io << "    ~s(<input type=\"hidden\" name=\"_method\" value=\"\#{method}\">) <>\n"
+      io << "    ~s(<button type=\"submit\"\#{cls}>\#{text}</button></form>)\n"
+      io << "  end\n\n"
+
+      io << "  def turbo_stream_from(channel) do\n"
+      io << "    signed = Base.encode64(Jason.encode!(channel))\n"
+      io << "    ~s(<turbo-cable-stream-source channel=\"Turbo::StreamsChannel\" signed-stream-name=\"\#{signed}\"></turbo-cable-stream-source>)\n"
+      io << "  end\n\n"
+
+      io << "  def truncate(nil, _opts), do: \"\"\n"
+      io << "  def truncate(text, opts \\\\ []) do\n"
+      io << "    length = opts[:length] || 30\n"
+      io << "    if String.length(text) <= length, do: text, else: String.slice(text, 0, length - 3) <> \"...\"\n"
+      io << "  end\n\n"
+
+      io << "  def dom_id(obj, prefix \\\\ nil) do\n"
+      io << "    name = obj.__struct__ |> Module.split() |> List.last() |> String.downcase()\n"
+      io << "    if prefix, do: \"\#{prefix}_\#{name}_\#{obj.id}\", else: \"\#{name}_\#{obj.id}\"\n"
+      io << "  end\n\n"
+
+      io << "  def pluralize(1, singular), do: \"1 \#{singular}\"\n"
+      io << "  def pluralize(count, singular), do: \"\#{count} \#{singular}s\"\n\n"
+
+      io << "  def form_with_open_tag(model, opts \\\\ []) do\n"
+      io << "    name = model.__struct__ |> Module.split() |> List.last() |> String.downcase()\n"
+      io << "    plural = name <> \"s\"\n"
+      io << "    cls = if opts[:class], do: ~s( class=\"\#{opts[:class]}\"), else: \"\"\n"
+      io << "    if model.id do\n"
+      io << "      ~s(<form action=\"/\#{plural}/\#{model.id}\" method=\"post\"\#{cls}>) <>\n"
+      io << "      ~s(<input type=\"hidden\" name=\"_method\" value=\"patch\">)\n"
+      io << "    else\n"
+      io << "      ~s(<form action=\"/\#{plural}\" method=\"post\"\#{cls}>)\n"
+      io << "    end\n"
+      io << "  end\n\n"
+
+      io << "  def form_submit_tag(model, opts \\\\ []) do\n"
+      io << "    name = model.__struct__ |> Module.split() |> List.last()\n"
+      io << "    cls = if opts[:class], do: ~s( class=\"\#{opts[:class]}\"), else: \"\"\n"
+      io << "    action = if model.id, do: \"Update\", else: \"Create\"\n"
+      io << "    ~s(<input type=\"submit\" value=\"\#{action} \#{name}\"\#{cls}>)\n"
+      io << "  end\n\n"
+
+      io << "  def layout(content, title \\\\ \"Blog\") do\n"
+      io << "    \"\"\"\n"
+      io << "    <!DOCTYPE html>\n"
+      io << "    <html>\n"
+      io << "    <head>\n"
+      io << "      <title>\#{title}</title>\n"
+      io << "      <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n"
+      io << "      <meta name=\"action-cable-url\" content=\"/cable\">\n"
+      io << "      <link rel=\"stylesheet\" href=\"/static/app.css\">\n"
+      io << "      <script type=\"module\" src=\"/static/turbo.min.js\"></script>\n"
+      io << "    </head>\n"
+      io << "    <body>\n"
+      io << "      <main class=\"container mx-auto mt-28 px-5 flex flex-col\">\n"
+      io << "        \#{content}\n"
+      io << "      </main>\n"
+      io << "    </body>\n"
+      io << "    </html>\n"
+      io << "    \"\"\"\n"
+      io << "  end\n\n"
+
+      # Render view function
+      io << "  def render_view(conn, template, assigns) do\n"
+      io << "    views_dir = Path.join(:code.priv_dir(:#{app_name}) |> to_string(), \"views\")\n"
+      io << "    template_path = Path.join(views_dir, template <> \".eex\")\n"
+      io << "    all_assigns = Keyword.merge([helpers: #{app_module}.Helpers, notice: nil], assigns)\n"
+      io << "    content = EEx.eval_file(template_path, all_assigns)\n"
+      io << "    html = layout(content)\n"
+      io << "    conn |> Plug.Conn.put_resp_content_type(\"text/html\") |> Plug.Conn.send_resp(200, html)\n"
+      io << "  end\n\n"
+
+      io << "  def render_view(conn, template, assigns, status) do\n"
+      io << "    views_dir = Path.join(:code.priv_dir(:#{app_name}) |> to_string(), \"views\")\n"
+      io << "    template_path = Path.join(views_dir, template <> \".eex\")\n"
+      io << "    all_assigns = Keyword.merge([helpers: #{app_module}.Helpers, notice: nil], assigns)\n"
+      io << "    content = EEx.eval_file(template_path, all_assigns)\n"
+      io << "    html = layout(content)\n"
+      io << "    conn |> Plug.Conn.put_resp_content_type(\"text/html\") |> Plug.Conn.send_resp(status, html)\n"
+      io << "  end\n"
+
+      io << "end\n"
+
+      File.write(File.join(lib_dir, "helpers.ex"), io.to_s)
+      puts "  lib/#{app_name}/helpers.ex"
+    end
+
+    # ── Views ──
+
+    private def emit_views(output_dir : String)
+      app_name = app.name.downcase.gsub("-", "_")
+      priv_dir = File.join(output_dir, "priv/views")
+
+      rails_views = File.join(rails_dir, "app/views")
+
+      app.controllers.each do |info|
+        controller_name = Inflector.underscore(info.name).chomp("_controller")
+        template_dir = File.join(rails_views, Inflector.pluralize(controller_name))
+        next unless Dir.exists?(template_dir)
+
+        views_dir = File.join(priv_dir, Inflector.pluralize(controller_name))
+        Dir.mkdir_p(views_dir)
+
+        Dir.glob(File.join(template_dir, "*.html.erb")).sort.each do |erb_path|
+          filename = File.basename(erb_path)
+          basename = filename.sub(/\.html\.erb$/, "")
+          eex_name = "#{basename}.eex"
+
+          eex_source = EexConverter.convert_file(erb_path, basename, controller_name,
+            view_filters: build_view_filters)
+
+          File.write(File.join(views_dir, eex_name), eex_source)
+          puts "  priv/views/#{Inflector.pluralize(controller_name)}/#{eex_name}"
+        end
+      end
+    end
+
+    private def build_view_filters : Array(Crystal::Transformer)
+      [
+        InstanceVarToLocal.new,
+        TurboStreamConnect.new,
+        RailsHelpers.new,
+        LinkToPathHelper.new,
+        ButtonToPathHelper.new,
+        RenderToPartial.new,
+        FormToHTML.new,
+      ] of Crystal::Transformer
+    end
+
+    # ── Controllers ──
+
+    private def emit_controllers(output_dir : String)
+      app_name = app.name.downcase.gsub("-", "_")
+      app_module = Inflector.classify(app_name)
+      lib_dir = File.join(output_dir, "lib/#{app_name}")
+
+      app.controllers.each do |info|
+        controller_name = Inflector.underscore(info.name).chomp("_controller")
+        singular = Inflector.singularize(controller_name)
+        plural = Inflector.pluralize(controller_name)
+        model_name = Inflector.classify(singular)
+        nested_parent = app.routes.nested_parent_for(plural)
+
+        io = IO::Memory.new
+        io << "defmodule #{app_module}.#{Inflector.classify(controller_name)}Controller do\n"
+        io << "  import Plug.Conn\n"
+        io << "  alias #{app_module}.Helpers\n"
+        io << "  alias #{app_module}.#{model_name}\n"
+        if nested_parent
+          parent_model = Inflector.classify(nested_parent)
+          io << "  alias #{app_module}.#{parent_model}\n"
+        end
+        io << "\n"
+
+        # Generate each action
+        info.actions.each do |action|
+          next if action.is_private
+          emit_controller_action(action.name, io, app_module, model_name, singular, plural, nested_parent)
+        end
+
+        # Private helper for extracting model params from form data
+        extract_model_params_helper(io)
+        io << "end\n"
+
+        out_path = File.join(lib_dir, "#{controller_name}_controller.ex")
+        File.write(out_path, io.to_s)
+        puts "  lib/#{app_name}/#{controller_name}_controller.ex"
+      end
+    end
+
+    private def emit_controller_action(action_name : String, io : IO, app_module : String,
+                                        model_name : String, singular : String, plural : String,
+                                        nested_parent : String?)
+      full_model = "#{app_module}.#{model_name}"
+
+      case action_name
+      when "index"
+        io << "  def index(conn) do\n"
+        io << "    #{plural} = #{full_model}.all(\"created_at DESC\")\n"
+        io << "    Helpers.render_view(conn, \"#{plural}/index\", [{:#{plural}, #{plural}}])\n"
+        io << "  end\n\n"
+      when "show"
+        io << "  def show(conn) do\n"
+        if nested_parent
+          io << "    #{nested_parent} = #{app_module}.#{Inflector.classify(nested_parent)}.find(String.to_integer(conn.path_params[\"#{nested_parent}_id\"]))\n"
+        end
+        io << "    #{singular} = #{full_model}.find(String.to_integer(conn.path_params[\"id\"]))\n"
+        io << "    Helpers.render_view(conn, \"#{plural}/show\", [{:#{singular}, #{singular}}])\n"
+        io << "  end\n\n"
+      when "new"
+        io << "  def new(conn) do\n"
+        io << "    #{singular} = %#{full_model}{}\n"
+        io << "    Helpers.render_view(conn, \"#{plural}/new\", [{:#{singular}, #{singular}}])\n"
+        io << "  end\n\n"
+      when "edit"
+        io << "  def edit(conn) do\n"
+        io << "    #{singular} = #{full_model}.find(String.to_integer(conn.path_params[\"id\"]))\n"
+        io << "    Helpers.render_view(conn, \"#{plural}/edit\", [{:#{singular}, #{singular}}])\n"
+        io << "  end\n\n"
+      when "create"
+        if nested_parent
+          parent_model = "#{app_module}.#{Inflector.classify(nested_parent)}"
+          io << "  def create(conn) do\n"
+          io << "    #{nested_parent} = #{parent_model}.find(String.to_integer(conn.path_params[\"#{nested_parent}_id\"]))\n"
+          io << "    params = extract_model_params(conn.body_params, \"#{singular}\")\n"
+          io << "    params = Map.put(params, :#{nested_parent}_id, #{nested_parent}.id)\n"
+          io << "    case #{full_model}.create(params) do\n"
+          io << "      {:ok, _#{singular}} -> conn |> put_resp_header(\"location\", Helpers.#{nested_parent}_path(#{nested_parent})) |> send_resp(302, \"\")\n"
+          io << "      {:error, _errors} -> conn |> put_resp_header(\"location\", Helpers.#{nested_parent}_path(#{nested_parent})) |> send_resp(302, \"\")\n"
+          io << "    end\n"
+          io << "  end\n\n"
+        else
+          io << "  def create(conn) do\n"
+          io << "    params = extract_model_params(conn.body_params, \"#{singular}\")\n"
+          io << "    case #{full_model}.create(params) do\n"
+          io << "      {:ok, #{singular}} -> conn |> put_resp_header(\"location\", Helpers.#{singular}_path(#{singular})) |> send_resp(302, \"\")\n"
+          io << "      {:error, _errors} -> Helpers.render_view(conn, \"#{plural}/new\", [{:#{singular}, struct(#{full_model}, params)}], 422)\n"
+          io << "    end\n"
+          io << "  end\n\n"
+        end
+      when "update"
+        io << "  def update(conn) do\n"
+        io << "    #{singular} = #{full_model}.find(String.to_integer(conn.path_params[\"id\"]))\n"
+        io << "    params = extract_model_params(conn.body_params, \"#{singular}\")\n"
+        io << "    case #{full_model}.update(#{singular}, params) do\n"
+        io << "      {:ok, #{singular}} -> conn |> put_resp_header(\"location\", Helpers.#{singular}_path(#{singular})) |> send_resp(302, \"\")\n"
+        io << "      {:error, _errors} -> Helpers.render_view(conn, \"#{plural}/edit\", [{:#{singular}, #{singular}}], 422)\n"
+        io << "    end\n"
+        io << "  end\n\n"
+      when "destroy"
+        if nested_parent
+          parent_model = "#{app_module}.#{Inflector.classify(nested_parent)}"
+          io << "  def destroy(conn) do\n"
+          io << "    #{nested_parent} = #{parent_model}.find(String.to_integer(conn.path_params[\"#{nested_parent}_id\"]))\n"
+          io << "    #{singular} = #{full_model}.find(String.to_integer(conn.path_params[\"id\"]))\n"
+          io << "    #{full_model}.delete(#{singular})\n"
+          io << "    conn |> put_resp_header(\"location\", Helpers.#{nested_parent}_path(#{nested_parent})) |> send_resp(302, \"\")\n"
+          io << "  end\n\n"
+        else
+          io << "  def destroy(conn) do\n"
+          io << "    #{singular} = #{full_model}.find(String.to_integer(conn.path_params[\"id\"]))\n"
+          io << "    #{full_model}.delete(#{singular})\n"
+          io << "    conn |> put_resp_header(\"location\", Helpers.#{plural}_path()) |> send_resp(302, \"\")\n"
+          io << "  end\n\n"
+        end
+      end
+    end
+
+    private def extract_model_params_helper(io : IO)
+      io << "  defp extract_model_params(body_params, model_name) do\n"
+      io << "    prefix = model_name <> \"[\"\n"
+      io << "    Enum.reduce(body_params, %{}, fn {key, value}, acc ->\n"
+      io << "      if String.starts_with?(key, prefix) && String.ends_with?(key, \"]\") do\n"
+      io << "        field = key |> String.trim_leading(prefix) |> String.trim_trailing(\"]\")\n"
+      io << "        Map.put(acc, String.to_atom(field), value)\n"
+      io << "      else\n"
+      io << "        acc\n"
+      io << "      end\n"
+      io << "    end)\n"
+      io << "  end\n"
+    end
+
+    # ── Seeds ──
+
+    private def emit_seeds(output_dir : String)
+      app_name = app.name.downcase.gsub("-", "_")
+      app_module = Inflector.classify(app_name)
+      lib_dir = File.join(output_dir, "lib/#{app_name}")
+
+      # Generate seed script
+      seeds_path = File.join(rails_dir, "db/seeds.rb")
+      return unless File.exists?(seeds_path)
+
+      io = IO::Memory.new
+      io << "defmodule #{app_module}.Seeds do\n"
+      io << "  def run do\n"
+      io << "    if #{app_module}.Article.count() > 0, do: :ok, else: seed()\n"
+      io << "  end\n\n"
+      io << "  defp seed do\n"
+
+      source = File.read(seeds_path)
+      # Join multi-line statements
+      joined = [] of String
+      current = ""
+      depth = 0
+      source.lines.each do |line|
+        stripped = line.strip
+        next if stripped.empty? || stripped.starts_with?("#") || stripped.starts_with?("return") || stripped.starts_with?("puts")
+        current += " " unless current.empty?
+        current += stripped
+        depth += stripped.count('(') - stripped.count(')')
+        if depth <= 0
+          joined << current
+          current = ""
+          depth = 0
+        end
+      end
+      joined << current unless current.empty?
+
+      joined.each do |stmt|
+        case stmt
+        when /^(\w+)\s*=\s*(\w+)\.create!\(\s*(.+)\s*\)$/m
+          attrs = $3.gsub(/\s+/, " ").gsub(/(\w+):\s*/, "\\1: ")
+          io << "    {:ok, #{$1}} = #{app_module}.#{$2}.create(%{#{attrs}})\n"
+        when /^(\w+)\.(\w+)\.create!\(\s*(.+)\s*\)$/m
+          attrs = $3.gsub(/\s+/, " ").gsub(/(\w+):\s*/, "\\1: ")
+          singular = Inflector.singularize($2)
+          parent_singular = Inflector.underscore($1)
+          fk = "#{parent_singular}_id"
+          io << "    #{app_module}.#{Inflector.classify(singular)}.create(Map.put(%{#{attrs}}, :#{fk}, #{$1}.id))\n"
+        end
+      end
+
+      io << "  end\n"
+      io << "end\n"
+
+      File.write(File.join(lib_dir, "seeds.ex"), io.to_s)
+      puts "  lib/#{app_name}/seeds.ex"
+    end
+
+    # ── Static assets ──
+
+    private def copy_static_assets(output_dir : String)
+      app_name = app.name.downcase.gsub("-", "_")
+      static_dir = File.join(output_dir, "priv/static")
+      Dir.mkdir_p(static_dir)
+
+      # Tailwind CSS
+      tailwind = find_tailwind
+      if tailwind
+        input_css = File.join(output_dir, "input.css")
+        File.write(input_css, "@import \"tailwindcss\";\n")
+        err_io = IO::Memory.new
+        result = Process.run(tailwind,
+          ["--input", "input.css", "--output", "priv/static/app.css", "--minify"],
+          chdir: output_dir, output: Process::Redirect::Close, error: err_io)
+        if result.success?
+          size = File.size(File.join(static_dir, "app.css"))
+          puts "  priv/static/app.css (#{size} bytes)"
+        end
+        File.delete(input_css) if File.exists?(input_css)
+      end
+
+      # Turbo JS
+      turbo_js = find_turbo_js
+      if turbo_js
+        File.copy(turbo_js, File.join(static_dir, "turbo.min.js"))
+        size = File.size(File.join(static_dir, "turbo.min.js"))
+        puts "  priv/static/turbo.min.js (#{size} bytes)"
+      end
+    end
+
+    private def find_tailwind : String?
+      path = Process.find_executable("tailwindcss")
+      return path if path
+      begin
+        output = IO::Memory.new
+        result = Process.run("ruby",
+          ["-e", "puts Gem::Specification.find_by_name('tailwindcss-rails').bin_dir + '/tailwindcss'"],
+          output: output, error: Process::Redirect::Close)
+        return output.to_s.strip if result.success? && File.exists?(output.to_s.strip)
+      rescue
+      end
+      nil
+    end
+
+    private def find_turbo_js : String?
+      begin
+        output = IO::Memory.new
+        result = Process.run("ruby",
+          ["-e", "puts Gem::Specification.find_by_name('turbo-rails').gem_dir + '/app/assets/javascripts/turbo.min.js'"],
+          output: output, error: Process::Redirect::Close)
+        return output.to_s.strip if result.success? && File.exists?(output.to_s.strip)
+      rescue
+      end
+      nil
     end
 
     # ── Tests ──
