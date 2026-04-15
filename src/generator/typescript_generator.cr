@@ -539,11 +539,15 @@ module Railcar
     private def emit_app(output_dir : String)
       io = IO::Memory.new
       io << "import express from \"express\";\n"
+      io << "import { createServer } from \"http\";\n"
+      io << "import { WebSocketServer, WebSocket } from \"ws\";\n"
       io << "import Database from \"better-sqlite3\";\n"
       io << "import path from \"path\";\n"
       io << "import { fileURLToPath } from \"url\";\n"
+      io << "import ejs from \"ejs\";\n"
+      io << "import fs from \"fs\";\n"
       io << "import { ApplicationRecord } from \"./runtime/base.js\";\n"
-      io << "import * as helpers from \"./helpers.js\";\n"
+      io << "import { helpers } from \"./helpers.js\";\n"
 
       app.controllers.each do |info|
         name = Inflector.underscore(info.name).chomp("_controller")
@@ -553,12 +557,46 @@ module Railcar
       app.models.each_key do |name|
         io << "import { #{name} } from \"./models/#{Inflector.underscore(name)}.js\";\n"
       end
-
-      io << "import ejs from \"ejs\";\n"
-      io << "import fs from \"fs\";\n"
       io << "\n"
 
-      io << "const __dirname = path.dirname(fileURLToPath(import.meta.url));\n\n"
+      io << "const __dirname = path.dirname(fileURLToPath(import.meta.url));\n"
+      io << "const viewsDir = path.join(__dirname, \"views\");\n\n"
+
+      # ActionCable server
+      io << <<-TS
+
+      // ActionCable WebSocket server for Turbo Streams
+      class CableServer {
+        channels = new Map<string, Set<{ ws: WebSocket; identifier: string }>>();
+
+        subscribe(ws: WebSocket, channel: string, identifier: string) {
+          if (!this.channels.has(channel)) this.channels.set(channel, new Set());
+          this.channels.get(channel)!.add({ ws, identifier });
+        }
+
+        unsubscribeAll(ws: WebSocket) {
+          for (const [, subs] of this.channels) {
+            for (const sub of subs) {
+              if (sub.ws === ws) subs.delete(sub);
+            }
+          }
+        }
+
+        broadcast(channel: string, html: string) {
+          const subs = this.channels.get(channel);
+          if (!subs) return;
+          for (const { ws, identifier } of subs) {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: "message", identifier, message: html }));
+            }
+          }
+        }
+      }
+
+      const cable = new CableServer();
+      ApplicationRecord._broadcaster = cable;
+
+      TS
 
       # DB init
       io << "function initDb(): Database.Database {\n"
@@ -589,17 +627,22 @@ module Railcar
       end
       io << "}\n\n"
 
+      # Render partial helper (uses EJS + helpers)
+      io << "function renderPartial(templatePath: string, varName: string, record: unknown): string {\n"
+      io << "  const tmpl = fs.readFileSync(path.join(viewsDir, templatePath), \"utf-8\");\n"
+      io << "  return ejs.render(tmpl, { [varName]: record, helpers }, { filename: path.join(viewsDir, templatePath) });\n"
+      io << "}\n\n"
+
       # Create app
       io << "function createApp(): express.Application {\n"
-      io << "  const viewsDir = path.join(__dirname, \"views\");\n"
+
+      # Wire broadcast partials
       app.models.each_key do |name|
         singular = Inflector.underscore(name)
         plural = Inflector.pluralize(singular)
-        io << "  #{name}.renderPartial = (record) => {\n"
-        io << "    const tmpl = fs.readFileSync(path.join(viewsDir, \"#{plural}/_#{singular}.ejs\"), \"utf-8\");\n"
-        io << "    return ejs.render(tmpl, { #{singular}: record, helpers: require(\"./helpers.js\") }, { filename: path.join(viewsDir, \"#{plural}/_#{singular}.ejs\") });\n"
-        io << "  };\n"
+        io << "  #{name}.renderPartial = (record) => renderPartial(\"#{plural}/_#{singular}.ejs\", #{singular.inspect}, record);\n"
       end
+
       io << "  const app = express();\n"
       io << "  app.use(express.urlencoded({ extended: true }));\n"
       io << "  app.use(\"/static\", express.static(path.join(__dirname, \"static\")));\n\n"
@@ -626,12 +669,10 @@ module Railcar
             io << "    const data = req.body ?? {};\n"
             io << "    const method = (data._method ?? \"POST\").toString().toUpperCase();\n"
             if del = methods["DELETE"]?
-              del_ctrl = del[0]
-              io << "    if (method === \"DELETE\") return #{del_ctrl}Controller.destroy(req, res, data);\n"
+              io << "    if (method === \"DELETE\") return #{del[0]}Controller.destroy(req, res, data);\n"
             end
             if patch = (methods["PATCH"]? || methods["PUT"]?)
-              patch_ctrl = patch[0]
-              io << "    if (method === \"PATCH\" || method === \"PUT\") return #{patch_ctrl}Controller.update(req, res, data);\n"
+              io << "    if (method === \"PATCH\" || method === \"PUT\") return #{patch[0]}Controller.update(req, res, data);\n"
             end
             io << "    #{controller}Controller.#{post[1]}(req, res, data);\n"
             io << "  });\n"
@@ -640,15 +681,13 @@ module Railcar
           end
         elsif has_dispatch
           io << "  app.post(\"#{route_path}\", (req, res) => {\n"
-          io << "    const data = helpers.parseForm(req.body?.toString() ?? \"\");\n"
-          io << "    const method = (data._method?.[0] ?? \"POST\").toUpperCase();\n"
+          io << "    const data = req.body ?? {};\n"
+          io << "    const method = (data._method ?? \"POST\").toString().toUpperCase();\n"
           if del = methods["DELETE"]?
-            del_ctrl = del[0]
-            io << "    if (method === \"DELETE\") return #{del_ctrl}Controller.destroy(req, res, data);\n"
+            io << "    if (method === \"DELETE\") return #{del[0]}Controller.destroy(req, res, data);\n"
           end
           if patch = (methods["PATCH"]? || methods["PUT"]?)
-            patch_ctrl = patch[0]
-            io << "    if (method === \"PATCH\" || method === \"PUT\") return #{patch_ctrl}Controller.update(req, res, data);\n"
+            io << "    if (method === \"PATCH\" || method === \"PUT\") return #{patch[0]}Controller.update(req, res, data);\n"
           end
           io << "    res.status(404).send(\"Not found\");\n"
           io << "  });\n"
@@ -657,17 +696,44 @@ module Railcar
 
       if root_ctrl = app.routes.root_controller
         root_action = app.routes.root_action || "index"
-        ctrl = root_ctrl
-        io << "  app.get(\"/\", #{ctrl}Controller.#{root_action});\n"
+        io << "  app.get(\"/\", #{root_ctrl}Controller.#{root_action});\n"
       end
 
       io << "\n  return app;\n"
       io << "}\n\n"
 
+      # Main — start server with WebSocket upgrade
       io << "initDb();\n"
       io << "seedDb();\n"
       io << "const app = createApp();\n"
-      io << "app.listen(3000, () => {\n"
+      io << "const server = createServer(app);\n"
+      io << "const wss = new WebSocketServer({ server, path: \"/cable\" });\n\n"
+
+      io << "wss.on(\"connection\", (ws) => {\n"
+      io << "  ws.send(JSON.stringify({ type: \"welcome\" }));\n"
+      io << "  const pingInterval = setInterval(() => {\n"
+      io << "    if (ws.readyState === WebSocket.OPEN) {\n"
+      io << "      ws.send(JSON.stringify({ type: \"ping\", message: Date.now() }));\n"
+      io << "    }\n"
+      io << "  }, 3000);\n"
+      io << "  ws.on(\"message\", (raw) => {\n"
+      io << "    const data = JSON.parse(raw.toString());\n"
+      io << "    if (data.command === \"subscribe\") {\n"
+      io << "      const identifier = data.identifier;\n"
+      io << "      const idData = JSON.parse(identifier);\n"
+      io << "      const signed = idData.signed_stream_name || \"\";\n"
+      io << "      const channel = JSON.parse(Buffer.from(signed.split(\"--\")[0], \"base64\").toString());\n"
+      io << "      cable.subscribe(ws, channel, identifier);\n"
+      io << "      ws.send(JSON.stringify({ type: \"confirm_subscription\", identifier }));\n"
+      io << "    }\n"
+      io << "  });\n"
+      io << "  ws.on(\"close\", () => {\n"
+      io << "    clearInterval(pingInterval);\n"
+      io << "    cable.unsubscribeAll(ws);\n"
+      io << "  });\n"
+      io << "});\n\n"
+
+      io << "server.listen(3000, () => {\n"
       io << "  console.log(\"Blog running at http://localhost:3000\");\n"
       io << "});\n"
 
@@ -677,15 +743,35 @@ module Railcar
 
     private def emit_seeds(io : IO, seeds_path : String)
       source = File.read(seeds_path)
+
+      # Idempotency check
+      io << "  if (Article.count() > 0) return;\n"
+
+      # Join multi-line statements by tracking paren depth
+      joined = [] of String
+      current = ""
+      depth = 0
       source.lines.each do |line|
         stripped = line.strip
         next if stripped.empty? || stripped.starts_with?("#") || stripped.starts_with?("return") || stripped.starts_with?("puts")
-        case stripped
-        when /^(\w+)\s*=\s*(\w+)\.create!\((.+)\)$/
-          attrs = $3.gsub(/(\w+):\s*/, "\\1: ")
+        current += " " unless current.empty?
+        current += stripped
+        depth += stripped.count('(') - stripped.count(')')
+        if depth <= 0
+          joined << current
+          current = ""
+          depth = 0
+        end
+      end
+      joined << current unless current.empty?
+
+      joined.each do |stmt|
+        case stmt
+        when /^(\w+)\s*=\s*(\w+)\.create!\(\s*(.+)\s*\)$/m
+          attrs = $3.gsub(/\s+/, " ").gsub(/(\w+):\s*/, "\\1: ")
           io << "  const #{$1} = #{$2}.create({ #{attrs} });\n"
-        when /^(\w+)\.(\w+)\.create!\((.+)\)$/
-          attrs = $3.gsub(/(\w+):\s*/, "\\1: ")
+        when /^(\w+)\.(\w+)\.create!\(\s*(.+)\s*\)$/m
+          attrs = $3.gsub(/\s+/, " ").gsub(/(\w+):\s*/, "\\1: ")
           ts_assoc = $2.gsub(/_([a-z])/) { |_, m| m[1].upcase }
           io << "  (#{$1} as any).#{ts_assoc}().create({ #{attrs} });\n"
         end
@@ -760,12 +846,14 @@ module Railcar
         "dependencies": {
           "better-sqlite3": "^11.0.0",
           "ejs": "^3.1.0",
-          "express": "^4.21.0"
+          "express": "^4.21.0",
+          "ws": "^8.18.0"
         },
         "devDependencies": {
           "@types/better-sqlite3": "^7.6.0",
           "@types/ejs": "^3.1.0",
           "@types/express": "^5.0.0",
+          "@types/ws": "^8.5.0",
           "@types/supertest": "^6.0.0",
           "supertest": "^7.0.0",
           "tsx": "^4.0.0",
