@@ -101,33 +101,40 @@ module Railcar
       lib_dir = File.join(output_dir, "lib/#{app_name}")
       Dir.mkdir_p(lib_dir)
 
-      File.write(File.join(lib_dir, "application.ex"), <<-EX)
-      defmodule #{app_module}.Application do
-        use Application
+      io = IO::Memory.new
+      io << "defmodule #{app_module}.Application do\n"
+      io << "  use Application\n\n"
+      io << "  @impl true\n"
+      io << "  def start(_type, _args) do\n"
+      io << "    if Application.get_env(:#{app_name}, :skip_start) do\n"
+      io << "      Supervisor.start_link([], strategy: :one_for_one, name: #{app_module}.Supervisor)\n"
+      io << "    else\n"
+      io << "      children = [\n"
+      io << "        Railcar.CableServer,\n"
+      io << "        {Bandit, plug: #{app_module}.Router, port: 3000}\n"
+      io << "      ]\n\n"
+      io << "      opts = [strategy: :one_for_one, name: #{app_module}.Supervisor]\n"
+      io << "      result = Supervisor.start_link(children, opts)\n\n"
+      io << "      # Initialize database, wire broadcast partials, seed data\n"
+      io << "      #{app_module}.Database.init()\n"
 
-        @impl true
-        def start(_type, _args) do
-          if Application.get_env(:#{app_name}, :skip_start) do
-            Supervisor.start_link([], strategy: :one_for_one, name: #{app_module}.Supervisor)
-          else
-            children = [
-              Railcar.CableServer,
-              {Bandit, plug: #{app_module}.Router, port: 3000}
-            ]
-
-            opts = [strategy: :one_for_one, name: #{app_module}.Supervisor]
-            result = Supervisor.start_link(children, opts)
-
-            # Initialize database, wire broadcast partials, seed data
-            #{app_module}.Database.init()
-            #{app_module}.Seeds.run()
-
-            IO.puts("#{app_name} running at http://localhost:3000")
-            result
-          end
-        end
+      # Register render_partial for each model
+      app.models.each_key do |name|
+        singular = Inflector.underscore(name)
+        plural = Inflector.pluralize(singular)
+        io << "      Railcar.Broadcast.register_partial(#{app_module}.#{name}, fn record ->\n"
+        io << "        #{app_module}.Helpers.render_partial(\"#{plural}/_#{singular}\", [{:#{singular}, record}])\n"
+        io << "      end)\n"
       end
-      EX
+
+      io << "      #{app_module}.Seeds.run()\n\n"
+      io << "      IO.puts(\"#{app_name} running at http://localhost:3000\")\n"
+      io << "      result\n"
+      io << "    end\n"
+      io << "  end\n"
+      io << "end\n"
+
+      File.write(File.join(lib_dir, "application.ex"), io.to_s)
       puts "  lib/#{app_name}/application.ex"
     end
 
