@@ -6,10 +6,19 @@ on:
   pull_request:
     branches: [main]
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
+# Sets permissions for GitHub Pages deployment
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
+jobs:
+  # ===========================================================================
+  # Stage 1: Build artifacts (run in parallel)
+  # ===========================================================================
+
+  build:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -32,31 +41,164 @@ jobs:
           sudo make build/lib/libprism.a
           sudo chown -R $(id -u):$(id -g) build
 
-      - name: Download demo blog
-        run: make build/demo/blog/Gemfile
-
-      - name: Run tests
+      - name: Run unit tests
         run: make test
 
       - name: Build binary
         run: make
 
-      - name: Generate, compile, and test Crystal blog
+      - name: Upload railcar binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: railcar-binary
+          path: build/railcar
+          retention-days: 7
+
+  download-demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download demo blog
+        run: make build/demo/blog/Gemfile
+
+      - name: Upload demo blog
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-blog
+          path: build/demo/blog
+          retention-days: 7
+
+  # ===========================================================================
+  # Stage 2: Generate and test each language (run in parallel)
+  # ===========================================================================
+
+  test-crystal:
+    needs: [build, download-demo]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Crystal
+        uses: crystal-lang/install-crystal@v1
+        with:
+          crystal: latest
+
+      - name: Install SQLite3 dev headers
+        run: sudo apt-get install -y libsqlite3-dev
+
+      - name: Download railcar binary
+        uses: actions/download-artifact@v4
+        with:
+          name: railcar-binary
+          path: build
+
+      - name: Download demo blog
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-blog
+          path: build/demo/blog
+
+      - name: Make binary executable
+        run: chmod +x build/railcar
+
+      - name: Generate Crystal blog
+        run: build/railcar build/demo/blog build/crystal-blog
+
+      - name: Build and test Crystal blog
         run: |
-          build/railcar build/demo/blog build/crystal-blog
           cd build/crystal-blog
           shards install
           crystal build src/app.cr -o blog
           crystal spec
 
+      - name: Upload Crystal blog
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-crystal
+          path: build/crystal-blog
+          retention-days: 7
+
+  test-python:
+    needs: [build, download-demo]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download railcar binary
+        uses: actions/download-artifact@v4
+        with:
+          name: railcar-binary
+          path: build
+
+      - name: Download demo blog
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-blog
+          path: build/demo/blog
+
+      - name: Make binary executable
+        run: chmod +x build/railcar
+
       - name: Install uv
         uses: astral-sh/setup-uv@v6
 
-      - name: Generate and test Python blog (--python)
+      - name: Generate Python blog
+        run: build/railcar --python build/demo/blog build/python-blog
+
+      - name: Test Python blog
         run: |
-          build/railcar --python build/demo/blog build/python-blog
           cd build/python-blog
           uv run --extra test python -m pytest tests/ -v
+
+      - name: Upload Python blog
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-python
+          path: build/python-blog
+          retention-days: 7
+
+  test-typescript:
+    needs: [build, download-demo]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download railcar binary
+        uses: actions/download-artifact@v4
+        with:
+          name: railcar-binary
+          path: build
+
+      - name: Download demo blog
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-blog
+          path: build/demo/blog
+
+      - name: Make binary executable
+        run: chmod +x build/railcar
+
+      - name: Generate TypeScript blog
+        run: build/railcar --typescript build/demo/blog build/ts-blog
+
+      - name: Test TypeScript blog
+        run: |
+          cd build/ts-blog
+          npm install
+          npx tsx --test tests/*.test.ts
+
+      - name: Upload TypeScript blog
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-typescript
+          path: build/ts-blog
+          retention-days: 7
+
+  test-ts-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Test TypeScript runtime
         run: |
@@ -64,9 +206,68 @@ jobs:
           npm install
           npx tsx base_runtime_test.ts
 
-      - name: Generate and test TypeScript blog (--typescript)
+  # ===========================================================================
+  # Stage 3: Build GitHub Pages site
+  # ===========================================================================
+
+  build-site:
+    needs: [test-crystal, test-python, test-typescript]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Crystal blog
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-crystal
+          path: artifacts/crystal
+
+      - name: Download Python blog
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-python
+          path: artifacts/python
+
+      - name: Download TypeScript blog
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-typescript
+          path: artifacts/typescript
+
+      - name: Build file manifests
         run: |
-          build/railcar --typescript build/demo/blog build/ts-blog
-          cd build/ts-blog
-          npm install
-          npx tsx --test tests/*.test.ts
+          for lang in crystal python typescript; do
+            node pages/build-manifest.js "artifacts/$lang" "$lang" > "artifacts/${lang}.json"
+          done
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp pages/index.html _site/
+          cp pages/style.css _site/
+          cp pages/app.js _site/
+          cp artifacts/crystal.json _site/
+          cp artifacts/python.json _site/
+          cp artifacts/typescript.json _site/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  # ===========================================================================
+  # Stage 4: Deploy to GitHub Pages (main branch only)
+  # ===========================================================================
+
+  deploy:
+    needs: [build-site]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
