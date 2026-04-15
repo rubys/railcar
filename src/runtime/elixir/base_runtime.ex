@@ -21,7 +21,7 @@ defmodule Railcar.Record do
       @table unquote(table)
       @columns unquote(columns)
 
-      defstruct [:id | @columns] ++ [:_persisted, :_errors]
+      defstruct [:id | @columns] ++ [_persisted: false, errors: []]
 
       # --- Query interface ---
 
@@ -100,14 +100,14 @@ defmodule Railcar.Record do
       def save(%{_persisted: true} = record) do
         case run_validations(record) do
           [] -> do_update(record)
-          errors -> {:error, errors}
+          errors -> {:error, %{record | errors: errors}}
         end
       end
 
       def save(record) do
         case run_validations(record) do
           [] -> do_insert(record)
-          errors -> {:error, errors}
+          errors -> {:error, %{record | errors: errors}}
         end
       end
 

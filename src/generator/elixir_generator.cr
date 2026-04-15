@@ -377,6 +377,10 @@ module Railcar
       io << "  def pluralize(1, singular), do: \"1 \#{singular}\"\n"
       io << "  def pluralize(count, singular), do: \"\#{count} \#{singular}s\"\n\n"
 
+      io << "  def error_full_message({field, message}) do\n"
+      io << "    \"\#{field |> to_string() |> String.replace(\"_\", \" \") |> String.capitalize()} \#{message}\"\n"
+      io << "  end\n\n"
+
       io << "  def form_with_open_tag(model, opts \\\\ []) do\n"
       io << "    name = model.__struct__ |> Module.split() |> List.last() |> String.downcase()\n"
       io << "    plural = name <> \"s\"\n"
@@ -578,7 +582,7 @@ module Railcar
           io << "    params = extract_model_params(conn.body_params, \"#{singular}\")\n"
           io << "    case #{full_model}.create(params) do\n"
           io << "      {:ok, #{singular}} -> conn |> put_resp_header(\"location\", Helpers.#{singular}_path(#{singular})) |> send_resp(302, \"\")\n"
-          io << "      {:error, _errors} -> Helpers.render_view(conn, \"#{plural}/new\", [{:#{singular}, struct(#{full_model}, params)}], 422)\n"
+          io << "      {:error, #{singular}} -> Helpers.render_view(conn, \"#{plural}/new\", [{:#{singular}, #{singular}}], 422)\n"
           io << "    end\n"
           io << "  end\n\n"
         end
@@ -588,7 +592,7 @@ module Railcar
         io << "    params = extract_model_params(conn.body_params, \"#{singular}\")\n"
         io << "    case #{full_model}.update(#{singular}, params) do\n"
         io << "      {:ok, #{singular}} -> conn |> put_resp_header(\"location\", Helpers.#{singular}_path(#{singular})) |> send_resp(302, \"\")\n"
-        io << "      {:error, _errors} -> Helpers.render_view(conn, \"#{plural}/edit\", [{:#{singular}, #{singular}}], 422)\n"
+        io << "      {:error, #{singular}} -> Helpers.render_view(conn, \"#{plural}/edit\", [{:#{singular}, #{singular}}], 422)\n"
         io << "    end\n"
         io << "  end\n\n"
       when "destroy"
@@ -612,15 +616,21 @@ module Railcar
 
     private def extract_model_params_helper(io : IO)
       io << "  defp extract_model_params(body_params, model_name) do\n"
-      io << "    prefix = model_name <> \"[\"\n"
-      io << "    Enum.reduce(body_params, %{}, fn {key, value}, acc ->\n"
-      io << "      if String.starts_with?(key, prefix) && String.ends_with?(key, \"]\") do\n"
-      io << "        field = key |> String.trim_leading(prefix) |> String.trim_trailing(\"]\")\n"
-      io << "        Map.put(acc, String.to_atom(field), value)\n"
-      io << "      else\n"
-      io << "        acc\n"
-      io << "      end\n"
-      io << "    end)\n"
+      io << "    # Plug.Parsers may produce nested maps or flat keys\n"
+      io << "    case Map.get(body_params, model_name) do\n"
+      io << "      %{} = nested ->\n"
+      io << "        Enum.reduce(nested, %{}, fn {k, v}, acc -> Map.put(acc, String.to_atom(k), v) end)\n"
+      io << "      _ ->\n"
+      io << "        prefix = model_name <> \"[\"\n"
+      io << "        Enum.reduce(body_params, %{}, fn {key, value}, acc ->\n"
+      io << "          if String.starts_with?(key, prefix) && String.ends_with?(key, \"]\") do\n"
+      io << "            field = key |> String.trim_leading(prefix) |> String.trim_trailing(\"]\")\n"
+      io << "            Map.put(acc, String.to_atom(field), value)\n"
+      io << "          else\n"
+      io << "            acc\n"
+      io << "          end\n"
+      io << "        end)\n"
+      io << "    end\n"
       io << "  end\n"
     end
 
@@ -1126,7 +1136,9 @@ module Railcar
         io << "  end\n\n"
 
         io << "  defp dispatch(conn) do\n"
-        io << "    #{app_module}.Router.call(conn, #{app_module}.Router.init([]))\n"
+        io << "    conn\n"
+        io << "    |> Plug.Conn.put_req_header(\"content-type\", \"application/x-www-form-urlencoded\")\n"
+        io << "    |> #{app_module}.Router.call(#{app_module}.Router.init([]))\n"
         io << "  end\n\n"
 
         io << "  defp encode_params(params) do\n"

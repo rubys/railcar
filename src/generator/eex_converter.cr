@@ -416,8 +416,10 @@ module Railcar
       case name
       when "new"
         obj_str = obj ? to_ex(obj) : "Object"
-        return "%#{obj_str}{#{args.join(", ")}}" if args.empty?
-        return "struct(#{obj_str}, %{#{args.join(", ")}})"
+        # Prefix with app module for struct creation
+        full_name = obj_str.includes?(".") ? obj_str : "#{@app_module}.#{obj_str}"
+        return "%#{full_name}{#{args.join(", ")}}" if args.empty?
+        return "struct(#{full_name}, %{#{args.join(", ")}})"
       when "to_s" then return obj ? "to_string(#{to_ex(obj)})" : "to_string()"
       when "nil?" then return obj ? "is_nil(#{to_ex(obj)})" : "is_nil(self)"
       when "empty?"
@@ -465,7 +467,7 @@ module Railcar
         partial_model_plural = Inflector.pluralize(partial_name)
         is_model_partial = partial_name != "form" && partial_model_plural != controller_plural
         template_dir = is_model_partial ? partial_model_plural : controller_plural
-        return "#{@app_module}.Helpers.render_partial(\"#{template_dir}/_#{partial_name}\", [{:#{partial_name}, #{var_name}}])"
+        return "#{@app_module}.Helpers.render_partial(\"#{template_dir}/_#{partial_name}\", [{:#{var_name}, #{var_name}}])"
       end
 
       # Bare name with no args — local variable
@@ -480,6 +482,10 @@ module Railcar
         if {"title", "body", "commenter", "id", "errors", "persisted", "article_id",
             "created_at", "updated_at"}.includes?(name)
           return "#{obj_str}.#{name}"
+        end
+        # Known helper methods on objects
+        if name == "full_message"
+          return "#{@app_module}.Helpers.error_full_message(#{obj_str})"
         end
         # Association/method calls → Module.function(obj) pattern
         # Infer module from variable name: article → Blog.Article
