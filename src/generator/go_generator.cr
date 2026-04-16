@@ -267,7 +267,7 @@ module Railcar
       </head>
       <body>
         <main class="container mx-auto mt-28 px-5 flex flex-col">
-          %s
+          CONTENT
         </main>
       </body>
       </html>`
@@ -279,7 +279,8 @@ module Railcar
       func RenderPageStatus(w http.ResponseWriter, content string, status int) {
         w.Header().Set("Content-Type", "text/html")
         w.WriteHeader(status)
-        fmt.Fprintf(w, layout, content)
+        page := strings.Replace(layout, "CONTENT", content, 1)
+        w.Write([]byte(page))
       }
 
       func ExtractModelParams(form url.Values, model string) map[string]any {
@@ -581,6 +582,7 @@ module Railcar
       io << "\t\"fmt\"\n"
       io << "\t\"log\"\n"
       io << "\t\"net/http\"\n"
+      io << "\t\"strings\"\n"
       io << "\t\"#{app_name}/controllers\"\n"
       io << "\t\"#{app_name}/models\"\n"
       io << "\t\"#{app_name}/railcar\"\n"
@@ -627,7 +629,7 @@ module Railcar
 
       # Routes
       io << "\tmux := http.NewServeMux()\n"
-      io << "\tmux.Handle(\"/static/\", http.StripPrefix(\"/static/\", http.FileServer(http.Dir(\"static\"))))\n\n"
+      io << "\tmux.Handle(\"GET /static/\", http.StripPrefix(\"/static/\", http.FileServer(http.Dir(\"static\"))))\n\n"
 
       # Routes from AppModel
       app.routes.routes.each do |route|
@@ -661,7 +663,7 @@ module Railcar
       io << "\t\tif r.Method == \"POST\" {\n"
       io << "\t\t\tr.ParseForm()\n"
       io << "\t\t\tif method := r.FormValue(\"_method\"); method != \"\" {\n"
-      io << "\t\t\t\tr.Method = method\n"
+      io << "\t\t\t\tr.Method = strings.ToUpper(method)\n"
       io << "\t\t\t}\n"
       io << "\t\t}\n"
       io << "\t\tmux.ServeHTTP(w, r)\n"
