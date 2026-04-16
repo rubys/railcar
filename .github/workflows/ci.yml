@@ -363,7 +363,7 @@ jobs:
           echo '@import "tailwindcss";' > input.css
           npx @tailwindcss/cli --input input.css --output static/app.css --minify --content 'src/**/*.rs'
           rm -f input.css
-          curl -sL "https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/dist/turbo.es2017-esm.min.js" -o static/turbo.min.js
+          curl -sL "https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/dist/turbo.es2017-umd.min.js" -o static/turbo.min.js
 
       - name: Test Rust blog
         run: |
