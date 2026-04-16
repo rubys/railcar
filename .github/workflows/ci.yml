@@ -352,8 +352,19 @@ jobs:
       - name: Make binary executable
         run: chmod +x build/railcar
 
+      - name: Install tailwindcss
+        run: npm install -g @tailwindcss/cli
+
       - name: Generate Rust blog
         run: build/railcar --rust build/demo/blog build/rust-blog
+
+      - name: Generate static assets
+        run: |
+          cd build/rust-blog
+          echo '@import "tailwindcss";' > input.css
+          npx @tailwindcss/cli --input input.css --output static/app.css --minify --content 'src/**/*.rs'
+          rm -f input.css
+          curl -sL "https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/dist/turbo.es2017-esm.min.js" -o static/turbo.min.js
 
       - name: Test Rust blog
         run: |
@@ -401,17 +412,6 @@ jobs:
         with:
           name: generated-rust
           path: build/rust-blog
-
-      - name: Create static assets
-        run: |
-          mkdir -p build/rust-blog/static
-          npm install -g @tailwindcss/cli 2>/dev/null || true
-          cd build/rust-blog
-          echo '@import "tailwindcss";' > input.css
-          npx @tailwindcss/cli --input input.css --output static/app.css --minify 2>/dev/null || echo "/* tailwind unavailable */" > static/app.css
-          rm -f input.css
-          # Turbo JS: download directly
-          curl -sL "https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/dist/turbo.es2017-esm.min.js" -o static/turbo.min.js 2>/dev/null || echo "// turbo unavailable" > static/turbo.min.js
 
       - name: Build release binary
         run: |
