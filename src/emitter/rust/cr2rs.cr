@@ -526,6 +526,11 @@ module Railcar
         io << "    railcar::count(\"#{table_name}\")\n"
         io << "}\n\n"
 
+        io << "pub fn #{singular}_last() -> Result<#{class_name}, String> {\n"
+        io << "    let mut all = railcar::all::<#{class_name}>(\"id\")?;\n"
+        io << "    all.pop().ok_or(\"no records\".to_string())\n"
+        io << "}\n\n"
+
         io << "pub fn create_#{singular}(attrs: &HashMap<String, String>) -> Result<#{class_name}, String> {\n"
         io << "    let mut m = #{class_name}::new();\n"
         schema.columns.each do |col|

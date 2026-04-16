@@ -51,6 +51,7 @@ module Railcar
       emit_controllers(output_dir, app_name)
       emit_main(output_dir, app_name)
       emit_model_tests(output_dir, app_name)
+      emit_controller_tests(output_dir, app_name)
 
       puts "Done! Output in #{output_dir}/"
       puts "  cd #{output_dir} && cargo test"
@@ -99,7 +100,8 @@ module Railcar
       tower-http = { version = "0.6", features = ["fs"] }
 
       [dev-dependencies]
-      axum-test = "16"
+      axum-test = "18"
+      tokio = { version = "1", features = ["full"] }
       TOML
       puts "  Cargo.toml"
     end
@@ -843,7 +845,7 @@ module Railcar
                   else next
                   end
 
-        axum_path = route.path.gsub(/:(\w+)/) { |m| ":#{$1}" }
+        axum_path = route.path.gsub(/:(\w+)/) { |m| "{#{$1}}" }
         method = case route.method.downcase
                  when "get"    then "get"
                  when "post"   then "post"
@@ -1218,6 +1220,382 @@ module Railcar
         end
       end
       nil
+    end
+
+    # ── Controller tests ──
+
+    private def emit_controller_tests(output_dir : String, app_name : String)
+      rails_test_dir = File.join(rails_dir, "test/controllers")
+      return unless Dir.exists?(rails_test_dir)
+
+      tests_dir = File.join(output_dir, "tests")
+      Dir.mkdir_p(tests_dir)
+
+      io = IO::Memory.new
+      io << "use axum::{routing::{get, post, patch, delete}, Router};\n"
+      io << "use axum_test::TestServer;\n"
+      io << "use rusqlite::Connection;\n"
+      io << "use std::collections::HashMap;\n"
+      io << "use #{app_name}::railcar;\n"
+      io << "use #{app_name}::controllers;\n"
+      app.models.each_key do |name|
+        singular = Inflector.underscore(name)
+        io << "use #{app_name}::#{singular}::*;\n"
+      end
+      io << "use #{app_name}::helpers;\n\n"
+
+      # Setup helper
+      io << "fn setup_test() -> TestServer {\n"
+      io << "    let conn = Connection::open_in_memory().unwrap();\n"
+      io << "    conn.execute_batch(\"PRAGMA foreign_keys = ON;\").unwrap();\n"
+      app.schemas.each do |schema|
+        all_cols = [{name: "id", type: "INTEGER"}]
+        schema.columns.each { |c| all_cols << {name: c.name, type: c.type} }
+        col_defs = all_cols.map do |c|
+          parts = "#{c[:name]} #{c[:type]}"
+          parts += " PRIMARY KEY AUTOINCREMENT" if c[:name] == "id"
+          parts += " NOT NULL" unless c[:name] == "id"
+          parts
+        end
+        io << "    conn.execute_batch(\"CREATE TABLE #{schema.name} (\n"
+        io << "        #{col_defs.join(",\n        ")}\n"
+        io << "    );\").unwrap();\n"
+      end
+      io << "    *railcar::DB.lock().unwrap() = Some(conn);\n\n"
+
+      # Build router
+      io << "    let app = Router::new()\n"
+      app.routes.routes.each do |route|
+        singular = Inflector.singularize(route.controller)
+        handler = case route.action
+                  when "index"   then "controllers::index"
+                  when "show"    then "controllers::show_#{singular}"
+                  when "new"     then "controllers::new_#{singular}"
+                  when "edit"    then "controllers::edit_#{singular}"
+                  when "create"  then "controllers::create_#{singular}"
+                  when "update"  then "controllers::update_#{singular}"
+                  when "destroy" then "controllers::destroy_#{singular}"
+                  else next
+                  end
+        axum_path = route.path.gsub(/:(\w+)/) { |m| "{#{$1}}" }
+        method = case route.method.downcase
+                 when "get" then "get"
+                 when "post" then "post"
+                 when "patch" then "patch"
+                 when "delete" then "delete"
+                 else "get"
+                 end
+        io << "        .route(\"#{axum_path}\", #{method}(#{handler}))\n"
+      end
+      if app.routes.root_controller
+        io << "        .route(\"/\", get(controllers::index))\n"
+      end
+      io << "        ;\n\n"
+
+      io << "    TestServer::new(app).unwrap()\n"
+      io << "}\n\n"
+
+      # Fixtures
+      io << "struct CtrlFixtures {\n"
+      sorted_fixtures = FixtureLoader.sort_by_dependency(app.fixtures, app.models)
+      sorted_fixtures.each do |table|
+        singular = Inflector.singularize(table.name)
+        model_name = Inflector.classify(singular)
+        next unless app.models.has_key?(model_name)
+        table.records.each do |record|
+          io << "    #{table.name}_#{record.label}: #{model_name},\n"
+        end
+      end
+      io << "}\n\n"
+
+      io << "fn setup_ctrl_fixtures() -> CtrlFixtures {\n"
+      sorted_fixtures.each do |table|
+        singular = Inflector.singularize(table.name)
+        model_name = Inflector.classify(singular)
+        next unless app.models.has_key?(model_name)
+        table.records.each do |record|
+          attrs = [] of String
+          record.fields.each do |field, value|
+            model_info = app.models[model_name]?
+            assoc = model_info.try(&.associations.find { |a| a.name == field })
+            if assoc && assoc.kind == :belongs_to
+              ref_table = Inflector.pluralize(field)
+              attrs << "(\"#{field}_id\".to_string(), format!(\"{}\", #{ref_table}_#{value}.id))"
+            else
+              attrs << "(\"#{field}\".to_string(), \"#{value}\".to_string())"
+            end
+          end
+          io << "    let #{table.name}_#{record.label} = create_#{singular}(&HashMap::from([#{attrs.join(", ")}])).unwrap();\n"
+        end
+      end
+      io << "    CtrlFixtures {\n"
+      sorted_fixtures.each do |table|
+        singular = Inflector.singularize(table.name)
+        model_name = Inflector.classify(singular)
+        next unless app.models.has_key?(model_name)
+        table.records.each do |record|
+          io << "        #{table.name}_#{record.label},\n"
+        end
+      end
+      io << "    }\n"
+      io << "}\n\n"
+
+      # Helper for form encoding
+      io << "fn encode_params(model: &str, params: &[(&str, &str)]) -> String {\n"
+      io << "    params.iter().map(|(k, v)| format!(\"{}[{}]={}\", model, k, v)).collect::<Vec<_>>().join(\"&\")\n"
+      io << "}\n\n"
+
+      # Generate test functions
+      Dir.glob(File.join(rails_test_dir, "*_test.rb")).sort.each do |path|
+        basename = File.basename(path, "_test.rb")
+        controller_name = basename.chomp("_controller")
+        singular = Inflector.singularize(controller_name)
+        plural = Inflector.pluralize(controller_name)
+        model_name = Inflector.classify(singular)
+
+        ast = SourceParser.parse(path)
+        emit_rust_controller_test_functions(io, model_name, singular, plural, ast)
+      end
+
+      File.write(File.join(tests_dir, "controller_tests.rs"), io.to_s)
+      puts "  tests/controller_tests.rs"
+    end
+
+    private def emit_rust_controller_test_functions(io : IO, model_name : String, singular : String,
+                                                     plural : String, ast : Crystal::ASTNode)
+      class_body = find_class_body(ast)
+      return unless class_body
+
+      exprs = case class_body
+              when Crystal::Expressions then class_body.expressions
+              else [class_body]
+              end
+
+      # Extract setup block assignments
+      setup_code = IO::Memory.new
+      exprs.each do |expr|
+        if expr.is_a?(Crystal::Call) && expr.as(Crystal::Call).name == "setup" && expr.as(Crystal::Call).block
+          emit_rust_ctrl_test_body(expr.as(Crystal::Call).block.not_nil!.body, setup_code, model_name, singular, plural)
+        end
+      end
+      setup_str = setup_code.to_s
+
+      exprs.each do |expr|
+        next unless expr.is_a?(Crystal::Call)
+        call = expr.as(Crystal::Call)
+        next unless call.name == "test" && call.args.size == 1 && call.block
+        test_name = call.args[0].to_s.strip('"')
+        rust_name = "test_" + test_name.downcase.gsub(" ", "_").gsub(/[^a-z0-9_]/, "")
+
+        io << "#[tokio::test]\n"
+        io << "async fn #{rust_name}() {\n"
+        io << "    let server = setup_test();\n"
+        io << "    let f = setup_ctrl_fixtures();\n"
+        io << "    let _ = &f;\n\n"
+        io << setup_str unless setup_str.empty?
+
+        emit_rust_ctrl_test_body(call.block.not_nil!.body, io, model_name, singular, plural)
+
+        io << "}\n\n"
+      end
+    end
+
+    private def emit_rust_ctrl_test_body(node : Crystal::ASTNode, io : IO, model_name : String,
+                                          singular : String, plural : String)
+      exprs = case node
+              when Crystal::Expressions then node.expressions
+              else [node]
+              end
+
+      exprs.each do |expr|
+        case expr
+        when Crystal::Assign
+          emit_rust_ctrl_test_assign(expr, io, model_name, singular, plural)
+        when Crystal::Call
+          emit_rust_ctrl_test_call(expr, io, model_name, singular, plural)
+        end
+      end
+    end
+
+    private def emit_rust_ctrl_test_assign(node : Crystal::Assign, io : IO, model_name : String,
+                                            singular : String, plural : String)
+      target = node.target
+      value = node.value
+      var_name = case target
+                 when Crystal::InstanceVar then target.name.lchop("@")
+                 when Crystal::Var then target.name
+                 else target.to_s
+                 end
+
+      if value.is_a?(Crystal::Call) && value.args.size == 1 && value.args[0].is_a?(Crystal::SymbolLiteral)
+        func = value.name
+        label = value.args[0].as(Crystal::SymbolLiteral).value
+        io << "    let #{var_name} = &f.#{func}_#{label};\n"
+      end
+    end
+
+    private def emit_rust_ctrl_test_call(node : Crystal::Call, io : IO, model_name : String,
+                                          singular : String, plural : String)
+      name = node.name
+      args = node.args
+
+      case name
+      when "get"
+        url = rust_url_expr(args[0], singular, plural)
+        io << "    let resp = server.get(&#{url}).await;\n"
+      when "post"
+        url = rust_url_expr(args[0], singular, plural)
+        params_node = args[1]? || node.named_args.try(&.find { |na| na.name == "params" }).try(&.value)
+        if params_node
+          params = rust_form_params(params_node, singular)
+          io << "    let resp = server.post(&#{url}).form(&#{params}).await;\n"
+        else
+          io << "    let resp = server.post(&#{url}).await;\n"
+        end
+      when "patch"
+        url = rust_url_expr(args[0], singular, plural)
+        params_node = args[1]? || node.named_args.try(&.find { |na| na.name == "params" }).try(&.value)
+        if params_node
+          params = rust_form_params(params_node, singular)
+          io << "    let resp = server.patch(&#{url}).form(&#{params}).await;\n"
+        else
+          io << "    let resp = server.patch(&#{url}).await;\n"
+        end
+      when "delete"
+        url = rust_url_expr(args[0], singular, plural)
+        io << "    let resp = server.delete(&#{url}).await;\n"
+      when "assert_response"
+        status = args[0].to_s.strip(':')
+        case status
+        when "success"
+          io << "    resp.assert_status_ok();\n"
+        when "unprocessable_entity"
+          io << "    assert_eq!(resp.status_code(), 422);\n"
+        end
+      when "assert_redirected_to"
+        io << "    assert!(resp.status_code().is_redirection());\n"
+      when "assert_select"
+        if args.size >= 2 && args[1].is_a?(Crystal::StringLiteral)
+          text = args[1].as(Crystal::StringLiteral).value
+          io << "    assert!(resp.text().contains(\"#{text}\"), \"expected body to contain \\\"#{text}\\\"\");\n"
+        elsif args.size >= 1
+          selector = args[0].to_s.strip('"')
+          if selector.starts_with?("#")
+            id = selector.lchop("#").split(" ").first
+            io << "    assert!(resp.text().contains(\"id=\\\"#{id}\\\"\"), \"expected body to contain id=#{id}\");\n"
+          else
+            io << "    assert!(resp.text().contains(\"<#{selector}\"), \"expected body to contain <#{selector}\");\n"
+          end
+        end
+      when "assert_equal"
+        if args.size == 2
+          expected = rust_ctrl_test_expr(args[0], singular, plural)
+          actual = rust_ctrl_test_expr(args[1], singular, plural)
+          io << "    assert_eq!(#{actual}, #{expected});\n"
+        end
+      when "assert_difference", "assert_no_difference"
+        if args.size >= 1 && node.block
+          count_expr = args[0].to_s.strip('"')
+          model = count_expr.split(".").first
+          model_singular = Inflector.underscore(model)
+          diff = args.size > 1 ? args[1].to_s.to_i : (name == "assert_difference" ? 1 : 0)
+          io << "    let before_count = #{model_singular}_count().unwrap();\n"
+          emit_rust_ctrl_test_body(node.block.not_nil!.body, io, model_name, singular, plural)
+          io << "    let after_count = #{model_singular}_count().unwrap();\n"
+          if name == "assert_difference"
+            if diff >= 0
+              io << "    assert_eq!(after_count - before_count, #{diff});\n"
+            else
+              io << "    assert_eq!(before_count - after_count, #{-diff});\n"
+            end
+          else
+            io << "    assert_eq!(after_count, before_count);\n"
+          end
+        end
+      else
+        if obj = node.obj
+          obj_str = rust_expr(obj)
+          if name == "reload"
+            cls = Inflector.classify(obj_str)
+            singular_name = Inflector.underscore(cls)
+            io << "    let #{obj_str} = find_#{singular_name}(#{obj_str}.id).unwrap();\n"
+          end
+        end
+      end
+    end
+
+    private def rust_ctrl_test_expr(node : Crystal::ASTNode, singular : String, plural : String) : String
+      case node
+      when Crystal::Call
+        obj = node.obj
+        name = node.name
+        # Model.last → model_last().unwrap()
+        if obj.is_a?(Crystal::Call) && obj.as(Crystal::Call).name == "last" && obj.as(Crystal::Call).obj.is_a?(Crystal::Path)
+          model_path = obj.as(Crystal::Call).obj.as(Crystal::Path).names.last
+          model_singular = Inflector.underscore(model_path)
+          return "#{model_singular}_last().unwrap().#{name}"
+        end
+        # Model.last → model_last().unwrap()
+        if name == "last" && obj.is_a?(Crystal::Path)
+          model_singular = Inflector.underscore(obj.as(Crystal::Path).names.last)
+          return "#{model_singular}_last().unwrap()"
+        end
+        # Chained field access
+        if obj
+          return "#{rust_ctrl_test_expr(obj, singular, plural)}.#{name}"
+        end
+      end
+      rust_expr(node)
+    end
+
+    private def rust_url_expr(node : Crystal::ASTNode, singular : String, plural : String) : String
+      case node
+      when Crystal::Call
+        name = node.name
+        # Strip _url suffix if present, convert to _path
+        if name.ends_with?("_url")
+          name = name.chomp("_url") + "_path"
+        end
+        # Already ends with _path — use directly
+        if name.ends_with?("_path")
+          args = node.args.map { |a| rust_expr(a) }
+          if args.empty?
+            return "helpers::#{name}()"
+          else
+            return "helpers::#{name}(#{args.map { |a| "#{a}.id" }.join(", ")})"
+          end
+        end
+        # Bare URL-like calls: articles_url → helpers::articles_path()
+        return "helpers::#{name.chomp("_url")}_path()"
+      when Crystal::StringLiteral
+        return "\"#{node.value}\".to_string()"
+      else
+        return "\"/\".to_string()"
+      end
+    end
+
+    private def rust_form_params(node : Crystal::ASTNode, singular : String) : String
+      # Extract { model: { field: value, ... } } hash → HashMap for .form()
+      if node.is_a?(Crystal::HashLiteral)
+        entries = node.as(Crystal::HashLiteral).entries
+        if entries.size == 1
+          model_key = entries[0].key.to_s.strip('"').strip(':')
+          inner = entries[0].value
+          if inner.is_a?(Crystal::HashLiteral)
+            params = inner.as(Crystal::HashLiteral).entries.map do |e|
+              key = e.key.to_s.strip('"').strip(':')
+              value = case e.value
+                      when Crystal::StringLiteral then e.value.as(Crystal::StringLiteral).value
+                      when Crystal::NumberLiteral then e.value.to_s
+                      else e.value.to_s
+                      end
+              "(\"#{model_key}[#{key}]\".to_string(), \"#{value}\".to_string())"
+            end
+            return "HashMap::from([#{params.join(", ")}])"
+          end
+        end
+      end
+      "HashMap::<String, String>::new()"
     end
   end
 end
