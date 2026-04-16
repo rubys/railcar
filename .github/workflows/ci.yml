@@ -367,12 +367,83 @@ jobs:
           path: build/rust-blog
           retention-days: 7
 
+  build-binaries:
+    needs: [build, download-demo]
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: blog-linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: blog-linux-aarch64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            name: blog-macos-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            name: blog-macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Download railcar binary
+        uses: actions/download-artifact@v4
+        with:
+          name: railcar-binary
+          path: build
+
+      - name: Download demo blog
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-blog
+          path: build/demo/blog
+
+      - name: Make binary executable
+        run: chmod +x build/railcar
+
+      - name: Generate Rust blog
+        run: build/railcar --rust build/demo/blog build/rust-blog
+
+      - name: Build release binary
+        run: |
+          cd build/rust-blog
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        run: |
+          mkdir -p dist/${{ matrix.name }}
+          cp build/rust-blog/target/${{ matrix.target }}/release/blog dist/${{ matrix.name }}/blog${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          cp -r build/rust-blog/static dist/${{ matrix.name }}/
+          cd dist && tar czf ${{ matrix.name }}.tar.gz ${{ matrix.name }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}.tar.gz
+          retention-days: 7
+
   # ===========================================================================
   # Stage 3: Build GitHub Pages site
   # ===========================================================================
 
   build-site:
-    needs: [test-crystal, test-elixir, test-go, test-python, test-rust, test-typescript]
+    needs: [test-crystal, test-elixir, test-go, test-python, test-rust, test-typescript, build-binaries]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -420,6 +491,12 @@ jobs:
           name: generated-rust
           path: artifacts/rust
 
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: blog-*
+          path: artifacts/binaries
+
       - name: Build file manifests
         run: |
           for lang in ruby crystal elixir go python rust typescript; do
@@ -439,6 +516,11 @@ jobs:
           cp artifacts/python.json _site/
           cp artifacts/rust.json _site/
           cp artifacts/typescript.json _site/
+          cp pages/downloads.html _site/
+          mkdir -p _site/downloads
+          for f in artifacts/binaries/blog-*/*.tar.gz; do
+            cp "$f" _site/downloads/
+          done
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

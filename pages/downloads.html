@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Railcar - Download Blog Demo</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .downloads-content {
+      max-width: 720px;
+      margin: 2rem auto;
+      padding: 0 1.5rem;
+    }
+    .downloads-content h2 {
+      color: var(--text);
+      margin-bottom: 1rem;
+    }
+    .downloads-content p {
+      color: var(--text-dim);
+      line-height: 1.6;
+      margin-bottom: 1.5rem;
+    }
+    .download-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    .download-card {
+      background: var(--bg-light);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      text-decoration: none;
+      color: var(--text);
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .download-card:hover {
+      border-color: var(--accent-ruby);
+      background: var(--bg-lighter);
+    }
+    .download-card .platform {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 0.25rem;
+    }
+    .download-card .arch {
+      color: var(--text-dim);
+      font-size: 0.9rem;
+    }
+    .download-card .size {
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      margin-top: 0.5rem;
+    }
+    .instructions {
+      background: var(--bg-light);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin-bottom: 2rem;
+    }
+    .instructions code {
+      background: var(--bg);
+      padding: 0.2rem 0.4rem;
+      border-radius: 3px;
+      font-size: 0.9rem;
+    }
+    .instructions pre {
+      background: var(--bg);
+      padding: 1rem;
+      border-radius: 6px;
+      margin-top: 0.75rem;
+      overflow-x: auto;
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+    .back-link {
+      color: var(--accent-ruby);
+      text-decoration: none;
+    }
+    .back-link:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Railcar</h1>
+    <p class="tagline">Download the Blog Demo</p>
+  </header>
+
+  <main class="downloads-content">
+    <p>
+      Pre-built binaries of the <a href="./" class="back-link">Railcar blog demo</a>, transpiled from Rails to Rust.
+      Each download is a self-contained package &mdash; just extract, run, and open
+      <code>http://localhost:3000</code>. No Rust toolchain needed.
+    </p>
+
+    <h2>Downloads</h2>
+    <div class="download-grid">
+      <a class="download-card" href="downloads/blog-linux-x86_64.tar.gz">
+        <div class="platform">Linux</div>
+        <div class="arch">x86_64 (Intel/AMD)</div>
+        <div class="size">blog-linux-x86_64.tar.gz</div>
+      </a>
+      <a class="download-card" href="downloads/blog-linux-aarch64.tar.gz">
+        <div class="platform">Linux</div>
+        <div class="arch">aarch64 (ARM)</div>
+        <div class="size">blog-linux-aarch64.tar.gz</div>
+      </a>
+      <a class="download-card" href="downloads/blog-macos-x86_64.tar.gz">
+        <div class="platform">macOS</div>
+        <div class="arch">x86_64 (Intel)</div>
+        <div class="size">blog-macos-x86_64.tar.gz</div>
+      </a>
+      <a class="download-card" href="downloads/blog-macos-aarch64.tar.gz">
+        <div class="platform">macOS</div>
+        <div class="arch">aarch64 (Apple Silicon)</div>
+        <div class="size">blog-macos-aarch64.tar.gz</div>
+      </a>
+    </div>
+
+    <h2>Run it</h2>
+    <div class="instructions">
+      <pre>tar xzf blog-*.tar.gz
+cd blog-*
+./blog</pre>
+      <p style="margin-top: 1rem; margin-bottom: 0;">
+        Open <code>http://localhost:3000</code> in your browser.
+        Open multiple tabs to see real-time Turbo Streams updates.
+      </p>
+    </div>
+
+    <h2>What's inside</h2>
+    <p>
+      The binary is a complete web application transpiled from a
+      <a href="https://ruby2js.github.io/ruby2js/releases/demo-blog.tar.gz" class="back-link">Rails blog app</a>
+      to Rust by Railcar. It includes:
+    </p>
+    <ul style="color: var(--text-dim); line-height: 2; padding-left: 1.5rem; margin-bottom: 2rem;">
+      <li>Axum HTTP server with Tokio async runtime</li>
+      <li>SQLite database (created on first run)</li>
+      <li>Articles and comments with validations</li>
+      <li>Turbo Streams real-time broadcasting via WebSocket</li>
+      <li>Tailwind CSS styling</li>
+      <li>Seed data (3 articles, 3 comments)</li>
+    </ul>
+
+    <p><a href="./" class="back-link">&larr; Back to generated source code</a></p>
+  </main>
+
+  <footer>
+    <a href="https://github.com/rubys/railcar">GitHub</a>
+  </footer>
+</body>
+</html>
