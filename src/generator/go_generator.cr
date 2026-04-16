@@ -333,6 +333,7 @@ module Railcar
         io << "package views\n\n"
         io << "import (\n"
         io << "\t\"fmt\"\n"
+        io << "\t\"html\"\n"
         io << "\t\"strings\"\n"
         io << "\t\"#{app_name}/helpers\"\n"
         io << "\t\"#{app_name}/models\"\n"

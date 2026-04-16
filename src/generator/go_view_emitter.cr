@@ -242,8 +242,13 @@ module Railcar
       when Crystal::OpAssign
         target = node.target
         if target.is_a?(Crystal::Var) && target.name == "_buf"
-          value_str = to_go(node.value)
-          io << "#{indent}buf.WriteString(#{value_str})\n"
+          value = node.value
+          # String literals are static HTML — always safe
+          if value.is_a?(Crystal::StringLiteral)
+            io << "#{indent}buf.WriteString(#{to_go(value)})\n"
+          else
+            io << "#{indent}buf.WriteString(#{escape_if_needed(value)})\n"
+          end
         else
           io << "#{indent}#{to_go(target)} += #{to_go(node.value)}\n"
         end
@@ -343,6 +348,65 @@ module Railcar
       else
         to_go(node)
       end
+    end
+
+    # Check if an expression produces safe HTML (helper output) vs user data (model fields)
+    private def safe_html?(node : Crystal::ASTNode) : Bool
+      case node
+      when Crystal::StringLiteral
+        true
+      when Crystal::Call
+        name = node.name
+        obj = node.obj
+        # Helper functions return safe HTML
+        return true if !obj && {"link_to", "button_to", "dom_id", "pluralize",
+                                 "turbo_stream_from", "turbo_cable_stream_tag", "turbo_stream_tag",
+                                 "form_with_open_tag", "form_submit_tag"}.includes?(name)
+        # truncate returns user data (just shortened) — NOT safe
+        # Path helpers return URLs (safe)
+        return true if !obj && name.ends_with?("_path")
+        # Render partial calls return safe HTML
+        return true if !obj && name.starts_with?("render_") && name.ends_with?("_partial")
+        # str() wrapper — check inner expression
+        return safe_html?(node.args[0]) if name == "str" && node.args.size == 1 && !obj
+        # Model field access → user data, not safe
+        false
+      when Crystal::StringInterpolation
+        true # Interpolations are format strings we construct
+      else
+        false
+      end
+    end
+
+    # Wrap an expression in html.EscapeString() if it contains user data
+    def escape_if_needed(node : Crystal::ASTNode) : String
+      expr = to_go(node)
+      if safe_html?(node)
+        expr
+      else
+        # For string fields, escape directly; for others, format first
+        if is_string_expr?(node)
+          "html.EscapeString(#{expr})"
+        else
+          "html.EscapeString(fmt.Sprintf(\"%v\", #{expr}))"
+        end
+      end
+    end
+
+    private def is_string_expr?(node : Crystal::ASTNode) : Bool
+      case node
+      when Crystal::Call
+        # str(x) wrapper or field access on a known string column
+        if node.name == "str" && node.args.size == 1
+          return true
+        end
+        if node.obj && known_fields.includes?(node.name)
+          col_type = node.name  # field name
+          # Most schema columns are strings; int fields are article_id etc.
+          return !col_type.ends_with?("_id")
+        end
+      end
+      false
     end
 
     private def go_field_name(name : String) : String
