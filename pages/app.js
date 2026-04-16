@@ -12,7 +12,7 @@
   // Load all three manifests
   async function loadManifests() {
     treeEl.innerHTML = '<div class="loading">Loading...</div>';
-    const langs = ["ruby", "crystal", "python", "typescript", "elixir"];
+    const langs = ["ruby", "crystal", "elixir", "go", "python", "typescript"];
     await Promise.all(
       langs.map(async (lang) => {
         try {

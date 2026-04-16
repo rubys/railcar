@@ -20,13 +20,16 @@ Source file (.rb or .cr)
        |
        +---> Crystal filters -> .to_s -> Crystal.format -> .cr/.ecr output
        |
+       +---> Elixir filters -> Cr2Ex -> .ex output
+       |                           -> EexConverter -> .eex templates
+       |
+       +---> Go filters -> Cr2Go -> .go models/controllers
+       |                -> GoViewEmitter -> .go view functions
+       |
        +---> Python filters -> Cr2Py -> PyAST -> .py output
        |
        +---> TypeScript filters -> Cr2Ts -> .ts output
        |                       -> EjsConverter -> .ejs templates
-       |
-       +---> Elixir filters -> Cr2Ex -> .ex output
-       |                           -> EexConverter -> .eex templates
 ```
 
 Crystal AST (`Crystal::ASTNode`) is the canonical intermediate representation. All filters operate on it, regardless of whether the source was Ruby or Crystal, and regardless of the target language.
@@ -119,7 +122,7 @@ Each filter is a `Crystal::Transformer` subclass that pattern-matches on AST nod
 |--------|-------------|
 | `BroadcastsTo` | Converts `broadcasts_to`/`after_*_commit` to broadcast calls |
 | `ModelBoilerplate` | Wraps body in `model("table") { columns + declarations }`, adds validations (Crystal) |
-| `ModelBoilerplatePython` | Produces macro-free Crystal AST with TABLE, COLUMNS, property declarations (Python, TypeScript, and Go) |
+| `ModelBoilerplatePython` | Produces macro-free Crystal AST with TABLE, COLUMNS, property declarations (Python, TypeScript, Go) |
 | `ModelBoilerplateElixir` | Produces Elixir-shaped Crystal AST with module functions taking `record` param, `Railcar.Validation` calls, association methods |
 
 **View filters** (shared, applied to template AST before target-specific emission):
@@ -170,6 +173,12 @@ A two-stage Crystal AST -> Python pipeline:
 
 **Cr2Ex Emitter** (`cr2ex.cr`) -- walks Crystal AST (post-filter) and emits Elixir. Two entry points: `emit_model` (ClassDef -> defmodule with module functions) and `emit_controller_function` (Def -> Plug handler). Handles Elixir-specific patterns: `case` result expressions from `if save/update`, pipe chains for redirects, struct literals, property access without parens, keyword list formatting for `render_view`, and `Railcar.Validation` calls in run_validations.
 
+### Go Emitter (`src/emitter/go/`)
+
+**Cr2Go Emitter** (`cr2go.cr`) -- walks Crystal AST and emits Go model source. Generates struct definitions, Model interface methods (TableName, Columns, ScanRow, ColumnValues, RunValidations), association methods (has_many via Where, belongs_to via Find), and static functions (Find, All, Create). Extracts broadcast callbacks from pre-filtered AST and generates AfterSave/AfterDelete methods implementing the Broadcaster interface.
+
+**GoViewEmitter** (`src/generator/go_view_emitter.cr`) -- converts view AST (after ViewCleanup) to Go functions that return strings via `strings.Builder`. No template engine -- method calls, loops, and conditionals are plain Go code (same approach as Python). Handles helper function calls, path helpers, partial rendering, and association method calls with `(value, error)` handling.
+
 ### Generators
 
 **AppGenerator** (`src/generator/app_generator.cr`) -- orchestrates Crystal output.
@@ -182,6 +191,8 @@ A two-stage Crystal AST -> Python pipeline:
 - `TypeScriptTestGenerator` -- Minitest -> node:test via Prism AST walking
 
 **ElixirGenerator** (`src/generator/elixir_generator.cr`) -- orchestrates Elixir output. Models and controllers use the AST pipeline: `SourceParser.parse` -> `BroadcastsTo` / `SharedControllerFilters` -> `ModelBoilerplateElixir` / `ControllerBoilerplateElixir` -> `Cr2Ex` emitter. Views use EexConverter. Tests use Prism AST walking. Infrastructure (Mix project, router, database init, seeds) is generated structurally from AppModel metadata. Target: Plug + Bandit server with WebSock for ActionCable.
+
+**GoGenerator** (`src/generator/go_generator.cr`) -- orchestrates Go output. Models use the AST pipeline: `SourceParser.parse` -> `BroadcastsTo` -> `ModelBoilerplatePython` -> `Cr2Go` emitter (broadcast callbacks extracted from pre-filtered AST). Views use GoViewEmitter: ERB -> ErbCompiler -> shared view filters -> ViewCleanup -> Go functions returning strings (no template engine). Controllers and tests are generated structurally from AppModel metadata. Target: net/http + database/sql + modernc.org/sqlite + nhooyr.io/websocket.
 
 ### Runtime
 
@@ -198,6 +209,10 @@ A two-stage Crystal AST -> Python pipeline:
 
 **Elixir** (`src/runtime/elixir/`):
 - `base_runtime.ex` -- hand-written Elixir runtime: `Railcar.Record` macro (CRUD, validations, callbacks), `Railcar.Repo` (SQLite via Exqlite with persistent_term), `Railcar.Validation` helpers, `Railcar.CableServer` (GenServer for WebSocket subscriptions), `Railcar.CableHandler` (WebSock Action Cable protocol), `Railcar.Broadcast` (turbo-stream HTML generation and delivery)
+
+**Go** (`src/runtime/go/`):
+- `base.cr` -- Crystal source used only for `program.semantic()` type checking (not emitted)
+- `railcar.go` -- hand-written Go runtime: Model interface, generic CRUD (Find, All, Where, Save, Delete) with database/sql, Broadcaster interface with AfterSave/AfterDelete callbacks, CableServer (in-memory pub/sub), CableHandler (Action Cable WebSocket with `actioncable-v1-json` subprotocol), turbo-stream HTML generation, partial renderer registry, configurable logging via LOG_LEVEL env var
 
 ### Shared data models
 
@@ -257,14 +272,15 @@ make test     # runs all Crystal specs (313)
 crystal spec spec/filters_spec.cr   # run a specific spec file
 ```
 
-CI generates and tests all four targets:
+CI generates and tests all five targets:
 
 | Target | What CI runs |
 |--------|-------------|
 | Crystal | `crystal spec` on generated blog (compiled binary) |
+| Elixir | `mix test --no-start` on generated blog (21 tests) |
+| Go | `go test ./...` on generated blog (21 tests) |
 | Python | `pytest tests/ -v` on generated blog (21 tests) |
 | TypeScript | `npx tsx --test tests/*.test.ts` on generated blog (21 tests) |
-| Elixir | `mix test --no-start` on generated blog (21 tests) |
 
 Crystal tests are organized by component:
 

@@ -22,7 +22,7 @@ const SKIP_DIRS = new Set([
 
 const SKIP_EXTENSIONS = new Set([
   ".db", ".sqlite3", ".lock", ".ico", ".png", ".jpg", ".gif",
-  ".woff", ".woff2", ".ttf", ".eot", ".map"
+  ".woff", ".woff2", ".ttf", ".eot", ".map", ".sum"
 ]);
 
 function walk(dirPath, prefix) {
