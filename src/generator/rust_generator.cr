@@ -50,6 +50,7 @@ module Railcar
       emit_views(output_dir, app_name)
       emit_controllers(output_dir, app_name)
       emit_main(output_dir, app_name)
+      copy_static_assets(output_dir)
       emit_model_tests(output_dir, app_name)
       emit_controller_tests(output_dir, app_name)
 
@@ -932,6 +933,61 @@ module Railcar
       raw.gsub(/\s+/, " ").scan(/(?<=\A|,\s)(\w+):\s*("(?:[^"\\]|\\.)*")/).map do |m|
         "(\"#{m[1]}\".to_string(), #{m[2]}.to_string())"
       end.join(", ")
+    end
+
+    # ── Static assets ──
+
+    private def copy_static_assets(output_dir : String)
+      static_dir = File.join(output_dir, "static")
+      Dir.mkdir_p(static_dir)
+
+      tailwind = find_tailwind
+      if tailwind
+        input_css = File.join(output_dir, "input.css")
+        File.write(input_css, "@import \"tailwindcss\";\n")
+        err_io = IO::Memory.new
+        result = Process.run(tailwind,
+          ["--input", "input.css", "--output", "static/app.css", "--minify"],
+          chdir: output_dir, output: Process::Redirect::Close, error: err_io)
+        if result.success?
+          size = File.size(File.join(static_dir, "app.css"))
+          puts "  static/app.css (#{size} bytes)"
+        end
+        File.delete(input_css) if File.exists?(input_css)
+      end
+
+      turbo_js = find_turbo_js
+      if turbo_js
+        File.copy(turbo_js, File.join(static_dir, "turbo.min.js"))
+        size = File.size(File.join(static_dir, "turbo.min.js"))
+        puts "  static/turbo.min.js (#{size} bytes)"
+      end
+    end
+
+    private def find_tailwind : String?
+      path = Process.find_executable("tailwindcss")
+      return path if path
+      begin
+        output = IO::Memory.new
+        result = Process.run("ruby",
+          ["-e", "puts Gem::Specification.find_by_name('tailwindcss-rails').bin_dir + '/tailwindcss'"],
+          output: output, error: Process::Redirect::Close)
+        return output.to_s.strip if result.success? && File.exists?(output.to_s.strip)
+      rescue
+      end
+      nil
+    end
+
+    private def find_turbo_js : String?
+      begin
+        output = IO::Memory.new
+        result = Process.run("ruby",
+          ["-e", "puts Gem::Specification.find_by_name('turbo-rails').gem_dir + '/app/assets/javascripts/turbo.min.js'"],
+          output: output, error: Process::Redirect::Close)
+        return output.to_s.strip if result.success? && File.exists?(output.to_s.strip)
+      rescue
+      end
+      nil
     end
 
     # ── Model tests ──
