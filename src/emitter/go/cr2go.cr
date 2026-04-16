@@ -292,10 +292,13 @@ module Railcar
         when Crystal::And
           left = emit_go_condition(node.left)
           right = emit_go_condition(node.right)
+          return right if left == "true"
+          return left if right == "true"
           "#{left} && #{right}"
         when Crystal::Or
           left = emit_go_condition(node.left)
           right = emit_go_condition(node.right)
+          return left if left == right  # deduplicate: X || X → X
           "(#{left} || #{right})"
         when Crystal::Not
           "!(#{emit_go_condition(node.exp)})"

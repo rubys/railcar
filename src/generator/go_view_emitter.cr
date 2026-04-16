@@ -67,20 +67,37 @@ module Railcar
       # Named args → additional args
       named_args_str = ""
       if named = node.named_args
-        named.each do |na|
-          case na.name
-          when "class", "form_class"
-            args << na.value.to_s.strip('"').inspect
-          when "method"
-            args << na.value.to_s.strip(':').strip('"').inspect
-          when "data_turbo_confirm"
-            args << na.value.to_s.strip('"').inspect
-          when "model"
-            args.unshift(to_go(na.value))
-          when "length"
-            args << na.value.to_s
-          when "rows"
-            # skip — handled in HTML attributes
+        # For button_to: collect named args into specific slots
+        if name == "button_to"
+          method_val = "\"post\""
+          form_cls_val = "\"\""
+          cls_val = "\"\""
+          confirm_val = "\"\""
+          named.each do |na|
+            case na.name
+            when "method"     then method_val = na.value.to_s.strip(':').strip('"').inspect
+            when "form_class" then form_cls_val = na.value.to_s.strip('"').inspect
+            when "class"      then cls_val = na.value.to_s.strip('"').inspect
+            when "data_turbo_confirm" then confirm_val = na.value.to_s.strip('"').inspect
+            end
+          end
+          args << method_val << form_cls_val << cls_val << confirm_val
+        else
+          named.each do |na|
+            case na.name
+            when "class", "form_class"
+              args << na.value.to_s.strip('"').inspect
+            when "method"
+              args << na.value.to_s.strip(':').strip('"').inspect
+            when "data_turbo_confirm"
+              args << na.value.to_s.strip('"').inspect
+            when "model"
+              args.unshift(to_go(na.value))
+            when "length"
+              args << na.value.to_s
+            when "rows"
+              # skip — handled in HTML attributes
+            end
           end
         end
       end

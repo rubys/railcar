@@ -10,12 +10,46 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"nhooyr.io/websocket"
 )
+
+// ── Logging ──
+// Set LOG_LEVEL=debug for verbose output (like Rails development mode).
+// Levels: debug < info < warn < error
+
+var logLevel int
+
+func init() {
+	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
+	case "debug":
+		logLevel = 0
+	case "info":
+		logLevel = 1
+	case "warn":
+		logLevel = 2
+	case "error":
+		logLevel = 3
+	default:
+		logLevel = 1 // info
+	}
+}
+
+func logDebug(format string, args ...any) {
+	if logLevel <= 0 {
+		log.Printf("[debug] "+format, args...)
+	}
+}
+
+func logInfo(format string, args ...any) {
+	if logLevel <= 1 {
+		log.Printf("[info]  "+format, args...)
+	}
+}
 
 // DB is the shared database connection.
 var DB *sql.DB
@@ -150,6 +184,7 @@ func Save(m Model) error {
 
 	// Run after_save callback if model implements Broadcaster
 	if b, ok := m.(Broadcaster); ok {
+		logDebug("AfterSave callback for %T #%d", m, m.ID())
 		b.AfterSave()
 	}
 	return nil
@@ -238,6 +273,7 @@ func Delete(m Model) error {
 	}
 	// Run after_delete callback if model implements Broadcaster
 	if b, ok := m.(Broadcaster); ok {
+		logDebug("AfterDelete callback for %T #%d", m, m.ID())
 		b.AfterDelete()
 	}
 	return nil
@@ -309,6 +345,7 @@ func BroadcastReplaceTo(m Model, channel string, target string) {
 	}
 	html := RenderPartial(m)
 	stream := TurboStreamHTML("replace", target, html)
+	logInfo("Broadcast replace on %q → target=%q (%d bytes)", channel, target, len(html))
 	Cable.Broadcast(channel, stream)
 }
 
@@ -319,6 +356,7 @@ func BroadcastAppendTo(m Model, channel string, target string) {
 	}
 	html := RenderPartial(m)
 	stream := TurboStreamHTML("append", target, html)
+	logInfo("Broadcast append on %q → target=%q (%d bytes)", channel, target, len(html))
 	Cable.Broadcast(channel, stream)
 }
 
@@ -329,6 +367,7 @@ func BroadcastPrependTo(m Model, channel string, target string) {
 	}
 	html := RenderPartial(m)
 	stream := TurboStreamHTML("prepend", target, html)
+	logInfo("Broadcast prepend on %q → target=%q (%d bytes)", channel, target, len(html))
 	Cable.Broadcast(channel, stream)
 }
 
@@ -338,6 +377,7 @@ func BroadcastRemoveTo(m Model, channel string, target string) {
 		target = DomIDFor(m)
 	}
 	stream := TurboStreamHTML("remove", target, "")
+	logInfo("Broadcast remove on %q → target=%q", channel, target)
 	Cable.Broadcast(channel, stream)
 }
 
@@ -363,6 +403,7 @@ func (cs *CableServer) Subscribe(channel string, conn *websocket.Conn, ctx conte
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	cs.channels[channel] = append(cs.channels[channel], subscriber{conn, ctx, identifier})
+	logInfo("ActionCable: subscribed to %q (%d subscribers)", channel, len(cs.channels[channel]))
 }
 
 // Unsubscribe removes a WebSocket connection from all channels.
@@ -390,13 +431,16 @@ func (cs *CableServer) Broadcast(channel string, html string) {
 	subs := cs.channels[channel]
 	cs.mu.RUnlock()
 
+	logDebug("Broadcast to %q (%d subscribers)", channel, len(subs))
 	for _, s := range subs {
 		msg, _ := json.Marshal(map[string]string{
 			"type":       "message",
 			"identifier": s.identifier,
 			"message":    html,
 		})
-		s.conn.Write(s.ctx, websocket.MessageText, msg)
+		if err := s.conn.Write(s.ctx, websocket.MessageText, msg); err != nil {
+			logDebug("Broadcast write error: %v", err)
+		}
 	}
 }
 
@@ -410,11 +454,13 @@ func CableHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() {
+		logInfo("ActionCable: client disconnected")
 		Cable.Unsubscribe(conn)
 		conn.Close(websocket.StatusNormalClosure, "")
 	}()
 
 	ctx := r.Context()
+	logInfo("ActionCable: client connected")
 
 	// Send welcome
 	welcome, _ := json.Marshal(map[string]string{"type": "welcome"})
@@ -449,21 +495,27 @@ func CableHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		logDebug("ActionCable: received %s", string(data))
+
 		if msg["command"] == "subscribe" {
 			identifier := msg["identifier"]
 			// Decode channel from identifier: {"channel":"...","signed_stream_name":"base64--sig"}
 			var idData map[string]string
 			json.Unmarshal([]byte(identifier), &idData)
 			signed := idData["signed_stream_name"]
+			logDebug("ActionCable: signed_stream_name=%q", signed)
 			// Extract base64 portion before "--"
 			parts := strings.SplitN(signed, "--", 2)
 			if len(parts) == 0 {
+				logDebug("ActionCable: no -- separator in signed name")
 				continue
 			}
 			decoded, err := base64.StdEncoding.DecodeString(parts[0])
 			if err != nil {
+				logDebug("ActionCable: base64 decode error: %v (input=%q)", err, parts[0])
 				continue
 			}
+			logDebug("ActionCable: decoded=%s", string(decoded))
 			// Decoded is a JSON string, e.g., "\"articles\"" or "\"article_1_comments\""
 			var channel string
 			json.Unmarshal(decoded, &channel)

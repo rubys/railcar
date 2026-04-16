@@ -26,7 +26,6 @@ require "../filters/render_to_partial"
 require "../filters/form_to_html"
 require "../filters/turbo_stream_connect"
 require "../filters/view_cleanup"
-require "../filters/buf_to_interpolation"
 require "../emitter/go/cr2go"
 require "./go_view_emitter"
 
@@ -151,6 +150,8 @@ module Railcar
       io = IO::Memory.new
       io << "package helpers\n\n"
       io << "import (\n"
+      io << "\t\"encoding/base64\"\n"
+      io << "\t\"encoding/json\"\n"
       io << "\t\"fmt\"\n"
       io << "\t\"net/http\"\n"
       io << "\t\"net/url\"\n"
@@ -208,7 +209,10 @@ module Railcar
       }
 
       func TurboStreamFrom(channel string) string {
-        return fmt.Sprintf(`<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="%s"></turbo-cable-stream-source>`, channel)
+        // Encode channel as Rails does: base64(json_string)--signature
+        jsonBytes, _ := json.Marshal(channel)
+        signed := base64.StdEncoding.EncodeToString(jsonBytes)
+        return fmt.Sprintf(`<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="%s"></turbo-cable-stream-source>`, signed)
       }
 
       func Truncate(text string, args ...int) string {
@@ -365,7 +369,6 @@ module Railcar
               end
             end
             ast = ViewCleanup.calls_to_vars(ast, var_names)
-            ast = ast.transform(BufToInterpolation.new)
 
             # Strip def render wrapper
             body = ast
@@ -424,10 +427,8 @@ module Railcar
         end
 
         # Suppress unused import warnings
+        # Suppress unused import warnings if needed
         io << "var _ = fmt.Sprintf\n"
-        io << "var _ = strings.Builder{}\n"
-        io << "var _ = helpers.LinkTo\n"
-        io << "var _ = models.AllArticles\n"
 
         out_path = File.join(views_dir, "#{plural}.go")
         File.write(out_path, io.to_s)
