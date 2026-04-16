@@ -23,6 +23,7 @@ require "../filters/form_to_html"
 require "../filters/turbo_stream_connect"
 require "../filters/view_cleanup"
 require "../emitter/rust/cr2rs"
+require "../filters/method_map"
 require "./go_view_emitter"
 require "./erb_compiler"
 
@@ -592,15 +593,25 @@ module Railcar
           return "helpers::form_with_open_tag(\"#{Inflector.singularize(args[0]? || "item")}\", #{args[0]? || "item"}.id, #{args[1]? || "\"\""})"
         when "form_submit_tag"
           return "helpers::form_submit_tag(\"#{Inflector.singularize(args[0]? || "item")}\", #{args[0]? || "item"}.id, #{args[1]? || "\"\""})"
-        when "size", "count", "length"
-          obj_str = obj ? rust_view_expr(obj) : ""
-          return "#{obj_str}.len()"
         when "errors"
           obj_str = obj ? rust_view_expr(obj) : ""
           return "#{obj_str}.errors()"
         when "full_message"
           obj_str = obj ? rust_view_expr(obj) : ""
           return "#{obj_str}.full_message()"
+        end
+
+        # MethodMap lookup for standard Ruby methods
+        if obj
+          obj_str = rust_view_expr(obj)
+          mapping = Railcar.lookup_method(:rust, "Any", name)
+          if mapping
+            result = mapping.target.gsub("RECV", obj_str)
+            if result.starts_with?(".")
+              return "#{obj_str}#{result}"
+            end
+            return result
+          end
         end
 
         # Path helpers

@@ -11,6 +11,7 @@
 
 require "compiler/crystal/syntax"
 require "./inflector"
+require "../filters/method_map"
 
 module Railcar
   class GoViewEmitter
@@ -109,19 +110,8 @@ module Railcar
           return "models.New#{model}()"
         end
         return ""
-      when "to_s"
-        return obj ? to_go(obj) : ""
       when "str"
         return args.first? || ""
-      when "nil?"
-        obj_str = obj ? to_go(obj) : ""
-        return "#{obj_str} == nil"
-      when "empty?"
-        obj_str = obj ? to_go(obj) : ""
-        return "#{obj_str} == \"\""
-      when "any?"
-        obj_str = obj ? to_go(obj) : ""
-        return "len(#{obj_str}) > 0"
       when "present?"
         return obj ? to_go(obj) + " != \"\"" : ""
       when "size", "count", "length"
@@ -129,12 +119,24 @@ module Railcar
           # Method returning (value, error) — need safeLen helper
           return "helpers.SafeLen(#{to_go(obj)})"
         end
-        obj_str = obj ? to_go(obj) : ""
-        return "len(#{obj_str})"
+        # Fall through to MethodMap
       when "errors"
-        # Model errors — call the method
         obj_str = obj ? to_go(obj) : ""
         return "#{obj_str}.Errors()"
+      end
+
+      # MethodMap lookup for standard Ruby methods
+      if obj
+        obj_str = to_go(obj)
+        mapping = Railcar.lookup_method(:go, infer_type(obj), name)
+        if mapping
+          return apply_mapping(mapping, obj_str, args)
+        end
+      else
+        mapping = Railcar.lookup_method(:go, "Any", name)
+        if mapping && name == "to_s"
+          return args.first? || ""
+        end
       end
 
       # Helper functions
@@ -407,6 +409,41 @@ module Railcar
         end
       end
       false
+    end
+
+    # Infer the Ruby type of an AST node for MethodMap lookup
+    private def infer_type(node : Crystal::ASTNode) : String
+      case node
+      when Crystal::StringLiteral, Crystal::StringInterpolation
+        "String"
+      when Crystal::NumberLiteral
+        "Numeric"
+      when Crystal::ArrayLiteral
+        "Array"
+      when Crystal::HashLiteral
+        "Hash"
+      when Crystal::Call
+        # Known schema fields are strings or integers
+        if known_fields.includes?(node.name)
+          return "String" # most schema fields are strings; imprecise but safe
+        end
+        "Any"
+      else
+        "Any"
+      end
+    end
+
+    # Apply a MethodMapping pattern, substituting RECV, ARG0, ARG1
+    private def apply_mapping(mapping : Railcar::MethodMapping, recv : String, args : Array(String)) : String
+      result = mapping.target
+      result = result.gsub("RECV", recv)
+      result = result.gsub("ARG0", args[0]? || "")
+      result = result.gsub("ARG1", args[1]? || "")
+      # If pattern starts with "." it's a method/property on the receiver
+      if result.starts_with?(".")
+        return "#{recv}#{result}"
+      end
+      result
     end
 
     private def go_field_name(name : String) : String

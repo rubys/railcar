@@ -71,9 +71,14 @@ module Railcar
       {"Hash", "merge"}      => MethodMapping.new("maps.Clone(RECV)"), # simplified
 
       # General
-      {"Any", "nil?"}   => MethodMapping.new("RECV == nil"),
-      {"Any", "to_s"}   => MethodMapping.new("fmt.Sprintf(\"%v\", RECV)"),
-      {"Any", "freeze"} => MethodMapping.new("RECV"), # no-op in Go
+      {"Any", "nil?"}    => MethodMapping.new("RECV == nil"),
+      {"Any", "to_s"}    => MethodMapping.new("fmt.Sprintf(\"%v\", RECV)"),
+      {"Any", "size"}    => MethodMapping.new("len(RECV)"),
+      {"Any", "length"}  => MethodMapping.new("len(RECV)"),
+      {"Any", "count"}   => MethodMapping.new("len(RECV)"),
+      {"Any", "empty?"}  => MethodMapping.new("len(RECV) == 0"),
+      {"Any", "any?"}    => MethodMapping.new("len(RECV) > 0"),
+      {"Any", "freeze"}  => MethodMapping.new("RECV"), # no-op in Go
     },
 
     # ── Rust ──
@@ -122,9 +127,14 @@ module Railcar
       {"Hash", "merge"}    => MethodMapping.new(".clone()"), # simplified
 
       # General
-      {"Any", "nil?"}   => MethodMapping.new("RECV.is_none()"), # Option types
-      {"Any", "to_s"}   => MethodMapping.new(".to_string()"),
-      {"Any", "freeze"} => MethodMapping.new("RECV"), # no-op
+      {"Any", "nil?"}    => MethodMapping.new("RECV.is_none()"), # Option types
+      {"Any", "to_s"}    => MethodMapping.new(".to_string()"),
+      {"Any", "size"}    => MethodMapping.new(".len()"),
+      {"Any", "length"}  => MethodMapping.new(".len()"),
+      {"Any", "count"}   => MethodMapping.new(".len()"),
+      {"Any", "empty?"}  => MethodMapping.new(".is_empty()"),
+      {"Any", "any?"}    => MethodMapping.new("!RECV.is_empty()"),
+      {"Any", "freeze"}  => MethodMapping.new("RECV"), # no-op
     },
 
     # ── Python ──
