@@ -352,15 +352,14 @@ jobs:
       - name: Make binary executable
         run: chmod +x build/railcar
 
-      - name: Install tailwindcss
-        run: npm install -g @tailwindcss/cli
-
       - name: Generate Rust blog
         run: build/railcar --rust build/demo/blog build/rust-blog
 
       - name: Generate static assets
         run: |
           cd build/rust-blog
+          mkdir -p static
+          npm install tailwindcss @tailwindcss/cli
           echo '@import "tailwindcss";' > input.css
           npx @tailwindcss/cli --input input.css --output static/app.css --minify --content 'src/**/*.rs'
           rm -f input.css
