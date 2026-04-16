@@ -14,7 +14,17 @@ require "./fixture_loader"
 require "../semantic"
 require "../filters/model_boilerplate_python"
 require "../filters/broadcasts_to"
+require "../filters/instance_var_to_local"
+require "../filters/rails_helpers"
+require "../filters/link_to_path_helper"
+require "../filters/button_to_path_helper"
+require "../filters/render_to_partial"
+require "../filters/form_to_html"
+require "../filters/turbo_stream_connect"
+require "../filters/view_cleanup"
 require "../emitter/rust/cr2rs"
+require "./go_view_emitter"
+require "./erb_compiler"
 
 module Railcar
   class RustGenerator
@@ -36,6 +46,10 @@ module Railcar
       emit_cargo_toml(output_dir, app_name)
       emit_runtime(output_dir)
       emit_models(output_dir, app_name, model_asts)
+      emit_helpers(output_dir, app_name)
+      emit_views(output_dir, app_name)
+      emit_controllers(output_dir, app_name)
+      emit_main(output_dir, app_name)
       emit_model_tests(output_dir, app_name)
 
       puts "Done! Output in #{output_dir}/"
@@ -76,9 +90,16 @@ module Railcar
       edition = "2021"
 
       [dependencies]
-      rusqlite = { version = "0.32", features = ["bundled"] }
+      axum = "0.8"
       chrono = "0.4"
       lazy_static = "1.5"
+      rusqlite = { version = "0.32", features = ["bundled"] }
+      serde = { version = "1", features = ["derive"] }
+      tokio = { version = "1", features = ["full"] }
+      tower-http = { version = "0.6", features = ["fs"] }
+
+      [dev-dependencies]
+      axum-test = "16"
       TOML
       puts "  Cargo.toml"
     end
@@ -126,11 +147,760 @@ module Railcar
       # Generate lib.rs with mod declarations
       io = IO::Memory.new
       io << "pub mod railcar;\n"
+      io << "pub mod helpers;\n"
+      io << "pub mod views;\n"
+      io << "pub mod controllers;\n"
       model_names.each do |name|
         io << "pub mod #{name};\n"
       end
       File.write(File.join(src_dir, "lib.rs"), io.to_s)
       puts "  src/lib.rs"
+    end
+
+    # ── Helpers ──
+
+    private def emit_helpers(output_dir : String, app_name : String)
+      io = IO::Memory.new
+      io << "use std::fmt;\n\n"
+
+      # Route helpers
+      app.routes.helpers.each do |helper|
+        func_name = helper.name + "_path"
+        if helper.params.empty?
+          io << "pub fn #{func_name}() -> String { #{helper.path.inspect}.to_string() }\n\n"
+        else
+          param_decl = helper.params.map_with_index { |_, i| "id#{i}: i64" }.join(", ")
+          path_fmt = helper.path.gsub(/:(\w+)/) { "{}" }
+          format_args = helper.params.map_with_index { |_, i| "id#{i}" }.join(", ")
+          io << "pub fn #{func_name}(#{param_decl}) -> String { format!(\"#{path_fmt}\", #{format_args}) }\n\n"
+        end
+      end
+
+      # View helpers
+      io << <<-RUST
+      pub fn link_to(text: &str, url: &str, class: &str) -> String {
+          if class.is_empty() {
+              format!("<a href=\\"{}\\">{}</a>", url, text)
+          } else {
+              format!("<a href=\\"{}\\" class=\\"{}\\">{}</a>", url, class, text)
+          }
+      }
+
+      pub fn button_to(text: &str, url: &str, method: &str, form_class: &str, class: &str, confirm: &str) -> String {
+          let form_cls = if form_class.is_empty() { String::new() } else { format!(" class=\\"{}\\"", form_class) };
+          let btn_cls = if class.is_empty() { String::new() } else { format!(" class=\\"{}\\"", class) };
+          let conf = if confirm.is_empty() { String::new() } else { format!(" data-turbo-confirm=\\"{}\\"", confirm) };
+          format!("<form method=\\"post\\" action=\\"{}\\"{}{conf}><input type=\\"hidden\\" name=\\"_method\\" value=\\"{}\\"><button type=\\"submit\\"{}>{}</button></form>", url, form_cls, method, btn_cls, text)
+      }
+
+      pub fn turbo_stream_from(channel: &str) -> String {
+          let json = format!("\\"{}\\"", channel);
+          let signed = base64_encode(json.as_bytes());
+          format!("<turbo-cable-stream-source channel=\\"Turbo::StreamsChannel\\" signed-stream-name=\\"{}\\"></turbo-cable-stream-source>", signed)
+      }
+
+      fn base64_encode(data: &[u8]) -> String {
+          const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+          let mut result = Vec::new();
+          for chunk in data.chunks(3) {
+              let b0 = chunk[0] as usize;
+              let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
+              let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+              result.push(CHARS[b0 >> 2]);
+              result.push(CHARS[(b0 & 3) << 4 | b1 >> 4]);
+              result.push(if chunk.len() > 1 { CHARS[(b1 & 0xf) << 2 | b2 >> 6] } else { b'=' });
+              result.push(if chunk.len() > 2 { CHARS[b2 & 0x3f] } else { b'=' });
+          }
+          String::from_utf8(result).unwrap_or_default()
+      }
+
+      pub fn truncate(text: &str, length: usize) -> String {
+          if text.len() <= length { return text.to_string(); }
+          if length <= 3 { return text[..length].to_string(); }
+          format!("{}...", &text[..length - 3])
+      }
+
+      pub fn dom_id<T: fmt::Debug>(obj: &T, id: i64, prefix: &str) -> String {
+          let type_name = format!("{:?}", obj);
+          let name = type_name.split('{').next().unwrap_or("item").trim().to_lowercase();
+          if prefix.is_empty() {
+              format!("{}_{}", name, id)
+          } else {
+              format!("{}_{}_{}", prefix, name, id)
+          }
+      }
+
+      pub fn pluralize(count: usize, singular: &str) -> String {
+          if count == 1 { format!("{} {}", count, singular) }
+          else { format!("{} {}s", count, singular) }
+      }
+
+      pub fn form_with_open_tag(model_name: &str, id: i64, class: &str) -> String {
+          let plural = format!("{}s", model_name);
+          let cls = if class.is_empty() { String::new() } else { format!(" class=\\"{}\\"", class) };
+          if id > 0 {
+              format!("<form action=\\"/{}/{}\\" method=\\"post\\"{}><input type=\\"hidden\\" name=\\"_method\\" value=\\"patch\\">", plural, id, cls)
+          } else {
+              format!("<form action=\\"/{}\\" method=\\"post\\"{}>"  , plural, cls)
+          }
+      }
+
+      pub fn form_submit_tag(model_name: &str, id: i64, class: &str) -> String {
+          let cls = if class.is_empty() { String::new() } else { format!(" class=\\"{}\\"", class) };
+          let action = if id > 0 { "Update" } else { "Create" };
+          let cap_name = format!("{}{}", &model_name[..1].to_uppercase(), &model_name[1..]);
+          format!("<input type=\\"submit\\" value=\\"{} {}\\"{}>", action, cap_name, cls)
+      }
+
+      pub fn extract_model_params(form: &std::collections::HashMap<String, String>, model: &str) -> std::collections::HashMap<String, String> {
+          let prefix = format!("{}[", model);
+          let mut result = std::collections::HashMap::new();
+          for (key, value) in form {
+              if key.starts_with(&prefix) && key.ends_with(']') {
+                  let field = &key[prefix.len()..key.len() - 1];
+                  result.insert(field.to_string(), value.clone());
+              }
+          }
+          result
+      }
+
+      pub fn render_page(content: &str) -> String {
+          render_page_status(content, 200)
+      }
+
+      pub fn render_page_status(content: &str, _status: u16) -> String {
+          format!("<!DOCTYPE html>\\n<html>\\n<head>\\n  <title>Blog</title>\\n  <meta name=\\"viewport\\" content=\\"width=device-width,initial-scale=1\\">\\n  <link rel=\\"stylesheet\\" href=\\"/static/app.css\\">\\n  <script type=\\"module\\" src=\\"/static/turbo.min.js\\"></script>\\n</head>\\n<body>\\n  <main class=\\"container mx-auto mt-28 px-5 flex flex-col\\">\\n    {}\\n  </main>\\n</body>\\n</html>", content)
+      }
+      RUST
+
+      File.write(File.join(output_dir, "src", "helpers.rs"), io.to_s)
+      puts "  src/helpers.rs"
+    end
+
+    # ── Views ──
+
+    private def emit_views(output_dir : String, app_name : String)
+      rails_views = File.join(rails_dir, "app/views")
+      io = IO::Memory.new
+      io << "use crate::helpers;\n"
+      app.models.each_key do |name|
+        singular = Inflector.underscore(name)
+        io << "use crate::#{singular}::*;\n"
+      end
+      io << "\n"
+
+      app.controllers.each do |info|
+        controller_name = Inflector.underscore(info.name).chomp("_controller")
+        singular = Inflector.singularize(controller_name)
+        plural = Inflector.pluralize(controller_name)
+        model_name = Inflector.classify(singular)
+        template_dir = File.join(rails_views, plural)
+        next unless Dir.exists?(template_dir)
+
+        Dir.glob(File.join(template_dir, "*.html.erb")).sort.each do |erb_path|
+          basename = File.basename(erb_path, ".html.erb")
+          next if basename.ends_with?(".json")
+
+          is_partial = basename.starts_with?("_")
+          func_name = if is_partial
+                        "render_#{basename.lchop("_")}_partial"
+                      else
+                        "render_#{basename}"
+                      end
+
+          begin
+            erb_source = File.read(erb_path)
+            ruby_code = ErbCompiler.new(erb_source).src
+            ast = SourceParser.parse_source(ruby_code, "template.rb")
+
+            build_view_filters.each { |f| ast = ast.transform(f) }
+            ast = ast.transform(ViewCleanup.new)
+            var_names = [singular, plural, "_buf", "notice", "flash", "form"]
+            model_info = app.models[Inflector.classify(singular)]?
+            if model_info
+              model_info.associations.each do |assoc|
+                var_names << assoc.name if assoc.kind == :belongs_to
+              end
+            end
+            ast = ViewCleanup.calls_to_vars(ast, var_names)
+
+            body = ast
+            while body.is_a?(Crystal::Def) && body.as(Crystal::Def).name == "render"
+              body = body.as(Crystal::Def).body
+            end
+            if body.is_a?(Crystal::Expressions)
+              body.as(Crystal::Expressions).expressions.each do |expr|
+                if expr.is_a?(Crystal::Def) && expr.as(Crystal::Def).name == "render"
+                  body = expr.as(Crystal::Def).body
+                  break
+                end
+              end
+            end
+
+            # Emit Rust function
+            if is_partial
+              partial_name = basename.lchop("_")
+              partial_model_name = Inflector.classify(partial_name)
+              pmodel_info = app.models[partial_model_name]?
+              parent_assoc = pmodel_info.try(&.associations.find { |a| a.kind == :belongs_to })
+              if partial_name == "form"
+                io << "pub fn #{func_name}(#{singular}: &#{model_name}) -> String {\n"
+              elsif parent_assoc
+                parent_name = parent_assoc.name
+                parent_model = Inflector.classify(parent_name)
+                io << "pub fn #{func_name}(#{parent_name}: &#{parent_model}, #{partial_name}: &#{partial_model_name}) -> String {\n"
+              else
+                io << "pub fn #{func_name}(#{partial_name}: &#{partial_model_name}) -> String {\n"
+              end
+            else
+              param = basename == "index" ? plural : singular
+              param_type = basename == "index" ? "&[#{model_name}]" : "&#{model_name}"
+              io << "pub fn #{func_name}(#{param}: #{param_type}) -> String {\n"
+            end
+
+            # Use a simple Rust-adapted emitter
+            emit_rust_view_body(body, io, singular)
+
+            io << "}\n\n"
+          rescue ex
+            STDERR.puts "  WARN: #{func_name}: #{ex.message}"
+            io << "pub fn #{func_name}(_: &str) -> String { \"<!-- #{basename} -->\".to_string() }\n\n"
+          end
+        end
+      end
+
+      File.write(File.join(output_dir, "src", "views.rs"), io.to_s)
+      puts "  src/views.rs"
+    end
+
+    private def build_view_filters : Array(Crystal::Transformer)
+      [
+        InstanceVarToLocal.new,
+        TurboStreamConnect.new,
+        RailsHelpers.new,
+        LinkToPathHelper.new,
+        ButtonToPathHelper.new,
+        RenderToPartial.new,
+        FormToHTML.new,
+      ] of Crystal::Transformer
+    end
+
+    private def all_column_names : Set(String)
+      fields = Set(String).new
+      app.schemas.each do |schema|
+        schema.columns.each { |c| fields << c.name }
+      end
+      fields
+    end
+
+    # Simple Rust view body emitter — walks the filtered AST and emits string building code
+    private def emit_rust_view_body(node : Crystal::ASTNode, io : IO, singular : String, indent : String = "    ")
+      case node
+      when Crystal::Expressions
+        node.expressions.each { |e| emit_rust_view_body(e, io, singular, indent) }
+      when Crystal::Assign
+        target = node.target
+        value = node.value
+        if target.is_a?(Crystal::Var) && target.name == "_buf"
+          if value.is_a?(Crystal::StringLiteral) && value.value == ""
+            io << "#{indent}let mut buf = String::new();\n"
+          end
+        else
+          # Assignment like title = "..."
+          io << "#{indent}let #{target} = \"\";\n"
+        end
+      when Crystal::OpAssign
+        target = node.target
+        if target.is_a?(Crystal::Var) && target.name == "_buf"
+          value = node.value
+          if value.is_a?(Crystal::StringLiteral)
+            escaped = value.value.gsub("\\", "\\\\").gsub("\"", "\\\"")
+            io << "#{indent}buf.push_str(\"#{escaped}\");\n"
+          elsif value.is_a?(Crystal::Call) && value.name == "str" && value.args.size == 1
+            expr = rust_view_expr(value.args[0])
+            io << "#{indent}buf.push_str(&#{expr});\n"
+          else
+            expr = rust_view_expr(value)
+            io << "#{indent}buf.push_str(&#{expr});\n"
+          end
+        end
+      when Crystal::Call
+        if node.name == "each" && node.block
+          emit_rust_view_loop(node, io, singular, indent)
+        end
+      when Crystal::If
+        cond = rust_view_condition(node.cond)
+        if cond == "false"
+          # Skip dead code (notice checks)
+          return
+        end
+        io << "#{indent}if #{cond} {\n"
+        emit_rust_view_body(node.then, io, singular, indent + "    ")
+        if node.else && !node.else.is_a?(Crystal::Nop)
+          io << "#{indent}} else {\n"
+          emit_rust_view_body(node.else.not_nil!, io, singular, indent + "    ")
+        end
+        io << "#{indent}}\n"
+      when Crystal::Var
+        if node.name == "_buf"
+          io << "#{indent}buf\n"
+        end
+      when Crystal::Nop
+        # skip
+      end
+    end
+
+    private def emit_rust_view_loop(call : Crystal::Call, io : IO, singular : String, indent : String)
+      block = call.block.not_nil!
+      block_arg = block.args.first?.try(&.name) || "item"
+      collection = call.obj
+
+      if collection.is_a?(Crystal::Call) && collection.obj && collection.name != "errors"
+        # Association call returning Result — unwrap
+        coll_str = rust_view_expr(collection)
+        io << "#{indent}if let Ok(#{block_arg}s) = #{coll_str} {\n"
+        io << "#{indent}    for #{block_arg} in &#{block_arg}s {\n"
+        if body = block.body
+          emit_rust_view_body(body, io, singular, indent + "        ")
+        end
+        io << "#{indent}    }\n"
+        io << "#{indent}}\n"
+      else
+        coll_str = collection ? rust_view_expr(collection) : "items"
+        io << "#{indent}for #{block_arg} in #{coll_str} {\n"
+        if body = block.body
+          emit_rust_view_body(body, io, singular, indent + "    ")
+        end
+        io << "#{indent}}\n"
+      end
+    end
+
+    private def rust_view_condition(node : Crystal::ASTNode) : String
+      case node
+      when Crystal::Var
+        return "false" if {"notice", "flash"}.includes?(node.name)
+        "!#{node.name}.is_empty()"
+      when Crystal::Call
+        if node.name == "any?" && node.obj
+          "!#{rust_view_expr(node.obj.not_nil!)}.is_empty()"
+        elsif node.name == "present?" && node.obj
+          "!#{rust_view_expr(node.obj.not_nil!)}.is_empty()"
+        else
+          rust_view_expr(node)
+        end
+      when Crystal::Not
+        "!(#{rust_view_condition(node.exp)})"
+      else
+        rust_view_expr(node)
+      end
+    end
+
+    private def rust_view_expr(node : Crystal::ASTNode) : String
+      case node
+      when Crystal::StringLiteral
+        "\"#{node.value.gsub("\"", "\\\"")}\".to_string()"
+      when Crystal::NumberLiteral
+        node.value.to_s.gsub(/_i64|_i32/, "")
+      when Crystal::Var
+        node.name == "_buf" ? "buf" : node.name
+      when Crystal::InstanceVar
+        "self.#{node.name.lchop("@")}"
+      when Crystal::Call
+        name = node.name
+        obj = node.obj
+        args = node.args.map { |a| rust_view_expr(a) }
+
+        # Handle named args
+        if named = node.named_args
+          if name == "button_to"
+            method_val = "\"post\""
+            form_cls = "\"\""
+            cls = "\"\""
+            confirm = "\"\""
+            named.each do |na|
+              case na.name
+              when "method"              then method_val = "\"#{na.value.to_s.strip(':').strip('"')}\""
+              when "form_class"          then form_cls = "\"#{na.value.to_s.strip('"')}\""
+              when "class"               then cls = "\"#{na.value.to_s.strip('"')}\""
+              when "data_turbo_confirm"  then confirm = "\"#{na.value.to_s.strip('"')}\""
+              end
+            end
+            args << method_val << form_cls << cls << confirm
+          else
+            named.each do |na|
+              case na.name
+              when "class", "form_class" then args << "\"#{na.value.to_s.strip('"')}\""
+              when "model" then args.unshift(rust_view_expr(na.value))
+              when "length" then args << na.value.to_s
+              end
+            end
+          end
+        end
+
+        # Helper functions
+        case name
+        when "new"
+          if obj.is_a?(Crystal::Path)
+            model = obj.as(Crystal::Path).names.last
+            return "#{model}::new()"
+          end
+          return "".inspect
+        when "str", "to_s"
+          return obj ? rust_view_expr(obj) : (args.first? || "\"\"".inspect)
+        when "link_to"
+          return "helpers::link_to(#{args.map { |a| "&#{a}" }.join(", ")})"
+        when "button_to"
+          return "helpers::button_to(#{args.map { |a| "&#{a}" }.join(", ")})"
+        when "truncate"
+          return "helpers::truncate(&#{args[0]}, #{args[1]? || "30"})"
+        when "dom_id"
+          return "helpers::dom_id(&#{args[0]}, #{args[0]}.id, #{args[1]? || "\"\""})"
+        when "pluralize"
+          return "helpers::pluralize(#{args[0]}, &#{args[1]? || "\"item\"".inspect})"
+        when "turbo_stream_from", "turbo_cable_stream_tag"
+          return "helpers::turbo_stream_from(&#{args[0]})"
+        when "form_with_open_tag"
+          return "helpers::form_with_open_tag(\"#{Inflector.singularize(args[0]? || "item")}\", #{args[0]? || "item"}.id, #{args[1]? || "\"\""})"
+        when "form_submit_tag"
+          return "helpers::form_submit_tag(\"#{Inflector.singularize(args[0]? || "item")}\", #{args[0]? || "item"}.id, #{args[1]? || "\"\""})"
+        when "size", "count", "length"
+          obj_str = obj ? rust_view_expr(obj) : ""
+          return "#{obj_str}.len()"
+        when "errors"
+          obj_str = obj ? rust_view_expr(obj) : ""
+          return "#{obj_str}.errors()"
+        when "full_message"
+          obj_str = obj ? rust_view_expr(obj) : ""
+          return "#{obj_str}.full_message()"
+        end
+
+        # Path helpers
+        if !obj && name.ends_with?("_path")
+          return "helpers::#{name}(#{args.map { |a| "#{a}.id" }.join(", ")})"
+        end
+
+        # Render partials
+        if !obj && name.starts_with?("render_") && name.ends_with?("_partial")
+          return "#{name}(#{args.map { |a| "&#{a}" }.join(", ")})"
+        end
+
+        # Method on object — field or method access
+        if obj
+          obj_str = rust_view_expr(obj)
+          field = name
+          if all_column_names.includes?(field) || field == "id"
+            return "#{obj_str}.#{field}"
+          end
+          return "#{obj_str}.#{field}()"
+        end
+
+        # Bare variable
+        return node.name if args.empty? && !node.block && !node.named_args
+
+        "#{name}(#{args.join(", ")})"
+      when Crystal::StringInterpolation
+        format_parts = [] of String
+        format_args = [] of String
+        node.expressions.each do |part|
+          case part
+          when Crystal::StringLiteral
+            format_parts << part.value.gsub("{", "{{").gsub("}", "}}")
+          else
+            format_parts << "{}"
+            format_args << rust_view_expr(part)
+          end
+        end
+        if format_args.empty?
+          "\"#{format_parts.join}\".to_string()"
+        else
+          "format!(\"#{format_parts.join}\", #{format_args.join(", ")})"
+        end
+      when Crystal::Nop
+        "\"\"".inspect
+      else
+        "/* TODO: #{node.class.name} */"
+      end
+    end
+
+    # ── Controllers ──
+
+    private def emit_controllers(output_dir : String, app_name : String)
+      io = IO::Memory.new
+      io << "use axum::extract::{Form, Path};\n"
+      io << "use axum::response::{Html, IntoResponse, Redirect, Response};\n"
+      io << "use axum::http::StatusCode;\n"
+      io << "use std::collections::HashMap;\n"
+      io << "use crate::helpers;\n"
+      io << "use crate::views;\n"
+      app.models.each_key do |name|
+        singular = Inflector.underscore(name)
+        io << "use crate::#{singular};\n"
+      end
+      io << "\n"
+
+      app.controllers.each do |info|
+        controller_name = Inflector.underscore(info.name).chomp("_controller")
+        singular = Inflector.singularize(controller_name)
+        plural = Inflector.pluralize(controller_name)
+        model_name = Inflector.classify(singular)
+        nested_parent = app.routes.nested_parent_for(plural)
+
+        info.actions.each do |action|
+          next if action.is_private
+          emit_rust_controller_action(action.name, io, model_name, singular, plural, nested_parent)
+        end
+      end
+
+      File.write(File.join(output_dir, "src", "controllers.rs"), io.to_s)
+      puts "  src/controllers.rs"
+    end
+
+    private def emit_rust_controller_action(action_name : String, io : IO, model_name : String,
+                                             singular : String, plural : String, nested_parent : String?)
+      case action_name
+      when "index"
+        mod = Inflector.underscore(model_name)
+        io << "pub async fn index() -> impl IntoResponse {\n"
+        io << "    match #{mod}::all_#{singular}s(\"created_at DESC\") {\n"
+        io << "        Ok(#{plural}) => Html(helpers::render_page(&views::render_index(&#{plural}))),\n"
+        io << "        Err(e) => Html(format!(\"Error: {}\", e)),\n"
+        io << "    }\n"
+        io << "}\n\n"
+      when "show"
+        mod = Inflector.underscore(model_name)
+        io << "pub async fn show_#{singular}(Path(id): Path<i64>) -> Response {\n"
+        io << "    match #{mod}::find_#{singular}(id) {\n"
+        io << "        Ok(#{singular}) => Html(helpers::render_page(&views::render_show(&#{singular}))).into_response(),\n"
+        io << "        Err(_) => StatusCode::NOT_FOUND.into_response(),\n"
+        io << "    }\n"
+        io << "}\n\n"
+      when "new"
+        mod = Inflector.underscore(model_name)
+        io << "pub async fn new_#{singular}() -> impl IntoResponse {\n"
+        io << "    let #{singular} = #{mod}::#{model_name}::new();\n"
+        io << "    Html(helpers::render_page(&views::render_new(&#{singular})))\n"
+        io << "}\n\n"
+      when "edit"
+        mod = Inflector.underscore(model_name)
+        io << "pub async fn edit_#{singular}(Path(id): Path<i64>) -> Response {\n"
+        io << "    match #{mod}::find_#{singular}(id) {\n"
+        io << "        Ok(#{singular}) => Html(helpers::render_page(&views::render_edit(&#{singular}))).into_response(),\n"
+        io << "        Err(_) => StatusCode::NOT_FOUND.into_response(),\n"
+        io << "    }\n"
+        io << "}\n\n"
+      when "create"
+        mod = Inflector.underscore(model_name)
+        if nested_parent
+          parent_model = Inflector.classify(nested_parent)
+          parent_mod = Inflector.underscore(parent_model)
+          io << "pub async fn create_#{singular}(Path(parent_id): Path<i64>, Form(form): Form<HashMap<String, String>>) -> Response {\n"
+          io << "    if let Ok(#{nested_parent}) = #{parent_mod}::find_#{nested_parent}(parent_id) {\n"
+          io << "        let mut attrs = helpers::extract_model_params(&form, \"#{singular}\");\n"
+          io << "        attrs.insert(\"#{nested_parent}_id\".to_string(), format!(\"{}\", #{nested_parent}.id));\n"
+          io << "        let _ = #{mod}::create_#{singular}(&attrs);\n"
+          io << "        Redirect::to(&helpers::#{nested_parent}_path(#{nested_parent}.id)).into_response()\n"
+          io << "    } else {\n"
+          io << "        StatusCode::NOT_FOUND.into_response()\n"
+          io << "    }\n"
+          io << "}\n\n"
+        else
+          io << "pub async fn create_#{singular}(Form(form): Form<HashMap<String, String>>) -> Response {\n"
+          io << "    let attrs = helpers::extract_model_params(&form, \"#{singular}\");\n"
+          io << "    match #{mod}::create_#{singular}(&attrs) {\n"
+          io << "        Ok(#{singular}) => Redirect::to(&helpers::#{singular}_path(#{singular}.id)).into_response(),\n"
+          io << "        Err(_) => {\n"
+          io << "            let #{singular} = #{mod}::#{model_name}::new();\n"
+          io << "            (StatusCode::UNPROCESSABLE_ENTITY, Html(helpers::render_page(&views::render_new(&#{singular})))).into_response()\n"
+          io << "        }\n"
+          io << "    }\n"
+          io << "}\n\n"
+        end
+      when "update"
+        mod = Inflector.underscore(model_name)
+        io << "pub async fn update_#{singular}(Path(id): Path<i64>, Form(form): Form<HashMap<String, String>>) -> Response {\n"
+        io << "    match #{mod}::find_#{singular}(id) {\n"
+        io << "        Ok(mut #{singular}) => {\n"
+        io << "            let attrs = helpers::extract_model_params(&form, \"#{singular}\");\n"
+        io << "            match #{singular}.update(&attrs) {\n"
+        io << "                Ok(_) => Redirect::to(&helpers::#{singular}_path(#{singular}.id)).into_response(),\n"
+        io << "                Err(_) => (StatusCode::UNPROCESSABLE_ENTITY, Html(helpers::render_page(&views::render_edit(&#{singular})))).into_response(),\n"
+        io << "            }\n"
+        io << "        }\n"
+        io << "        Err(_) => StatusCode::NOT_FOUND.into_response(),\n"
+        io << "    }\n"
+        io << "}\n\n"
+      when "destroy"
+        mod = Inflector.underscore(model_name)
+        if nested_parent
+          parent_model = Inflector.classify(nested_parent)
+          parent_mod = Inflector.underscore(parent_model)
+          io << "pub async fn destroy_#{singular}(Path((parent_id, id)): Path<(i64, i64)>) -> Response {\n"
+          io << "    if let (Ok(#{nested_parent}), Ok(#{singular})) = (#{parent_mod}::find_#{nested_parent}(parent_id), #{mod}::find_#{singular}(id)) {\n"
+          io << "        let _ = #{singular}.delete();\n"
+          io << "        Redirect::to(&helpers::#{nested_parent}_path(#{nested_parent}.id)).into_response()\n"
+          io << "    } else {\n"
+          io << "        StatusCode::NOT_FOUND.into_response()\n"
+          io << "    }\n"
+          io << "}\n\n"
+        else
+          io << "pub async fn destroy_#{singular}(Path(id): Path<i64>) -> Response {\n"
+          io << "    match #{mod}::find_#{singular}(id) {\n"
+          io << "        Ok(#{singular}) => {\n"
+          io << "            let _ = #{singular}.delete();\n"
+          io << "            Redirect::to(&helpers::#{plural}_path()).into_response()\n"
+          io << "        }\n"
+          io << "        Err(_) => StatusCode::NOT_FOUND.into_response(),\n"
+          io << "    }\n"
+          io << "}\n\n"
+        end
+      end
+    end
+
+    # ── create_*_str helper (accepts HashMap<String, String>) ──
+    # The emitter generates create_* taking HashMap<String, String>
+    # which is what we use here. No need for additional helper.
+
+    # ── Main entry point ──
+
+    private def emit_main(output_dir : String, app_name : String)
+      io = IO::Memory.new
+      io << "use axum::{routing::{get, post}, Router};\n"
+      io << "use rusqlite::Connection;\n"
+      io << "use tower_http::services::ServeDir;\n"
+      io << "use #{app_name}::railcar;\n"
+      io << "use #{app_name}::controllers;\n"
+      app.models.each_key do |name|
+        singular = Inflector.underscore(name)
+        io << "use #{app_name}::#{singular};\n"
+      end
+      io << "use std::collections::HashMap;\n\n"
+
+      # DB init
+      io << "fn init_db() {\n"
+      io << "    let conn = Connection::open(\"#{app_name}.db\").expect(\"Failed to open database\");\n"
+      io << "    conn.execute_batch(\"PRAGMA foreign_keys = ON;\").unwrap();\n"
+      app.schemas.each do |schema|
+        all_cols = [{name: "id", type: "INTEGER"}]
+        schema.columns.each { |c| all_cols << {name: c.name, type: c.type} }
+        col_defs = all_cols.map do |c|
+          parts = "#{c[:name]} #{c[:type]}"
+          parts += " PRIMARY KEY AUTOINCREMENT" if c[:name] == "id"
+          parts += " NOT NULL" unless c[:name] == "id"
+          parts
+        end
+        io << "    conn.execute_batch(\"CREATE TABLE IF NOT EXISTS #{schema.name} (\n"
+        io << "        #{col_defs.join(",\n        ")}\n"
+        io << "    );\").unwrap();\n"
+      end
+      io << "    *railcar::DB.lock().unwrap() = Some(conn);\n"
+      io << "}\n\n"
+
+      # Seed
+      io << "fn seed_db() {\n"
+      io << "    if article::article_count().unwrap_or(0) > 0 { return; }\n"
+      seeds_path = File.join(rails_dir, "db/seeds.rb")
+      if File.exists?(seeds_path)
+        emit_rust_seeds(io, seeds_path)
+      end
+      io << "}\n\n"
+
+      # Main
+      io << "#[tokio::main]\n"
+      io << "async fn main() {\n"
+      io << "    init_db();\n"
+      io << "    seed_db();\n\n"
+
+      # Routes
+      io << "    let app = Router::new()\n"
+      app.routes.routes.each do |route|
+        singular = Inflector.singularize(route.controller)
+        handler = case route.action
+                  when "index"   then "controllers::index"
+                  when "show"    then "controllers::show_#{singular}"
+                  when "new"     then "controllers::new_#{singular}"
+                  when "edit"    then "controllers::edit_#{singular}"
+                  when "create"  then "controllers::create_#{singular}"
+                  when "update"  then "controllers::update_#{singular}"
+                  when "destroy" then "controllers::destroy_#{singular}"
+                  else next
+                  end
+
+        axum_path = route.path.gsub(/:(\w+)/) { |m| ":#{$1}" }
+        method = case route.method.downcase
+                 when "get"    then "get"
+                 when "post"   then "post"
+                 when "patch"  then "patch"
+                 when "put"    then "put"
+                 when "delete" then "delete"
+                 else "get"
+                 end
+        io << "        .route(\"#{axum_path}\", #{method}(#{handler}))\n"
+      end
+      if app.routes.root_controller
+        io << "        .route(\"/\", get(controllers::index))\n"
+      end
+      io << "        .nest_service(\"/static\", ServeDir::new(\"static\"));\n\n"
+
+      io << "    println!(\"#{app_name} running at http://localhost:3000\");\n"
+      io << "    let listener = tokio::net::TcpListener::bind(\"0.0.0.0:3000\").await.unwrap();\n"
+      io << "    axum::serve(listener, app).await.unwrap();\n"
+      io << "}\n"
+
+      File.write(File.join(output_dir, "src", "main.rs"), io.to_s)
+      puts "  src/main.rs"
+    end
+
+    private def emit_rust_seeds(io : IO, seeds_path : String)
+      source = File.read(seeds_path)
+      # Simple line-by-line seed parsing (same approach as Go)
+      current = ""
+      depth = 0
+      joined = [] of String
+      source.lines.each do |line|
+        stripped = line.strip
+        next if stripped.empty? || stripped.starts_with?("#") || stripped.starts_with?("return") || stripped.starts_with?("puts")
+        current += " " unless current.empty?
+        current += stripped
+        depth += stripped.count('(') - stripped.count(')')
+        if depth <= 0
+          joined << current
+          current = ""
+          depth = 0
+        end
+      end
+      joined << current unless current.empty?
+
+      joined.each_with_index do |stmt, idx|
+        case stmt
+        when /^(\w+)\s*=\s*(\w+)\.create!\(\s*(.+)\s*\)$/m
+          var_name = $1
+          model = $2
+          singular = Inflector.underscore(model)
+          attrs = parse_seed_attrs($3)
+          used = joined[(idx + 1)..].any? { |s| s.includes?(var_name) }
+          if used
+            io << "    let #{var_name} = #{singular}::create_#{singular}(&HashMap::from([#{attrs}])).unwrap();\n"
+          else
+            io << "    let _ = #{singular}::create_#{singular}(&HashMap::from([#{attrs}]));\n"
+          end
+        when /^(\w+)\.(\w+)\.create!\(\s*(.+)\s*\)$/m
+          parent = $1
+          assoc = $2
+          singular_assoc = Inflector.singularize(assoc)
+          model = Inflector.classify(singular_assoc)
+          singular_model = Inflector.underscore(model)
+          parent_model_name = parent.gsub(/\d+$/, "")
+          fk = "#{parent_model_name}_id"
+          attrs = parse_seed_attrs($3)
+          io << "    let _ = #{singular_model}::create_#{singular_model}(&HashMap::from([#{attrs}, (\"#{fk}\".to_string(), format!(\"{}\", #{parent}.id))]));\n"
+        end
+      end
+    end
+
+    private def parse_seed_attrs(raw : String) : String
+      raw.gsub(/\s+/, " ").scan(/(?<=\A|,\s)(\w+):\s*("(?:[^"\\]|\\.)*")/).map do |m|
+        "(\"#{m[1]}\".to_string(), #{m[2]}.to_string())"
+      end.join(", ")
     end
 
     # ── Model tests ──
