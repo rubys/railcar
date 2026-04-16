@@ -92,11 +92,13 @@ module Railcar
       edition = "2021"
 
       [dependencies]
-      axum = "0.8"
+      axum = { version = "0.8", features = ["ws"] }
       chrono = "0.4"
+      futures-util = "0.3"
       lazy_static = "1.5"
       rusqlite = { version = "0.32", features = ["bundled"] }
       serde = { version = "1", features = ["derive"] }
+      serde_json = "1"
       tokio = { version = "1", features = ["full"] }
       tower-http = { version = "0.6", features = ["fs"] }
 
@@ -834,6 +836,7 @@ module Railcar
       io << "use tower_http::services::ServeDir;\n"
       io << "use #{app_name}::railcar;\n"
       io << "use #{app_name}::controllers;\n"
+      io << "use #{app_name}::views;\n"
       app.models.each_key do |name|
         singular = Inflector.underscore(name)
         io << "use #{app_name}::#{singular};\n"
@@ -874,6 +877,36 @@ module Railcar
       io << "async fn main() {\n"
       io << "    init_db();\n"
       io << "    seed_db();\n\n"
+
+      # Register partial renderers
+      app.models.each do |name, model|
+        singular = Inflector.underscore(name)
+        plural = Inflector.pluralize(singular)
+        partial_path = File.join(rails_dir, "app/views/#{plural}/_#{singular}.html.erb")
+        if File.exists?(partial_path)
+          parent_assoc = model.associations.find { |a| a.kind == :belongs_to }
+          if parent_assoc
+            parent_name = parent_assoc.name
+            parent_mod = Inflector.underscore(Inflector.classify(parent_name))
+            io << "    railcar::register_partial(\"#{name}\", |id| {\n"
+            io << "        if let Ok(rec) = #{singular}::find_#{singular}(id) {\n"
+            io << "            if let Ok(parent) = rec.#{parent_name}() {\n"
+            io << "                return views::render_#{singular}_partial(&parent, &rec);\n"
+            io << "            }\n"
+            io << "        }\n"
+            io << "        String::new()\n"
+            io << "    });\n"
+          else
+            io << "    railcar::register_partial(\"#{name}\", |id| {\n"
+            io << "        if let Ok(rec) = #{singular}::find_#{singular}(id) {\n"
+            io << "            return views::render_#{singular}_partial(&rec);\n"
+            io << "        }\n"
+            io << "        String::new()\n"
+            io << "    });\n"
+          end
+        end
+      end
+      io << "\n"
 
       # Routes — group by path to combine methods and avoid Axum overlap errors
       io << "    let app = Router::new()\n"
@@ -920,6 +953,7 @@ module Railcar
       if app.routes.root_controller
         io << "        .route(\"/\", get(controllers::index))\n"
       end
+      io << "        .route(\"/cable\", get(railcar::cable_handler))\n"
       io << "        .nest_service(\"/static\", ServeDir::new(\"static\"));\n\n"
 
       io << "    println!(\"#{app_name} running at http://localhost:3000\");\n"

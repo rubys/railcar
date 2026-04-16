@@ -101,7 +101,9 @@ module Railcar
 
         # Delete
         io << "    pub fn delete(&self) -> Result<(), String> {\n"
-        io << "        railcar::delete_by_id(\"#{table_name}\", self.id)\n"
+        io << "        railcar::delete_by_id(\"#{table_name}\", self.id)?;\n"
+        io << "        railcar::Broadcaster::after_delete(self);\n"
+        io << "        Ok(())\n"
         io << "    }\n\n"
 
         # Associations
@@ -190,7 +192,7 @@ module Railcar
         io << "                    \"UPDATE #{table_name} SET #{set_clauses.join(", ")} WHERE id = ?\",\n"
         io << "                    params![#{param_names.join(", ")}],\n"
         io << "                ).map(|_| ())\n"
-        io << "            })\n"
+        io << "            })?\n"
         io << "        } else {\n"
 
         # Insert — clone values to avoid borrow issues
@@ -220,8 +222,9 @@ module Railcar
         io << "            })?;\n"
         io << "            self.id = id;\n"
         io << "            self.persisted = true;\n"
-        io << "            Ok(())\n"
-        io << "        }\n"
+        io << "        };\n"
+        io << "        railcar::Broadcaster::after_save(self);\n"
+        io << "        Ok(())\n"
         io << "    }\n\n"
       end
 
@@ -548,11 +551,119 @@ module Railcar
       end
 
       private def emit_broadcast_callbacks(io : IO, class_name : String, broadcast_ast : Crystal::ASTNode?)
-        # For now, empty implementations — will be filled in when WebSocket is added
+        singular = Inflector.underscore(class_name)
+        table_name = Inflector.pluralize(singular)
+
+        after_save_stmts = [] of Crystal::ASTNode
+        after_delete_stmts = [] of Crystal::ASTNode
+
+        if broadcast_ast
+          broadcast_body = case broadcast_ast
+                          when Crystal::ClassDef
+                            case broadcast_ast.as(Crystal::ClassDef).body
+                            when Crystal::Expressions then broadcast_ast.as(Crystal::ClassDef).body.as(Crystal::Expressions).expressions
+                            else [broadcast_ast.as(Crystal::ClassDef).body]
+                            end
+                          else [] of Crystal::ASTNode
+                          end
+          broadcast_body.each do |expr|
+            collect_broadcast_callbacks(expr, after_save_stmts, after_delete_stmts)
+          end
+        end
+
         io << "impl railcar::Broadcaster for #{class_name} {\n"
-        io << "    fn after_save(&self) {}\n"
-        io << "    fn after_delete(&self) {}\n"
+        io << "    fn after_save(&self) {\n"
+        after_save_stmts.each { |stmt| emit_rust_broadcast(stmt, io, class_name, table_name) }
+        io << "    }\n"
+        io << "    fn after_delete(&self) {\n"
+        after_delete_stmts.each { |stmt| emit_rust_broadcast(stmt, io, class_name, table_name) }
+        io << "    }\n"
         io << "}\n"
+      end
+
+      private def collect_broadcast_callbacks(node : Crystal::ASTNode,
+                                               save_stmts : Array(Crystal::ASTNode),
+                                               delete_stmts : Array(Crystal::ASTNode))
+        case node
+        when Crystal::Call
+          if node.name == "after_save" && node.block
+            save_stmts << node.block.not_nil!.body
+          elsif node.name == "after_destroy" && node.block
+            delete_stmts << node.block.not_nil!.body
+          end
+        when Crystal::Expressions
+          node.expressions.each { |e| collect_broadcast_callbacks(e, save_stmts, delete_stmts) }
+        end
+      end
+
+      private def emit_rust_broadcast(node : Crystal::ASTNode, io : IO, class_name : String, table_name : String)
+        case node
+        when Crystal::Expressions
+          node.expressions.each { |e| emit_rust_broadcast(e, io, class_name, table_name) }
+        when Crystal::Call
+          name = node.name
+          case name
+          when "broadcast_replace_to", "broadcast_prepend_to", "broadcast_remove_to"
+            func = case name
+                   when "broadcast_replace_to" then "railcar::broadcast_replace_to"
+                   when "broadcast_prepend_to" then "railcar::broadcast_prepend_to"
+                   when "broadcast_remove_to"  then "railcar::broadcast_remove_to"
+                   else "railcar::broadcast_replace_to"
+                   end
+
+            channel = node.args.first? ? emit_broadcast_expr(node.args.first, class_name) : "\"\""
+            target = node.args[1]? ? emit_broadcast_expr(node.args[1], class_name) : "\"\""
+
+            if obj = node.obj
+              # Called on an association (e.g., article.broadcast_replace_to)
+              if obj.is_a?(Crystal::Call)
+                assoc_name = obj.as(Crystal::Call).name
+                assoc_model = Inflector.classify(assoc_name)
+                assoc_table = Inflector.pluralize(Inflector.underscore(assoc_model))
+                io << "        if let Ok(#{assoc_name}) = self.#{assoc_name}() {\n"
+                io << "            #{func}(\"#{assoc_table}\", #{assoc_name}.id, \"#{assoc_model}\", &#{channel}, &#{target});\n"
+                io << "        }\n"
+              end
+            else
+              if name == "broadcast_remove_to"
+                io << "        #{func}(\"#{table_name}\", self.id, &#{channel}, &#{target});\n"
+              else
+                io << "        #{func}(\"#{table_name}\", self.id, \"#{class_name}\", &#{channel}, &#{target});\n"
+              end
+            end
+          end
+        when Crystal::ExceptionHandler
+          emit_rust_broadcast(node.body, io, class_name, table_name)
+        end
+      end
+
+      private def emit_broadcast_expr(node : Crystal::ASTNode, class_name : String) : String
+        case node
+        when Crystal::StringLiteral
+          node.value.inspect
+        when Crystal::StringInterpolation
+          format_parts = [] of String
+          args = [] of String
+          node.expressions.each do |part|
+            case part
+            when Crystal::StringLiteral
+              format_parts << part.value
+            when Crystal::Call
+              format_parts << "{}"
+              args << "self.#{part.name}"
+            else
+              format_parts << "{}"
+              args << emit_broadcast_expr(part, class_name)
+            end
+          end
+          if args.empty?
+            "\"#{format_parts.join}\".to_string()"
+          else
+            "format!(\"#{format_parts.join}\", #{args.join(", ")})"
+          end
+        else
+          "\"\"".inspect
+        end
       end
 
       private def map_type(crystal_type : String) : String
