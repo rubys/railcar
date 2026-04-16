@@ -199,9 +199,20 @@ module Railcar
     end
 
     # Normalize a Crystal type name into a MethodMap receiver-type name.
-    private def normalize_crystal_type(crystal_type : String) : String
+    # Exposed at class level so emitters that already have semantic type info
+    # (Cr2Py, Cr2Ts, Cr2Ex) can share the same normalization.
+    def self.normalize_crystal_type(crystal_type : String) : String
       # Strip nullable suffix for lookup purposes.
       ct = crystal_type.chomp("?")
+      # Array(X) → Array; Hash(K, V) → Hash
+      return "Array" if ct.starts_with?("Array(")
+      return "Hash" if ct.starts_with?("Hash(")
+      # Union types like "String | Nil" — pick the non-Nil branch if there's one
+      if ct.includes?(" | ")
+        parts = ct.split(" | ").reject { |p| p == "Nil" || p == "NoReturn" }
+        return normalize_crystal_type(parts.first) if parts.size == 1
+        return "Any"
+      end
       case ct
       when "String"             then "String"
       when "Int32", "Int64",
@@ -211,6 +222,10 @@ module Railcar
       when "Bytes"              then "Any"
       else                           ct # already a model name or similar
       end
+    end
+
+    private def normalize_crystal_type(crystal_type : String) : String
+      TypeResolver.normalize_crystal_type(crystal_type)
     end
   end
 end

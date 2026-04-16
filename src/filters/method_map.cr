@@ -258,4 +258,20 @@ module Railcar
       # Fall back to "Any"
       table[{"Any", method_name}]?
   end
+
+  # Apply a mapping's substitution pattern, given the emitted receiver
+  # and already-emitted argument strings. RECV, ARG0, ARG1 placeholders
+  # are substituted; a leading "." in the pattern is treated as method
+  # access on the receiver (prepends the receiver automatically).
+  def self.apply_mapping(mapping : MethodMapping, recv : String, args : Array(String)) : String
+    result = mapping.target
+    result = result.gsub("RECV", recv)
+    result = result.gsub("ARG0", args[0]? || "")
+    result = result.gsub("ARG1", args[1]? || "")
+    if result.starts_with?(".")
+      "#{recv}#{result}"
+    else
+      result
+    end
+  end
 end

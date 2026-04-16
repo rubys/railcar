@@ -15,20 +15,24 @@ require "compiler/crystal/syntax"
 require "./erb_compiler"
 require "./source_parser"
 require "./inflector"
+require "./type_resolver"
+require "../filters/method_map"
 
 module Railcar
   class EjsConverter
     getter template_name : String
     getter controller : String
     getter known_fields : Set(String)
+    getter resolver : TypeResolver?
 
-    def initialize(@template_name, @controller, @known_fields = Set(String).new)
+    def initialize(@template_name, @controller, @known_fields = Set(String).new, @resolver = nil)
     end
 
     def self.convert_file(path : String, template_name : String, controller : String,
                           view_filters : Array(Crystal::Transformer) = [] of Crystal::Transformer,
-                          known_fields : Set(String) = Set(String).new) : String
-      new(template_name, controller, known_fields).convert(File.read(path), path, view_filters)
+                          known_fields : Set(String) = Set(String).new,
+                          resolver : TypeResolver? = nil) : String
+      new(template_name, controller, known_fields, resolver).convert(File.read(path), path, view_filters)
     end
 
     def convert(source : String, path : String = "",
@@ -554,6 +558,14 @@ module Railcar
                    {"id", "errors", "length", "persisted"}.includes?(ts_name)
         if args.empty? && is_field
           return "#{obj_str}.#{ts_name}"
+        end
+        # MethodMap fallback: consult TypeResolver for Ruby→TS translations
+        # not already handled above (e.g., gsub, start_with?, downcase).
+        if r = @resolver
+          mapping = Railcar.lookup_method(:typescript, r.resolve(obj), name)
+          if mapping
+            return Railcar.apply_mapping(mapping, obj_str, args)
+          end
         end
         return "#{obj_str}.#{ts_name}(#{args.join(", ")})"
       end

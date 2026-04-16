@@ -13,6 +13,7 @@ require "./inflector"
 require "./source_parser"
 require "./fixture_loader"
 require "./eex_converter"
+require "./type_resolver"
 require "../filters/instance_var_to_local"
 require "../filters/rails_helpers"
 require "../filters/link_to_path_helper"
@@ -561,8 +562,10 @@ module Railcar
           basename = filename.sub(/\.html\.erb$/, "")
           eex_name = "#{basename}.eex"
 
+          resolver = TypeResolver.new(app)
           eex_source = EexConverter.convert_file(erb_path, basename, controller_name,
-            view_filters: build_view_filters, app_module: app_module, known_fields: all_column_names)
+            view_filters: build_view_filters, app_module: app_module,
+            known_fields: all_column_names, resolver: resolver)
 
           File.write(File.join(views_dir, eex_name), eex_source)
           puts "  priv/views/#{Inflector.pluralize(controller_name)}/#{eex_name}"

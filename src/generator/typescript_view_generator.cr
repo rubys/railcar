@@ -8,6 +8,7 @@
 
 require "./inflector"
 require "./ejs_converter"
+require "./type_resolver"
 require "../filters/instance_var_to_local"
 require "../filters/rails_helpers"
 require "../filters/link_to_path_helper"
@@ -43,8 +44,10 @@ module Railcar
           basename = filename.sub(/\.html\.erb$/, "")
           ejs_name = "#{basename}.ejs"
 
+          resolver = TypeResolver.new(app)
           ejs_source = EjsConverter.convert_file(erb_path, basename, controller_name,
-            view_filters: build_view_filters, known_fields: all_column_names)
+            view_filters: build_view_filters, known_fields: all_column_names,
+            resolver: resolver)
 
           File.write(File.join(controller_views_dir, ejs_name), ejs_source)
           puts "  views/#{Inflector.pluralize(controller_name)}/#{ejs_name}"

@@ -10,6 +10,8 @@ require "compiler/crystal/syntax"
 require "./erb_compiler"
 require "./source_parser"
 require "./inflector"
+require "./type_resolver"
+require "../filters/method_map"
 
 module Railcar
   class EexConverter
@@ -17,14 +19,18 @@ module Railcar
     getter controller : String
     getter app_module : String
     getter known_fields : Set(String)
+    getter resolver : TypeResolver?
 
-    def initialize(@template_name, @controller, @app_module = "Blog", @known_fields = Set(String).new)
+    def initialize(@template_name, @controller, @app_module = "Blog",
+                   @known_fields = Set(String).new, @resolver = nil)
     end
 
     def self.convert_file(path : String, template_name : String, controller : String,
                           view_filters : Array(Crystal::Transformer) = [] of Crystal::Transformer,
-                          app_module : String = "Blog", known_fields : Set(String) = Set(String).new) : String
-      new(template_name, controller, app_module, known_fields).convert(File.read(path), path, view_filters)
+                          app_module : String = "Blog",
+                          known_fields : Set(String) = Set(String).new,
+                          resolver : TypeResolver? = nil) : String
+      new(template_name, controller, app_module, known_fields, resolver).convert(File.read(path), path, view_filters)
     end
 
     def convert(source : String, path : String = "",
@@ -489,6 +495,14 @@ module Railcar
         # Known helper methods on objects
         if name == "full_message"
           return "#{@app_module}.Helpers.error_full_message(#{obj_str})"
+        end
+        # MethodMap fallback for Ruby standard-library methods not handled above
+        # (e.g., String.downcase(s), Enum.join(list, sep)).
+        if r = @resolver
+          mapping = Railcar.lookup_method(:elixir, r.resolve(obj), name)
+          if mapping
+            return Railcar.apply_mapping(mapping, obj_str, args)
+          end
         end
         # Association/method calls → Module.function(obj) pattern
         # Infer module from variable name: article → Blog.Article

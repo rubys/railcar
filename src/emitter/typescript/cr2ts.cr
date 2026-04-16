@@ -11,6 +11,8 @@
 #   - Validations, associations, dependent destroy
 
 require "compiler/crystal/syntax"
+require "../../filters/method_map"
+require "../../generator/type_resolver"
 
 module Railcar
   module Cr2Ts
@@ -330,6 +332,19 @@ module Railcar
 
         # Generic method call
         if obj
+          # MethodMap fallback (uses semantic receiver type when available) —
+          # catches Ruby methods not handled by the hardcoded cases above
+          # (e.g., downcase, upcase, include?, start_with?).
+          recv_type = "Any"
+          if t = obj.type?
+            recv_type = Railcar::TypeResolver.normalize_crystal_type(t.to_s)
+          end
+          if mapping = Railcar.lookup_method(:typescript, recv_type, name)
+            obj_str = emit_expr(obj)
+            obj_str = "this" if obj_str == "self"
+            arg_strs = node.args.map { |a| emit_expr(a) }
+            return Railcar.apply_mapping(mapping, obj_str, arg_strs)
+          end
           obj_str = emit_expr(obj)
           # self → this
           obj_str = "this" if obj_str == "self"

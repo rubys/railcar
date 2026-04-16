@@ -200,6 +200,42 @@ describe Railcar::TypeResolver do
     end
   end
 
+  describe ".normalize_crystal_type (shared with typed-AST emitters)" do
+    it "normalizes base types" do
+      Railcar::TypeResolver.normalize_crystal_type("String").should eq "String"
+      Railcar::TypeResolver.normalize_crystal_type("Int32").should eq "Numeric"
+      Railcar::TypeResolver.normalize_crystal_type("Int64").should eq "Numeric"
+      Railcar::TypeResolver.normalize_crystal_type("Float64").should eq "Numeric"
+      Railcar::TypeResolver.normalize_crystal_type("Bool").should eq "Bool"
+    end
+
+    it "normalizes Array(T) to Array" do
+      Railcar::TypeResolver.normalize_crystal_type("Array(String)").should eq "Array"
+      Railcar::TypeResolver.normalize_crystal_type("Array(Comment)").should eq "Array"
+    end
+
+    it "normalizes Hash(K, V) to Hash" do
+      Railcar::TypeResolver.normalize_crystal_type("Hash(String, Int32)").should eq "Hash"
+    end
+
+    it "strips nullable suffix" do
+      Railcar::TypeResolver.normalize_crystal_type("String?").should eq "String"
+    end
+
+    it "picks the non-Nil branch of a nil-union" do
+      Railcar::TypeResolver.normalize_crystal_type("String | Nil").should eq "String"
+      Railcar::TypeResolver.normalize_crystal_type("Int32 | Nil").should eq "Numeric"
+    end
+
+    it "falls back to Any for unresolvable unions" do
+      Railcar::TypeResolver.normalize_crystal_type("String | Int32").should eq "Any"
+    end
+
+    it "passes model names through unchanged" do
+      Railcar::TypeResolver.normalize_crystal_type("Article").should eq "Article"
+    end
+  end
+
   describe "edge cases" do
     it "returns Any for an unknown association chain" do
       r = Railcar::TypeResolver.new(app)

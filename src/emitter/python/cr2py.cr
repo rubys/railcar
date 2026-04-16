@@ -11,6 +11,8 @@ require "./py_ast"
 require "./filters/db_filter"
 require "./type_index"
 require "./filters/pyast_dunder_filter"
+require "../../filters/method_map"
+require "../../generator/type_resolver"
 
 module Cr2Py
   PYTHON_KEYWORDS = %w[False True None and as assert async await break class
@@ -973,6 +975,21 @@ module Cr2Py
         stripped = name.rstrip('!').rstrip('?')
         if obj.is_a?(Crystal::Call) && obj.name == "class" && is_ivar_of_current_class?(stripped)
           return "#{to_expr(obj)}.#{stripped}"
+        end
+      end
+
+      # MethodMap fallback (runs after all hardcoded cr2py handlers) —
+      # picks up Ruby methods not otherwise translated (e.g., downcase,
+      # upcase, include?, start_with?) using the semantic receiver type.
+      if obj && !node.block
+        recv_type = "Any"
+        if t = obj.type?
+          recv_type = Railcar::TypeResolver.normalize_crystal_type(t.to_s)
+        end
+        if mapping = Railcar.lookup_method(:python, recv_type, name)
+          obj_str = to_expr(obj)
+          arg_strs = args.map { |a| to_expr(a) }
+          return Railcar.apply_mapping(mapping, obj_str, arg_strs)
         end
       end
 

@@ -242,16 +242,9 @@ module Railcar
       # MethodMap lookup, now driven by TypeResolver.
       if obj
         obj_str = to_rust(obj)
-        recv_type = resolver.resolve(obj)
-        mapping = Railcar.lookup_method(:rust, recv_type, name)
+        mapping = Railcar.lookup_method(:rust, resolver.resolve(obj), name)
         if mapping
-          result = mapping.target.gsub("RECV", obj_str)
-          result = result.gsub("ARG0", args[0]? || "")
-          result = result.gsub("ARG1", args[1]? || "")
-          if result.starts_with?(".")
-            return "#{obj_str}#{result}"
-          end
-          return result
+          return Railcar.apply_mapping(mapping, obj_str, args)
         end
       end
 

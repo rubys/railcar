@@ -134,7 +134,7 @@ module Railcar
         obj_str = to_go(obj)
         mapping = Railcar.lookup_method(:go, infer_type(obj), name)
         if mapping
-          return apply_mapping(mapping, obj_str, args)
+          return Railcar.apply_mapping(mapping, obj_str, args)
         end
       else
         mapping = Railcar.lookup_method(:go, "Any", name)
@@ -440,19 +440,6 @@ module Railcar
       else
         "Any"
       end
-    end
-
-    # Apply a MethodMapping pattern, substituting RECV, ARG0, ARG1
-    private def apply_mapping(mapping : Railcar::MethodMapping, recv : String, args : Array(String)) : String
-      result = mapping.target
-      result = result.gsub("RECV", recv)
-      result = result.gsub("ARG0", args[0]? || "")
-      result = result.gsub("ARG1", args[1]? || "")
-      # If pattern starts with "." it's a method/property on the receiver
-      if result.starts_with?(".")
-        return "#{recv}#{result}"
-      end
-      result
     end
 
     private def go_field_name(name : String) : String

@@ -10,6 +10,8 @@
 require "compiler/crystal/syntax"
 require "../../generator/inflector"
 require "../../generator/schema_extractor"
+require "../../generator/type_resolver"
+require "../../filters/method_map"
 
 module Railcar
   module Cr2Ex
@@ -433,6 +435,20 @@ module Railcar
         when "__redirect_pipe__"
           path = args.first? || "\"/\""
           return "conn |> put_resp_header(\"location\", #{path}) |> send_resp(302, \"\")"
+        end
+
+        # MethodMap fallback — handles Ruby standard-library methods not
+        # covered by the hardcoded cases above (downcase, upcase, include?,
+        # start_with?, end_with?, gsub, split, etc.).
+        if obj
+          recv_type = "Any"
+          if t = obj.type?
+            recv_type = Railcar::TypeResolver.normalize_crystal_type(t.to_s)
+          end
+          if mapping = Railcar.lookup_method(:elixir, recv_type, name)
+            obj_str = emit_value(obj)
+            return Railcar.apply_mapping(mapping, obj_str, args)
+          end
         end
 
         # Generic call
