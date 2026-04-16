@@ -3,15 +3,17 @@
 # Pipeline:
 #   1. Build Crystal AST: runtime source + model ASTs (via filter chain)
 #   2. program.semantic() → types on all nodes
-#   3. Emit models via Cr2Go emitter, tests via Prism AST walking
+#   3. Emit models via Cr2Go emitter, views via GoViewEmitter, tests via AST walking
 #
-# Target: net/http + database/sql + modernc.org/sqlite + html/template.
+# Target: net/http + database/sql + modernc.org/sqlite.
+# Views are Go functions returning strings (no template engine).
 
 require "./app_model"
 require "./schema_extractor"
 require "./inflector"
 require "./source_parser"
 require "./fixture_loader"
+require "./erb_compiler"
 require "../semantic"
 require "../filters/model_boilerplate_python"
 require "../filters/broadcasts_to"
@@ -23,8 +25,10 @@ require "../filters/button_to_path_helper"
 require "../filters/render_to_partial"
 require "../filters/form_to_html"
 require "../filters/turbo_stream_connect"
+require "../filters/view_cleanup"
+require "../filters/buf_to_interpolation"
 require "../emitter/go/cr2go"
-require "./gotemplate_converter"
+require "./go_view_emitter"
 
 module Railcar
   class GoGenerator
@@ -139,58 +143,19 @@ module Railcar
       io << "package helpers\n\n"
       io << "import (\n"
       io << "\t\"fmt\"\n"
-      io << "\t\"html/template\"\n"
       io << "\t\"net/http\"\n"
       io << "\t\"net/url\"\n"
-      io << "\t\"path/filepath\"\n"
+      io << "\t\"reflect\"\n"
       io << "\t\"strings\"\n"
       io << ")\n\n"
-
-      io << "var Templates *template.Template\n\n"
-
-      io << "func InitTemplates() {\n"
-      io << "\tfuncMap := template.FuncMap{\n"
-      io << "\t\t\"linkTo\":          LinkTo,\n"
-      io << "\t\t\"buttonTo\":        ButtonTo,\n"
-      io << "\t\t\"turboStreamFrom\": TurboStreamFrom,\n"
-      io << "\t\t\"truncate\":        Truncate,\n"
-      io << "\t\t\"domID\":           DomID,\n"
-      io << "\t\t\"pluralize\":       Pluralize,\n"
-      io << "\t\t\"formWithOpenTag\": FormWithOpenTag,\n"
-      io << "\t\t\"formSubmitTag\":   FormSubmitTag,\n"
-
-      # Route helper functions
-      app.routes.helpers.each do |helper|
-        func_name = helper.name.split("_").map(&.capitalize).join("")
-        func_name = func_name[0].downcase + func_name[1..] + "Path"
-        io << "\t\t#{func_name.inspect}: #{func_name.capitalize[0]}#{func_name[1..]}Func,\n"
-      end
-
-      io << "\t}\n"
-      io << "\tt := template.New(\"\").Funcs(funcMap)\n"
-      io << "\tglobs := []string{\"templates/*/*.gohtml\", \"templates/*.gohtml\", \"templates/*/*/*.gohtml\"}\n"
-      io << "\tfor _, g := range globs {\n"
-      io << "\t\tif files, _ := filepath.Glob(g); len(files) > 0 {\n"
-      io << "\t\t\tvar err error\n"
-      io << "\t\t\tt, err = t.ParseGlob(g)\n"
-      io << "\t\t\tif err != nil { fmt.Println(\"Template parse error:\", err); }\n"
-      io << "\t\t}\n"
-      io << "\t}\n"
-      io << "\tTemplates = t\n"
-      io << "}\n\n"
 
       # Route helpers
       app.routes.helpers.each do |helper|
         func_name = helper.name.split("_").map(&.capitalize).join("") + "Path"
         if helper.params.empty?
-          io << "func #{func_name}() string { return #{helper.path.inspect} }\n"
-          io << "func #{func_name}Func() string { return #{helper.path.inspect} }\n\n"
+          io << "func #{func_name}() string { return #{helper.path.inspect} }\n\n"
         else
-          param_names = helper.params.map_with_index do |p, i|
-            p == "id" ? (i == 0 ? "model" : "child") : p.chomp("_id")
-          end
-
-          # Function version for controllers (takes struct)
+          # Function version (takes struct with ID)
           first_with_params = app.routes.helpers.find { |h| !h.params.empty? }
           io << "type HasID interface { ID() int64 }\n" if helper.params.size == 1 && first_with_params && helper == first_with_params
           io << "func #{func_name}(args ...HasID) string {\n"
@@ -206,36 +171,35 @@ module Railcar
           format_args = helper.params.map_with_index { |_, i| "args[#{i}].ID()" }.join(", ")
           io << "\treturn fmt.Sprintf(#{path_expr.inspect}, #{format_args})\n"
           io << "}\n\n"
-
-          # FuncMap version (same)
-          io << "func #{func_name}Func(args ...HasID) string { return #{func_name}(args...) }\n\n"
         end
       end
 
       # View helpers
       io << <<-GO
-      func LinkTo(text, url string, args ...string) template.HTML {
+      func LinkTo(text, url string, args ...string) string {
         cls := ""
         if len(args) > 0 { cls = fmt.Sprintf(` class="%s"`, args[0]) }
-        return template.HTML(fmt.Sprintf(`<a href="%s"%s>%s</a>`, url, cls, text))
+        return fmt.Sprintf(`<a href="%s"%s>%s</a>`, url, cls, text)
       }
 
-      func ButtonTo(text, url string, args ...string) template.HTML {
+      func ButtonTo(text, url string, args ...string) string {
         method := "post"
+        formCls := ""
         cls := ""
         confirm := ""
         for i, a := range args {
           switch i {
           case 0: method = a
-          case 1: cls = fmt.Sprintf(` class="%s"`, a)
-          case 2: confirm = fmt.Sprintf(` data-turbo-confirm="%s"`, a)
+          case 1: formCls = fmt.Sprintf(` class="%s"`, a)
+          case 2: cls = fmt.Sprintf(` class="%s"`, a)
+          case 3: confirm = fmt.Sprintf(` data-turbo-confirm="%s"`, a)
           }
         }
-        return template.HTML(fmt.Sprintf(`<form method="post" action="%s"%s><input type="hidden" name="_method" value="%s"><button type="submit"%s>%s</button></form>`, url, confirm, method, cls, text))
+        return fmt.Sprintf(`<form method="post" action="%s"%s%s><input type="hidden" name="_method" value="%s"><button type="submit"%s>%s</button></form>`, url, formCls, confirm, method, cls, text)
       }
 
-      func TurboStreamFrom(channel string) template.HTML {
-        return template.HTML(fmt.Sprintf(`<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="%s"></turbo-cable-stream-source>`, channel))
+      func TurboStreamFrom(channel string) string {
+        return fmt.Sprintf(`<turbo-cable-stream-source channel="Turbo::StreamsChannel" signed-stream-name="%s"></turbo-cable-stream-source>`, channel)
       }
 
       func Truncate(text string, args ...int) string {
@@ -258,12 +222,17 @@ module Railcar
         return fmt.Sprintf("%s_%d", name, obj.ID())
       }
 
+      func SafeLen(val any, _ ...error) int {
+        if val == nil { return 0 }
+        return reflect.ValueOf(val).Len()
+      }
+
       func Pluralize(count int, singular string) string {
         if count == 1 { return fmt.Sprintf("%d %s", count, singular) }
         return fmt.Sprintf("%d %ss", count, singular)
       }
 
-      func FormWithOpenTag(obj HasIDAndName, args ...string) template.HTML {
+      func FormWithOpenTag(obj HasIDAndName, args ...string) string {
         name := strings.ToLower(fmt.Sprintf("%T", obj))
         if i := strings.LastIndex(name, "."); i >= 0 { name = name[i+1:] }
         name = strings.TrimPrefix(name, "*")
@@ -271,12 +240,12 @@ module Railcar
         cls := ""
         if len(args) > 0 { cls = fmt.Sprintf(` class="%s"`, args[0]) }
         if obj.ID() > 0 {
-          return template.HTML(fmt.Sprintf(`<form action="/%s/%d" method="post"%s><input type="hidden" name="_method" value="patch">`, plural, obj.ID(), cls))
+          return fmt.Sprintf(`<form action="/%s/%d" method="post"%s><input type="hidden" name="_method" value="patch">`, plural, obj.ID(), cls)
         }
-        return template.HTML(fmt.Sprintf(`<form action="/%s" method="post"%s>`, plural, cls))
+        return fmt.Sprintf(`<form action="/%s" method="post"%s>`, plural, cls)
       }
 
-      func FormSubmitTag(obj HasIDAndName, args ...string) template.HTML {
+      func FormSubmitTag(obj HasIDAndName, args ...string) string {
         name := fmt.Sprintf("%T", obj)
         if i := strings.LastIndex(name, "."); i >= 0 { name = name[i+1:] }
         name = strings.TrimPrefix(name, "*")
@@ -284,26 +253,33 @@ module Railcar
         if len(args) > 0 { cls = fmt.Sprintf(` class="%s"`, args[0]) }
         action := "Create"
         if obj.ID() > 0 { action = "Update" }
-        return template.HTML(fmt.Sprintf(`<input type="submit" value="%s %s"%s>`, action, name, cls))
+        return fmt.Sprintf(`<input type="submit" value="%s %s"%s>`, action, name, cls)
       }
 
-      func RenderView(w http.ResponseWriter, tmpl string, data map[string]any) {
-        RenderViewStatus(w, tmpl, data, 200)
+      var layout = `<!DOCTYPE html>
+      <html>
+      <head>
+        <title>Blog</title>
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <meta name="action-cable-url" content="/cable">
+        <link rel="stylesheet" href="/static/app.css">
+        <script type="module" src="/static/turbo.min.js"></script>
+      </head>
+      <body>
+        <main class="container mx-auto mt-28 px-5 flex flex-col">
+          %s
+        </main>
+      </body>
+      </html>`
+
+      func RenderPage(w http.ResponseWriter, content string) {
+        RenderPageStatus(w, content, 200)
       }
 
-      func RenderViewStatus(w http.ResponseWriter, tmpl string, data map[string]any, status int) {
-        // Render the content template
-        var content strings.Builder
-        name := "templates/" + tmpl + ".gohtml"
-        if err := Templates.ExecuteTemplate(&content, name, data); err != nil {
-          http.Error(w, err.Error(), 500)
-          return
-        }
-        // Render layout
-        layoutData := map[string]any{"Title": "Blog", "Content": template.HTML(content.String())}
+      func RenderPageStatus(w http.ResponseWriter, content string, status int) {
         w.Header().Set("Content-Type", "text/html")
         w.WriteHeader(status)
-        Templates.ExecuteTemplate(w, "templates/layouts/application.gohtml", layoutData)
+        fmt.Fprintf(w, layout, content)
       }
 
       func ExtractModelParams(form url.Values, model string) map[string]any {
@@ -318,7 +294,6 @@ module Railcar
         return result
       }
 
-      var _ = filepath.Base
       GO
 
       File.write(File.join(helpers_dir, "helpers.go"), io.to_s)
@@ -329,33 +304,125 @@ module Railcar
 
     private def emit_views(output_dir : String, app_name : String)
       rails_views = File.join(rails_dir, "app/views")
+      views_dir = File.join(output_dir, "views")
+      Dir.mkdir_p(views_dir)
 
       app.controllers.each do |info|
         controller_name = Inflector.underscore(info.name).chomp("_controller")
-        template_dir = File.join(rails_views, Inflector.pluralize(controller_name))
+        singular = Inflector.singularize(controller_name)
+        plural = Inflector.pluralize(controller_name)
+        template_dir = File.join(rails_views, plural)
         next unless Dir.exists?(template_dir)
 
-        views_dir = File.join(output_dir, "templates/#{Inflector.pluralize(controller_name)}")
-        Dir.mkdir_p(views_dir)
+        emitter = GoViewEmitter.new(controller_name, all_column_names)
+        io = IO::Memory.new
+        io << "package views\n\n"
+        io << "import (\n"
+        io << "\t\"fmt\"\n"
+        io << "\t\"strings\"\n"
+        io << "\t\"#{app_name}/helpers\"\n"
+        io << "\t\"#{app_name}/models\"\n"
+        io << ")\n\n"
 
         Dir.glob(File.join(template_dir, "*.html.erb")).sort.each do |erb_path|
-          filename = File.basename(erb_path)
-          basename = filename.sub(/\.html\.erb$/, "")
-          tmpl_name = "#{basename}.gohtml"
+          basename = File.basename(erb_path, ".html.erb")
+          next if basename.ends_with?(".json") # skip JSON templates
 
-          tmpl_source = GoTemplateConverter.convert_file(erb_path, basename, controller_name,
-            view_filters: build_view_filters, known_fields: all_column_names)
+          is_partial = basename.starts_with?("_")
+          func_name = if is_partial
+                        "Render#{basename.lchop("_").split("_").map(&.capitalize).join("")}Partial"
+                      else
+                        "Render#{basename.split("_").map(&.capitalize).join("")}"
+                      end
 
-          File.write(File.join(views_dir, tmpl_name), tmpl_source)
-          puts "  templates/#{Inflector.pluralize(controller_name)}/#{tmpl_name}"
+          begin
+            # ERB → Ruby _buf code → Crystal AST
+            erb_source = File.read(erb_path)
+            ruby_code = ErbCompiler.new(erb_source).src
+            ast = SourceParser.parse_source(ruby_code, "template.rb")
+
+            # Apply shared view filters
+            build_view_filters.each { |f| ast = ast.transform(f) }
+
+            # Apply cleanup and interpolation consolidation
+            ast = ast.transform(ViewCleanup.new)
+            var_names = [singular, plural, "_buf", "notice", "flash", "form"]
+            # Add model names from belongs_to associations so they're treated as variables
+            model_info = app.models[Inflector.classify(singular)]?
+            if model_info
+              model_info.associations.each do |assoc|
+                var_names << assoc.name if assoc.kind == :belongs_to
+              end
+            end
+            ast = ViewCleanup.calls_to_vars(ast, var_names)
+            ast = ast.transform(BufToInterpolation.new)
+
+            # Strip def render wrapper
+            body = ast
+            while body.is_a?(Crystal::Def) && body.as(Crystal::Def).name == "render"
+              body = body.as(Crystal::Def).body
+            end
+            # Also check Expressions wrapping a Def
+            if body.is_a?(Crystal::Expressions)
+              body.as(Crystal::Expressions).expressions.each do |expr|
+                if expr.is_a?(Crystal::Def) && expr.as(Crystal::Def).name == "render"
+                  body = expr.as(Crystal::Def).body
+                  break
+                end
+              end
+            end
+
+            # Determine function parameters and set emitter param_names
+            model_name = Inflector.classify(singular)
+            emitter.param_names = Set(String).new
+            if is_partial
+              partial_name = basename.lchop("_")
+              if partial_name == "form"
+                io << "func #{func_name}(#{singular} *models.#{model_name}) string {\n"
+                emitter.param_names << singular
+              else
+                partial_model_name = Inflector.classify(partial_name)
+                model_info = app.models[partial_model_name]?
+                parent_assoc = model_info.try(&.associations.find { |a| a.kind == :belongs_to })
+                if parent_assoc
+                  parent_name = parent_assoc.name
+                  parent_model = Inflector.classify(parent_name)
+                  io << "func #{func_name}(#{parent_name} *models.#{parent_model}, #{partial_name} *models.#{partial_model_name}) string {\n"
+                  emitter.param_names << parent_name
+                  emitter.param_names << partial_name
+                else
+                  io << "func #{func_name}(#{partial_name} *models.#{partial_model_name}) string {\n"
+                  emitter.param_names << partial_name
+                end
+              end
+            else
+              param = basename == "index" ? plural : singular
+              param_type = basename == "index" ? "[]*models.#{model_name}" : "*models.#{model_name}"
+              io << "func #{func_name}(#{param} #{param_type}) string {\n"
+              emitter.param_names << param
+            end
+
+            # Emit function body
+            emitter.emit_stmt(body, io, "\t")
+            io << "}\n\n"
+          rescue ex
+            STDERR.puts "  WARN: #{func_name}: #{ex.message}"
+            io << "func #{func_name}(args ...any) string {\n"
+            io << "\treturn \"<!-- #{basename} template -->\"\n"
+            io << "}\n\n"
+          end
         end
-      end
 
-      # Layout template
-      layout_dir = File.join(output_dir, "templates/layouts")
-      Dir.mkdir_p(layout_dir)
-      File.write(File.join(layout_dir, "application.gohtml"), generate_layout)
-      puts "  templates/layouts/application.gohtml"
+        # Suppress unused import warnings
+        io << "var _ = fmt.Sprintf\n"
+        io << "var _ = strings.Builder{}\n"
+        io << "var _ = helpers.LinkTo\n"
+        io << "var _ = models.AllArticles\n"
+
+        out_path = File.join(views_dir, "#{plural}.go")
+        File.write(out_path, io.to_s)
+        puts "  views/#{plural}.go"
+      end
     end
 
     private def build_view_filters : Array(Crystal::Transformer)
@@ -378,26 +445,6 @@ module Railcar
       fields
     end
 
-    private def generate_layout : String
-      <<-GOHTML
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>{{.Title}}</title>
-        <meta name="viewport" content="width=device-width,initial-scale=1">
-        <meta name="action-cable-url" content="/cable">
-        <link rel="stylesheet" href="/static/app.css">
-        <script type="module" src="/static/turbo.min.js"></script>
-      </head>
-      <body>
-        <main class="container mx-auto mt-28 px-5 flex flex-col">
-          {{.Content}}
-        </main>
-      </body>
-      </html>
-      GOHTML
-    end
-
     # ── Controllers ──
 
     private def emit_controllers(output_dir : String, app_name : String)
@@ -412,12 +459,14 @@ module Railcar
         nested_parent = app.routes.nested_parent_for(plural)
 
         io = IO::Memory.new
+        has_views = info.actions.any? { |a| !a.is_private && {"index", "show", "new", "edit"}.includes?(a.name) }
         io << "package controllers\n\n"
         io << "import (\n"
         io << "\t\"net/http\"\n"
         io << "\t\"strconv\"\n"
         io << "\t\"#{app_name}/models\"\n"
         io << "\t\"#{app_name}/helpers\"\n"
+        io << "\t\"#{app_name}/views\"\n" if has_views
         io << ")\n\n"
 
         info.actions.each do |action|
@@ -440,24 +489,24 @@ module Railcar
       when "index"
         io << "func Index(w http.ResponseWriter, r *http.Request) {\n"
         io << "\t#{plural}, _ := models.All#{model_name}s(\"created_at DESC\")\n"
-        io << "\thelpers.RenderView(w, \"#{plural}/index\", map[string]any{\"#{plural}\": #{plural}})\n"
+        io << "\thelpers.RenderPage(w, views.RenderIndex(#{plural}))\n"
         io << "}\n\n"
       when "show"
         io << "func Show#{cap}(w http.ResponseWriter, r *http.Request) {\n"
         io << "\tid, _ := strconv.ParseInt(r.PathValue(\"id\"), 10, 64)\n"
         io << "\t#{singular}, _ := models.Find#{model_name}(id)\n"
-        io << "\thelpers.RenderView(w, \"#{plural}/show\", map[string]any{\"#{singular}\": #{singular}})\n"
+        io << "\thelpers.RenderPage(w, views.RenderShow(#{singular}))\n"
         io << "}\n\n"
       when "new"
         io << "func New#{cap}(w http.ResponseWriter, r *http.Request) {\n"
         io << "\t#{singular} := models.New#{model_name}()\n"
-        io << "\thelpers.RenderView(w, \"#{plural}/new\", map[string]any{\"#{singular}\": #{singular}})\n"
+        io << "\thelpers.RenderPage(w, views.RenderNew(#{singular}))\n"
         io << "}\n\n"
       when "edit"
         io << "func Edit#{cap}(w http.ResponseWriter, r *http.Request) {\n"
         io << "\tid, _ := strconv.ParseInt(r.PathValue(\"id\"), 10, 64)\n"
         io << "\t#{singular}, _ := models.Find#{model_name}(id)\n"
-        io << "\thelpers.RenderView(w, \"#{plural}/edit\", map[string]any{\"#{singular}\": #{singular}})\n"
+        io << "\thelpers.RenderPage(w, views.RenderEdit(#{singular}))\n"
         io << "}\n\n"
       when "create"
         if nested_parent
@@ -481,7 +530,7 @@ module Railcar
           io << "\tattrs := helpers.ExtractModelParams(r.Form, \"#{singular}\")\n"
           io << "\t#{singular}, err := models.Create#{model_name}(attrs)\n"
           io << "\tif err != nil {\n"
-          io << "\t\thelpers.RenderViewStatus(w, \"#{plural}/new\", map[string]any{\"#{singular}\": #{singular}}, 422)\n"
+          io << "\t\thelpers.RenderPageStatus(w, views.RenderNew(#{singular}), 422)\n"
           io << "\t\treturn\n"
           io << "\t}\n"
           io << "\thttp.Redirect(w, r, helpers.#{model_name}Path(#{singular}), http.StatusFound)\n"
@@ -495,7 +544,7 @@ module Railcar
         io << "\tattrs := helpers.ExtractModelParams(r.Form, \"#{singular}\")\n"
         io << "\terr := #{singular}.Update(attrs)\n"
         io << "\tif err != nil {\n"
-        io << "\t\thelpers.RenderViewStatus(w, \"#{plural}/edit\", map[string]any{\"#{singular}\": #{singular}}, 422)\n"
+        io << "\t\thelpers.RenderPageStatus(w, views.RenderEdit(#{singular}), 422)\n"
         io << "\t\treturn\n"
         io << "\t}\n"
         io << "\thttp.Redirect(w, r, helpers.#{model_name}Path(#{singular}), http.StatusFound)\n"
@@ -516,7 +565,7 @@ module Railcar
           io << "\tid, _ := strconv.ParseInt(r.PathValue(\"id\"), 10, 64)\n"
           io << "\t#{singular}, _ := models.Find#{model_name}(id)\n"
           io << "\t#{singular}.Delete()\n"
-          io << "\thttp.Redirect(w, r, helpers.#{Inflector.classify(plural)}Path(), http.StatusFound)\n"
+          io << "\thttp.Redirect(w, r, helpers.#{plural.capitalize}Path(), http.StatusFound)\n"
           io << "}\n\n"
         end
       end
@@ -533,7 +582,6 @@ module Railcar
       io << "\t\"log\"\n"
       io << "\t\"net/http\"\n"
       io << "\t\"#{app_name}/controllers\"\n"
-      io << "\t\"#{app_name}/helpers\"\n"
       io << "\t\"#{app_name}/models\"\n"
       io << "\t\"#{app_name}/railcar\"\n"
       io << "\t_ \"modernc.org/sqlite\"\n"
@@ -575,8 +623,7 @@ module Railcar
       io << "func main() {\n"
       io << "\tdb := initDB()\n"
       io << "\tdefer db.Close()\n"
-      io << "\tseedDB()\n"
-      io << "\thelpers.InitTemplates()\n\n"
+      io << "\tseedDB()\n\n"
 
       # Routes
       io << "\tmux := http.NewServeMux()\n"
@@ -678,13 +725,6 @@ module Railcar
     end
 
     # ── Helpers package ──
-
-    # Note: helpers will be generated as part of emit_app or as a separate package
-    # For now, emit a helpers package with route helpers and view rendering
-
-    private def emit_helpers_package(output_dir : String, app_name : String)
-      # This would be called from generate — adding it to the emit chain
-    end
 
     # ── Static assets ──
 
@@ -1020,10 +1060,8 @@ module Railcar
       io << "\t\"net/http\"\n"
       io << "\t\"net/http/httptest\"\n"
       io << "\t\"net/url\"\n"
-      io << "\t\"os\"\n"
       io << "\t\"strings\"\n"
       io << "\t\"testing\"\n"
-      io << "\t\"#{app_name}/helpers\"\n"
       io << "\t\"#{app_name}/models\"\n"
       io << "\t\"#{app_name}/railcar\"\n"
       io << "\t_ \"modernc.org/sqlite\"\n"
@@ -1048,9 +1086,7 @@ module Railcar
         io << "\t)`)\n"
       end
 
-      io << "\trailcar.DB = db\n"
-      io << "\tos.Chdir(\"..\")\n"
-      io << "\thelpers.InitTemplates()\n\n"
+      io << "\trailcar.DB = db\n\n"
 
       # Setup routes
       io << "\tmux := http.NewServeMux()\n"

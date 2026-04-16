@@ -55,8 +55,8 @@ end
 
 if ARGV.size < 2
   STDERR.puts "Usage: railcar [--target=<target>] <rails-app-dir> <output-dir>"
-  STDERR.puts "Targets: crystal (default), python, typescript, elixir, rbs"
-  STDERR.puts "Aliases: --cr, --py, --ts, --ex, --crystal, --python, --typescript, --elixir, --rbs"
+  STDERR.puts "Targets: crystal (default), python, typescript, elixir, go, rbs"
+  STDERR.puts "Aliases: --cr, --py, --ts, --ex, --go, --crystal, --python, --typescript, --elixir, --rbs"
   exit 1
 end
 
