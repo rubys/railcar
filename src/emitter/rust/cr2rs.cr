@@ -61,7 +61,7 @@ module Railcar
         io << "\n"
 
         # Struct
-        io << "#[derive(Debug, Clone)]\n"
+        io << "#[derive(Debug, Clone, Default)]\n"
         io << "pub struct #{class_name} {\n"
         io << "    pub id: i64,\n"
         schema.columns.each do |col|

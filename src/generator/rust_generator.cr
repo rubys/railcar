@@ -283,6 +283,7 @@ module Railcar
       rails_views = File.join(rails_dir, "app/views")
       io = IO::Memory.new
       io << "use crate::helpers;\n"
+      io << "use crate::railcar::Model;\n"
       app.models.each_key do |name|
         singular = Inflector.underscore(name)
         io << "use crate::#{singular}::*;\n"
@@ -406,8 +407,9 @@ module Railcar
             io << "#{indent}let mut buf = String::new();\n"
           end
         else
-          # Assignment like title = "..."
-          io << "#{indent}let #{target} = \"\";\n"
+          # Assignment — could be a model constructor or string
+          val_str = rust_view_expr(value)
+          io << "#{indent}let #{target} = #{val_str};\n"
         end
       when Crystal::OpAssign
         target = node.target
@@ -455,10 +457,15 @@ module Railcar
       block_arg = block.args.first?.try(&.name) || "item"
       collection = call.obj
 
-      if collection.is_a?(Crystal::Call) && collection.obj && collection.name != "errors"
-        # Association call returning Result — unwrap
-        coll_str = rust_view_expr(collection)
-        io << "#{indent}if let Ok(#{block_arg}s) = #{coll_str} {\n"
+      is_result = collection.is_a?(Crystal::Call) && collection.as(Crystal::Call).obj != nil &&
+                  collection.as(Crystal::Call).name != "errors" &&
+                  app.models.values.any? { |m| m.associations.any? { |a| a.name == collection.as(Crystal::Call).name } }
+
+      if is_result
+        # Association call returning Result — use if let Ok
+        obj_str = rust_view_expr(collection.as(Crystal::Call).obj.not_nil!)
+        method = collection.as(Crystal::Call).name
+        io << "#{indent}if let Ok(#{block_arg}s) = #{obj_str}.#{method}() {\n"
         io << "#{indent}    for #{block_arg} in &#{block_arg}s {\n"
         if body = block.body
           emit_rust_view_body(body, io, singular, indent + "        ")
@@ -544,7 +551,7 @@ module Railcar
             model = obj.as(Crystal::Path).names.last
             return "#{model}::new()"
           end
-          return "".inspect
+          return "\"\".to_string()"
         when "str", "to_s"
           return obj ? rust_view_expr(obj) : (args.first? || "\"\"".inspect)
         when "link_to"
@@ -554,7 +561,13 @@ module Railcar
         when "truncate"
           return "helpers::truncate(&#{args[0]}, #{args[1]? || "30"})"
         when "dom_id"
-          return "helpers::dom_id(&#{args[0]}, #{args[0]}.id, #{args[1]? || "\"\""})"
+          prefix = args[1]?
+          if prefix
+            # Strip .to_string() if present since we need &str
+            prefix = prefix.chomp(".to_string()")
+            prefix = "&#{prefix}" unless prefix.starts_with?("\"")
+          end
+          return "helpers::dom_id(&#{args[0]}, #{args[0]}.id, #{prefix || "\"\""})"
         when "pluralize"
           return "helpers::pluralize(#{args[0]}, &#{args[1]? || "\"item\"".inspect})"
         when "turbo_stream_from", "turbo_cable_stream_tag"
@@ -591,6 +604,11 @@ module Railcar
           if all_column_names.includes?(field) || field == "id"
             return "#{obj_str}.#{field}"
           end
+          # Association methods return Result — unwrap
+          if {"comments", "article"}.includes?(field) ||
+             app.models.values.any? { |m| m.associations.any? { |a| a.name == field } }
+            return "#{obj_str}.#{field}().unwrap_or_default()"
+          end
           return "#{obj_str}.#{field}()"
         end
 
@@ -604,7 +622,7 @@ module Railcar
         node.expressions.each do |part|
           case part
           when Crystal::StringLiteral
-            format_parts << part.value.gsub("{", "{{").gsub("}", "}}")
+            format_parts << part.value.gsub("\\", "\\\\").gsub("\"", "\\\"").gsub("{", "{{").gsub("}", "}}")
           else
             format_parts << "{}"
             format_args << rust_view_expr(part)
@@ -764,7 +782,7 @@ module Railcar
 
     private def emit_main(output_dir : String, app_name : String)
       io = IO::Memory.new
-      io << "use axum::{routing::{get, post}, Router};\n"
+      io << "use axum::{routing::{get, post, patch, delete}, Router};\n"
       io << "use rusqlite::Connection;\n"
       io << "use tower_http::services::ServeDir;\n"
       io << "use #{app_name}::railcar;\n"
