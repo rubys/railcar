@@ -494,19 +494,32 @@ module Railcar
       end
     end
 
+    # Emit: parse path value as int64, return 404 on failure
+    private def emit_parse_id(io : IO, var_name : String, path_param : String, indent : String = "\t")
+      io << "#{indent}#{var_name}, err := strconv.ParseInt(r.PathValue(\"#{path_param}\"), 10, 64)\n"
+      io << "#{indent}if err != nil { http.NotFound(w, r); return }\n"
+    end
+
+    # Emit: find model by ID, return 404 on failure
+    private def emit_find(io : IO, var_name : String, model_name : String, id_expr : String, indent : String = "\t")
+      io << "#{indent}#{var_name}, err := models.Find#{model_name}(#{id_expr})\n"
+      io << "#{indent}if err != nil { http.NotFound(w, r); return }\n"
+    end
+
     private def emit_controller_action(action_name : String, io : IO, model_name : String,
                                         singular : String, plural : String, nested_parent : String?)
       cap = singular.capitalize
       case action_name
       when "index"
         io << "func Index(w http.ResponseWriter, r *http.Request) {\n"
-        io << "\t#{plural}, _ := models.All#{model_name}s(\"created_at DESC\")\n"
+        io << "\t#{plural}, err := models.All#{model_name}s(\"created_at DESC\")\n"
+        io << "\tif err != nil { http.Error(w, err.Error(), 500); return }\n"
         io << "\thelpers.RenderPage(w, views.RenderIndex(#{plural}))\n"
         io << "}\n\n"
       when "show"
         io << "func Show#{cap}(w http.ResponseWriter, r *http.Request) {\n"
-        io << "\tid, _ := strconv.ParseInt(r.PathValue(\"id\"), 10, 64)\n"
-        io << "\t#{singular}, _ := models.Find#{model_name}(id)\n"
+        emit_parse_id(io, "id", "id")
+        emit_find(io, singular, model_name, "id")
         io << "\thelpers.RenderPage(w, views.RenderShow(#{singular}))\n"
         io << "}\n\n"
       when "new"
@@ -516,8 +529,8 @@ module Railcar
         io << "}\n\n"
       when "edit"
         io << "func Edit#{cap}(w http.ResponseWriter, r *http.Request) {\n"
-        io << "\tid, _ := strconv.ParseInt(r.PathValue(\"id\"), 10, 64)\n"
-        io << "\t#{singular}, _ := models.Find#{model_name}(id)\n"
+        emit_parse_id(io, "id", "id")
+        emit_find(io, singular, model_name, "id")
         io << "\thelpers.RenderPage(w, views.RenderEdit(#{singular}))\n"
         io << "}\n\n"
       when "create"
@@ -525,11 +538,11 @@ module Railcar
           parent_model = Inflector.classify(nested_parent)
           io << "func Create#{cap}(w http.ResponseWriter, r *http.Request) {\n"
           io << "\tr.ParseForm()\n"
-          io << "\tparentId, _ := strconv.ParseInt(r.PathValue(\"#{nested_parent}_id\"), 10, 64)\n"
-          io << "\t#{nested_parent}, _ := models.Find#{parent_model}(parentId)\n"
+          emit_parse_id(io, "parentId", "#{nested_parent}_id")
+          emit_find(io, nested_parent, parent_model, "parentId")
           io << "\tattrs := helpers.ExtractModelParams(r.Form, \"#{singular}\")\n"
           io << "\tattrs[\"#{nested_parent}_id\"] = #{nested_parent}.Id\n"
-          io << "\t_, err := models.Create#{model_name}(attrs)\n"
+          io << "\t_, err = models.Create#{model_name}(attrs)\n"
           io << "\tif err != nil {\n"
           io << "\t\thttp.Redirect(w, r, helpers.#{parent_model}Path(#{nested_parent}), http.StatusFound)\n"
           io << "\t\treturn\n"
@@ -551,10 +564,10 @@ module Railcar
       when "update"
         io << "func Update#{cap}(w http.ResponseWriter, r *http.Request) {\n"
         io << "\tr.ParseForm()\n"
-        io << "\tid, _ := strconv.ParseInt(r.PathValue(\"id\"), 10, 64)\n"
-        io << "\t#{singular}, _ := models.Find#{model_name}(id)\n"
+        emit_parse_id(io, "id", "id")
+        emit_find(io, singular, model_name, "id")
         io << "\tattrs := helpers.ExtractModelParams(r.Form, \"#{singular}\")\n"
-        io << "\terr := #{singular}.Update(attrs)\n"
+        io << "\terr = #{singular}.Update(attrs)\n"
         io << "\tif err != nil {\n"
         io << "\t\thelpers.RenderPageStatus(w, views.RenderEdit(#{singular}), 422)\n"
         io << "\t\treturn\n"
@@ -565,17 +578,17 @@ module Railcar
         if nested_parent
           parent_model = Inflector.classify(nested_parent)
           io << "func Destroy#{cap}(w http.ResponseWriter, r *http.Request) {\n"
-          io << "\tparentId, _ := strconv.ParseInt(r.PathValue(\"#{nested_parent}_id\"), 10, 64)\n"
-          io << "\t#{nested_parent}, _ := models.Find#{parent_model}(parentId)\n"
-          io << "\tchildId, _ := strconv.ParseInt(r.PathValue(\"id\"), 10, 64)\n"
-          io << "\t#{singular}, _ := models.Find#{model_name}(childId)\n"
+          emit_parse_id(io, "parentId", "#{nested_parent}_id")
+          emit_find(io, nested_parent, parent_model, "parentId")
+          emit_parse_id(io, "childId", "id")
+          emit_find(io, singular, model_name, "childId")
           io << "\t#{singular}.Delete()\n"
           io << "\thttp.Redirect(w, r, helpers.#{parent_model}Path(#{nested_parent}), http.StatusFound)\n"
           io << "}\n\n"
         else
           io << "func Destroy#{cap}(w http.ResponseWriter, r *http.Request) {\n"
-          io << "\tid, _ := strconv.ParseInt(r.PathValue(\"id\"), 10, 64)\n"
-          io << "\t#{singular}, _ := models.Find#{model_name}(id)\n"
+          emit_parse_id(io, "id", "id")
+          emit_find(io, singular, model_name, "id")
           io << "\t#{singular}.Delete()\n"
           io << "\thttp.Redirect(w, r, helpers.#{plural.capitalize}Path(), http.StatusFound)\n"
           io << "}\n\n"
