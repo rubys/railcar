@@ -545,26 +545,6 @@ module Railcar
         io << "    Ok(m)\n"
         io << "}\n\n"
 
-        # create with HashMap<String, Box<dyn Any>> for seeds (int64 FK values)
-        io << "pub fn create_#{singular}_any(attrs: &HashMap<&str, Box<dyn std::any::Any>>) -> Result<#{class_name}, String> {\n"
-        io << "    let mut m = #{class_name}::new();\n"
-        schema.columns.each do |col|
-          next if {"id", "created_at", "updated_at"}.includes?(col.name)
-          if col.type.downcase == "integer" || col.type.downcase == "references"
-            io << "    if let Some(v) = attrs.get(\"#{col.name}\") {\n"
-            io << "        if let Some(i) = v.downcast_ref::<i64>() { m.#{col.name} = *i; }\n"
-            io << "        else if let Some(s) = v.downcast_ref::<&str>() { m.#{col.name} = s.parse().unwrap_or(0); }\n"
-            io << "    }\n"
-          else
-            io << "    if let Some(v) = attrs.get(\"#{col.name}\") {\n"
-            io << "        if let Some(s) = v.downcast_ref::<&str>() { m.#{col.name} = s.to_string(); }\n"
-            io << "        else if let Some(s) = v.downcast_ref::<String>() { m.#{col.name} = s.clone(); }\n"
-            io << "    }\n"
-          end
-        end
-        io << "    m.save()?;\n"
-        io << "    Ok(m)\n"
-        io << "}\n\n"
       end
 
       private def emit_broadcast_callbacks(io : IO, class_name : String, broadcast_ast : Crystal::ASTNode?)

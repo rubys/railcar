@@ -388,6 +388,17 @@ module Railcar
       ] of Crystal::Transformer
     end
 
+    # Convert a view expression to a function argument — strip .to_string() for string literals
+    private def rust_view_arg(expr : String) : String
+      if expr.starts_with?("\"") && expr.ends_with?(".to_string()")
+        expr.chomp(".to_string()")
+      elsif expr.starts_with?("\"")
+        expr
+      else
+        "&#{expr}"
+      end
+    end
+
     private def all_column_names : Set(String)
       fields = Set(String).new
       app.schemas.each do |schema|
@@ -557,11 +568,11 @@ module Railcar
         when "str", "to_s"
           return obj ? rust_view_expr(obj) : (args.first? || "\"\"".inspect)
         when "link_to"
-          return "helpers::link_to(#{args.map { |a| "&#{a}" }.join(", ")})"
+          return "helpers::link_to(#{args.map { |a| rust_view_arg(a) }.join(", ")})"
         when "button_to"
-          return "helpers::button_to(#{args.map { |a| "&#{a}" }.join(", ")})"
+          return "helpers::button_to(#{args.map { |a| rust_view_arg(a) }.join(", ")})"
         when "truncate"
-          return "helpers::truncate(&#{args[0]}, #{args[1]? || "30"})"
+          return "helpers::truncate(#{rust_view_arg(args[0])}, #{args[1]? || "30"})"
         when "dom_id"
           prefix = args[1]?
           if prefix
@@ -571,9 +582,9 @@ module Railcar
           end
           return "helpers::dom_id(&#{args[0]}, #{args[0]}.id, #{prefix || "\"\""})"
         when "pluralize"
-          return "helpers::pluralize(#{args[0]}, &#{args[1]? || "\"item\"".inspect})"
+          return "helpers::pluralize(#{args[0]}, #{rust_view_arg(args[1]? || "\"item\"")})"
         when "turbo_stream_from", "turbo_cable_stream_tag"
-          return "helpers::turbo_stream_from(&#{args[0]})"
+          return "helpers::turbo_stream_from(#{rust_view_arg(args[0])})"
         when "form_with_open_tag"
           return "helpers::form_with_open_tag(\"#{Inflector.singularize(args[0]? || "item")}\", #{args[0]? || "item"}.id, #{args[1]? || "\"\""})"
         when "form_submit_tag"
