@@ -368,7 +368,7 @@ jobs:
           retention-days: 7
 
   build-binaries:
-    needs: [test-rust]
+    needs: [test-rust, test-go]
     if: github.ref == 'refs/heads/main'
     strategy:
       matrix:
@@ -401,6 +401,15 @@ jobs:
         with:
           name: generated-rust
           path: build/rust-blog
+
+      - name: Download Go blog (for static assets)
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-go
+          path: build/go-blog
+
+      - name: Copy static assets
+        run: cp -r build/go-blog/static build/rust-blog/static
 
       - name: Build release binary
         run: |
