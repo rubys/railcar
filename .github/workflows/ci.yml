@@ -380,7 +380,7 @@ jobs:
             os: ubuntu-latest
             name: blog-linux-aarch64
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             name: blog-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
