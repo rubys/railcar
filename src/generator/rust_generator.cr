@@ -683,6 +683,26 @@ module Railcar
         end
       end
 
+      # Generate _method dispatch functions for paths with both PATCH and DELETE
+      dispatched = Set(String).new
+      app.controllers.each do |info|
+        controller_name = Inflector.underscore(info.name).chomp("_controller")
+        singular = Inflector.singularize(controller_name)
+        mod = Inflector.underscore(Inflector.classify(singular))
+        has_update = info.actions.any? { |a| a.name == "update" }
+        has_destroy = info.actions.any? { |a| a.name == "destroy" }
+        next unless has_update && has_destroy
+        next if dispatched.includes?(singular)
+        dispatched << singular
+
+        io << "pub async fn method_dispatch_#{singular}(Path(id): Path<i64>, Form(form): Form<HashMap<String, String>>) -> Response {\n"
+        io << "    match form.get(\"_method\").map(|s| s.as_str()) {\n"
+        io << "        Some(\"delete\") => destroy_#{singular}(Path(id)).await,\n"
+        io << "        _ => update_#{singular}(Path(id), Form(form)).await,\n"
+        io << "    }\n"
+        io << "}\n\n"
+      end
+
       File.write(File.join(output_dir, "src", "controllers.rs"), io.to_s)
       puts "  src/controllers.rs"
     end
@@ -809,8 +829,7 @@ module Railcar
 
     private def emit_main(output_dir : String, app_name : String)
       io = IO::Memory.new
-      io << "use axum::{routing::{get, post, patch, delete}, Router, middleware, extract::Request, body::Body};\n"
-      io << "use axum::response::IntoResponse;\n"
+      io << "use axum::{routing::{get, post, patch, delete}, Router};\n"
       io << "use rusqlite::Connection;\n"
       io << "use tower_http::services::ServeDir;\n"
       io << "use #{app_name}::railcar;\n"
@@ -856,8 +875,9 @@ module Railcar
       io << "    init_db();\n"
       io << "    seed_db();\n\n"
 
-      # Routes
+      # Routes — group by path to combine methods and avoid Axum overlap errors
       io << "    let app = Router::new()\n"
+      routes_by_path = {} of String => Array({method: String, handler: String})
       app.routes.routes.each do |route|
         singular = Inflector.singularize(route.controller)
         handler = case route.action
@@ -870,22 +890,32 @@ module Railcar
                   when "destroy" then "controllers::destroy_#{singular}"
                   else next
                   end
-
         axum_path = route.path.gsub(/:(\w+)/) { |m| "{#{$1}}" }
-        method = case route.method.downcase
-                 when "get"    then "get"
-                 when "post"   then "post"
-                 when "patch"  then "patch"
-                 when "put"    then "put"
-                 when "delete" then "delete"
-                 else "get"
-                 end
-        # Also accept POST with _method for HTML forms (PATCH/DELETE)
-        if {"patch", "put", "delete"}.includes?(route.method.downcase)
-          io << "        .route(\"#{axum_path}\", #{method}(#{handler}).post(#{handler}))\n"
-        else
-          io << "        .route(\"#{axum_path}\", #{method}(#{handler}))\n"
+        routes_by_path[axum_path] ||= [] of {method: String, handler: String}
+        routes_by_path[axum_path] << {method: route.method.downcase, handler: handler}
+      end
+
+      routes_by_path.each do |path, methods|
+        parts = [] of String
+        has_patch_or_delete = false
+        methods.each do |m|
+          parts << "#{m[:method]}(#{m[:handler]})"
+          has_patch_or_delete = true if {"patch", "delete"}.includes?(m[:method])
         end
+        # Add POST dispatch for PATCH/DELETE (HTML forms can only POST)
+        if has_patch_or_delete
+          # Use a dispatcher that checks _method form field
+          update_handler = methods.find { |m| m[:method] == "patch" }
+          delete_handler = methods.find { |m| m[:method] == "delete" }
+          if update_handler && delete_handler
+            parts << "post(controllers::method_dispatch_#{Inflector.singularize(path.split("/")[1]? || "item")})"
+          elsif update_handler
+            parts << "post(#{update_handler[:handler]})"
+          elsif delete_handler
+            parts << "post(#{delete_handler[:handler]})"
+          end
+        end
+        io << "        .route(\"#{path}\", #{parts.join(".")})\n"
       end
       if app.routes.root_controller
         io << "        .route(\"/\", get(controllers::index))\n"
@@ -1351,6 +1381,7 @@ module Railcar
 
       # Build router
       io << "    let app = Router::new()\n"
+      test_routes_by_path = {} of String => Array({method: String, handler: String})
       app.routes.routes.each do |route|
         singular = Inflector.singularize(route.controller)
         handler = case route.action
@@ -1364,14 +1395,25 @@ module Railcar
                   else next
                   end
         axum_path = route.path.gsub(/:(\w+)/) { |m| "{#{$1}}" }
-        method = case route.method.downcase
-                 when "get" then "get"
-                 when "post" then "post"
-                 when "patch" then "patch"
-                 when "delete" then "delete"
-                 else "get"
-                 end
-        io << "        .route(\"#{axum_path}\", #{method}(#{handler}))\n"
+        test_routes_by_path[axum_path] ||= [] of {method: String, handler: String}
+        test_routes_by_path[axum_path] << {method: route.method.downcase, handler: handler}
+      end
+      test_routes_by_path.each do |path, methods|
+        parts = methods.map { |m| "#{m[:method]}(#{m[:handler]})" }
+        has_pd = methods.any? { |m| {"patch", "delete"}.includes?(m[:method]) }
+        if has_pd
+          update_h = methods.find { |m| m[:method] == "patch" }
+          delete_h = methods.find { |m| m[:method] == "delete" }
+          if update_h && delete_h
+            resource = Inflector.singularize(path.split("/")[1]? || "item")
+            parts << "post(controllers::method_dispatch_#{resource})"
+          elsif update_h
+            parts << "post(#{update_h[:handler]})"
+          elsif delete_h
+            parts << "post(#{delete_h[:handler]})"
+          end
+        end
+        io << "        .route(\"#{path}\", #{parts.join(".")})\n"
       end
       if app.routes.root_controller
         io << "        .route(\"/\", get(controllers::index))\n"
