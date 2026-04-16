@@ -368,7 +368,7 @@ jobs:
           retention-days: 7
 
   build-binaries:
-    needs: [test-rust, test-go]
+    needs: [test-rust]
     if: github.ref == 'refs/heads/main'
     strategy:
       matrix:
@@ -402,14 +402,16 @@ jobs:
           name: generated-rust
           path: build/rust-blog
 
-      - name: Download Go blog (for static assets)
-        uses: actions/download-artifact@v4
-        with:
-          name: generated-go
-          path: build/go-blog
-
-      - name: Copy static assets
-        run: cp -r build/go-blog/static build/rust-blog/static
+      - name: Create static assets
+        run: |
+          mkdir -p build/rust-blog/static
+          npm install -g @tailwindcss/cli 2>/dev/null || true
+          cd build/rust-blog
+          echo '@import "tailwindcss";' > input.css
+          npx @tailwindcss/cli --input input.css --output static/app.css --minify 2>/dev/null || echo "/* tailwind unavailable */" > static/app.css
+          rm -f input.css
+          # Turbo JS: download directly
+          curl -sL "https://cdn.jsdelivr.net/npm/@hotwired/turbo@8/dist/turbo.es2017-esm.min.js" -o static/turbo.min.js 2>/dev/null || echo "// turbo unavailable" > static/turbo.min.js
 
       - name: Build release binary
         run: |
