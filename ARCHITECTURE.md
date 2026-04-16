@@ -313,4 +313,52 @@ Crystal tests are organized by component:
 | `prism_spec.cr` | Prism FFI bindings |
 | `semantic_spec.cr` | LLVM stub + Crystal type inference |
 
+| `method_map_spec.cr` | Ruby-to-native method mapping tables |
+
 The `make test` target downloads a sample Rails blog app to `build/demo/blog/` for integration testing.
+
+## MethodMap: Ruby-to-native method mapping
+
+`src/filters/method_map.cr` provides a table-driven mapping from Ruby method calls to target-language equivalents, following the same approach as [Ruby2JS's functions filter](https://www.ruby2js.com/docs/filters/functions). Methods map to native types (String, Array, Hash) rather than runtime wrappers, minimizing impedance mismatch with the target ecosystem.
+
+Each target has a table of `{receiver_type, method_name}` → replacement pattern. Lookup tries the specific type first, then falls back to `"Any"`. Patterns use `RECV`, `ARG0`, `ARG1` placeholders that are substituted at emit time.
+
+Adding a new Ruby method across all targets means adding one row per target to the tables — no emitter changes needed.
+
+## Design direction
+
+Three areas of work extend the current architecture:
+
+### Broader Rails pattern coverage (shared filters)
+
+Layout transpilation, ActionMailer, ActiveStorage, concerns, more complex form builders. Each is a `Crystal::Transformer` that rewrites AST nodes — write once, all backends benefit. The filter architecture is designed for this: each new Rails pattern is a small, testable transformer added to the shared chain.
+
+### Broader Ruby language coverage (MethodMap + emitters)
+
+The blog demo uses a narrow slice of Ruby. Real Rails applications use `String#parameterize`, `Array#group_by`, `Hash#transform_values`, and hundreds of other standard library methods. These are handled through MethodMap entries that rewrite Ruby method calls to target-native equivalents at transpile time — the same approach Ruby2JS uses for JavaScript. The emitters also need to handle more Crystal AST node types (case/when, ranges, regular expressions, multiple return values).
+
+### Semantic analysis for controllers and views
+
+Currently only models get Crystal's type inference (`program.semantic()`). Extending this to controllers and views would provide exact receiver types for MethodMap lookups — knowing that `@article` is an `Article` (not just "Any") means the mapper can choose the right translation for `@article.comments.size` vs `@article.title.size`. The infrastructure exists (Crystal's semantic engine, the model stubs); extending it to controllers means including controller ASTs in the semantic analysis phase.
+
+### Generated runtime
+
+Each target has a hand-written runtime that re-implements Rails semantics: CollectionProxy, ValidationErrors, query building, callback chains. These are pure business logic with no platform dependency — they could be written once in Crystal and transpiled to each target, the same way application code is. Platform glue (database drivers, WebSocket handlers, HTTP servers) stays hand-written per target. This separation — generated Rails semantics, hand-written platform glue — makes adding new Rails features work across all targets without N implementations.
+
+### Framework targets
+
+The current targets all generate the same architecture: routes → controller functions → model calls → view rendering → HTTP response. But different frameworks organize the request lifecycle differently. Phoenix uses contexts and changesets, Django uses class-based views and its own ORM, Next.js uses file-based routing and server components.
+
+Railcar's analysis phase is framework-agnostic — `AppModel.extract` understands routes, controllers, models, and views as abstract concepts. The full request lifecycle is known at transpile time: which route selects which controller action, which models that action queries, which view it renders. A framework-specific emitter would reorganize these same pieces into the target framework's conventions. The analysis stays the same; the emission changes.
+
+### Single-File Component (SFC) targets
+
+SFC frameworks like Svelte, Vue, and LiveView collapse the controller/view/route separation into a single file. The component IS the route, the data fetching, and the template. This is roughly comparable in effort to adding a new language target — despite sharing underlying language characteristics (e.g., Svelte with TypeScript), the entire rendering model changes:
+
+- String concatenation becomes reactive template syntax (`{expression}`, `{#if}`, `{#each}`)
+- Explicit render calls become implicit reactivity
+- Partials become components with props
+- Server-side HTML patching (Turbo Streams) becomes client-side reactive DOM updates
+- Layout wrapping becomes layout components with slots
+
+The AppModel already has the connections needed: which controller action renders which view, which route maps to which action, which variables flow from controller to template. For SFC generation, the emitter follows those connections and merges what were three separate outputs (route, controller, view) into one component file. The first SFC target establishes the patterns; subsequent ones (Svelte → Vue, or → LiveView) reuse them with different syntax.

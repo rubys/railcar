@@ -222,12 +222,13 @@ Many common Rails patterns are not yet implemented:
 
 - **Models** -- scopes, enums, callbacks (beyond stripping), polymorphic associations, `has_one :through`, custom validators
 - **Controllers** -- filters beyond `before_action`, rescue_from, streaming, multi-format responses
-- **Views** -- Action Text, complex form builders, content_for
+- **Views** -- Action Text, complex form builders, content_for, layout transpilation
+- **Ruby standard library** -- string, array, hash methods beyond the basics. Handled via table-driven `MethodMap` that maps Ruby methods to target-native equivalents (same approach as [Ruby2JS's functions filter](https://www.ruby2js.com/docs/filters/functions))
 - **Gems** -- Devise, Pundit, Sidekiq, and other common gems each need their own filters
 - **Infrastructure** -- ActiveStorage, ActionMailer, background jobs
 - **Runtime metaprogramming** -- `eval`, `method_missing`, dynamic `send` cannot be transpiled
 
-The filter architecture is designed so each of these can be added incrementally. See [ARCHITECTURE.md](ARCHITECTURE.md) for how to contribute.
+The filter architecture is designed so each of these can be added incrementally. See [ARCHITECTURE.md](ARCHITECTURE.md) for the design direction.
 
 ## Adding a new target language
 
