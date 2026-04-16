@@ -11,6 +11,7 @@
 
 require "compiler/crystal/syntax"
 require "./inflector"
+require "./type_resolver"
 require "../filters/method_map"
 
 module Railcar
@@ -19,8 +20,11 @@ module Railcar
     getter known_fields : Set(String)
     # Parameter names available in the current function scope
     property param_names : Set(String) = Set(String).new
+    # Resolves receiver types for MethodMap lookups. When nil, falls back
+    # to the legacy AST-shape heuristic.
+    property resolver : TypeResolver? = nil
 
-    def initialize(@controller, @known_fields = Set(String).new)
+    def initialize(@controller, @known_fields = Set(String).new, @resolver = nil)
     end
 
     # Emit a Go expression from a Crystal AST node
@@ -411,8 +415,14 @@ module Railcar
       false
     end
 
-    # Infer the Ruby type of an AST node for MethodMap lookup
+    # Infer the Ruby type of an AST node for MethodMap lookup.
+    # Prefers TypeResolver (metadata-driven) when available; falls back
+    # to an AST-shape heuristic for callers that don't provide one.
     private def infer_type(node : Crystal::ASTNode) : String
+      if r = @resolver
+        return r.resolve(node)
+      end
+
       case node
       when Crystal::StringLiteral, Crystal::StringInterpolation
         "String"
@@ -423,9 +433,8 @@ module Railcar
       when Crystal::HashLiteral
         "Hash"
       when Crystal::Call
-        # Known schema fields are strings or integers
         if known_fields.includes?(node.name)
-          return "String" # most schema fields are strings; imprecise but safe
+          return "String"
         end
         "Any"
       else

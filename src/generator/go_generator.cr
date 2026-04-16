@@ -28,6 +28,7 @@ require "../filters/turbo_stream_connect"
 require "../filters/view_cleanup"
 require "../emitter/go/cr2go"
 require "./go_view_emitter"
+require "./type_resolver"
 
 module Railcar
   class GoGenerator
@@ -328,7 +329,8 @@ module Railcar
         template_dir = File.join(rails_views, plural)
         next unless Dir.exists?(template_dir)
 
-        emitter = GoViewEmitter.new(controller_name, all_column_names)
+        resolver = TypeResolver.new(app)
+        emitter = GoViewEmitter.new(controller_name, all_column_names, resolver)
         io = IO::Memory.new
         io << "package views\n\n"
         io << "import (\n"
