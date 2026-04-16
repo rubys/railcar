@@ -69,8 +69,8 @@ module Railcar
           rust_type = map_type(col.type)
           io << "    pub #{col.name}: #{rust_type},\n"
         end
-        io << "    persisted: bool,\n"
-        io << "    errors: Vec<railcar::ValidationError>,\n"
+        io << "    pub persisted: bool,\n"
+        io << "    pub errors: Vec<railcar::ValidationError>,\n"
         io << "}\n\n"
 
         # Default / new
