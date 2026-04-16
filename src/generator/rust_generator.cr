@@ -354,7 +354,7 @@ module Railcar
               elsif parent_assoc
                 parent_name = parent_assoc.name
                 parent_model = Inflector.classify(parent_name)
-                io << "pub fn #{func_name}(#{parent_name}: &#{parent_model}, #{partial_name}: &#{partial_model_name}) -> String {\n"
+                io << "pub fn #{func_name}(_#{parent_name}: &#{parent_model}, #{partial_name}: &#{partial_model_name}) -> String {\n"
               else
                 io << "pub fn #{func_name}(#{partial_name}: &#{partial_model_name}) -> String {\n"
               end
@@ -831,7 +831,7 @@ module Railcar
 
     private def emit_main(output_dir : String, app_name : String)
       io = IO::Memory.new
-      io << "use axum::{routing::{get, post, patch, delete}, Router};\n"
+      io << "use axum::{routing::{get, post, delete}, Router};\n"
       io << "use rusqlite::Connection;\n"
       io << "use tower_http::services::ServeDir;\n"
       io << "use #{app_name}::railcar;\n"
@@ -1382,7 +1382,7 @@ module Railcar
       Dir.mkdir_p(tests_dir)
 
       io = IO::Memory.new
-      io << "use axum::{routing::{get, post, patch, delete}, Router};\n"
+      io << "use axum::{routing::{get, post, delete}, Router};\n"
       io << "use axum_test::TestServer;\n"
       io << "use rusqlite::Connection;\n"
       io << "use std::collections::HashMap;\n"

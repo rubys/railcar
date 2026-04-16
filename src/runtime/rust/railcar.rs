@@ -34,7 +34,9 @@ macro_rules! log_info {
     ($($arg:tt)*) => { if $crate::railcar::log_level() <= 1 { eprintln!("[info]  {}", format!($($arg)*)); } };
 }
 
+#[allow(unused_imports)]
 pub(crate) use log_debug;
+#[allow(unused_imports)]
 pub(crate) use log_info;
 
 // ── Database ──
