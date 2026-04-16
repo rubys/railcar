@@ -738,10 +738,23 @@ module Railcar
         else
           io << "pub async fn create_#{singular}(Form(form): Form<HashMap<String, String>>) -> Response {\n"
           io << "    let attrs = helpers::extract_model_params(&form, \"#{singular}\");\n"
-          io << "    match #{mod}::create_#{singular}(&attrs) {\n"
-          io << "        Ok(#{singular}) => Redirect::to(&helpers::#{singular}_path(#{singular}.id)).into_response(),\n"
+          io << "    let mut #{singular} = #{mod}::#{model_name}::new();\n"
+          schema_map = {} of String => TableSchema
+          app.schemas.each { |s| schema_map[s.name] = s }
+          table = Inflector.pluralize(singular)
+          if schema = schema_map[table]?
+            schema.columns.each do |col|
+              next if {"id", "created_at", "updated_at"}.includes?(col.name)
+              if col.type.downcase == "integer" || col.type.downcase == "references"
+                io << "    if let Some(v) = attrs.get(\"#{col.name}\") { #{singular}.#{col.name} = v.parse().unwrap_or(0); }\n"
+              else
+                io << "    if let Some(v) = attrs.get(\"#{col.name}\") { #{singular}.#{col.name} = v.clone(); }\n"
+              end
+            end
+          end
+          io << "    match #{singular}.save() {\n"
+          io << "        Ok(_) => Redirect::to(&helpers::#{singular}_path(#{singular}.id)).into_response(),\n"
           io << "        Err(_) => {\n"
-          io << "            let #{singular} = #{mod}::#{model_name}::new();\n"
           io << "            (StatusCode::UNPROCESSABLE_ENTITY, Html(helpers::render_page(&views::render_new(&#{singular})))).into_response()\n"
           io << "        }\n"
           io << "    }\n"
@@ -796,7 +809,8 @@ module Railcar
 
     private def emit_main(output_dir : String, app_name : String)
       io = IO::Memory.new
-      io << "use axum::{routing::{get, post, patch, delete}, Router};\n"
+      io << "use axum::{routing::{get, post, patch, delete}, Router, middleware, extract::Request, body::Body};\n"
+      io << "use axum::response::IntoResponse;\n"
       io << "use rusqlite::Connection;\n"
       io << "use tower_http::services::ServeDir;\n"
       io << "use #{app_name}::railcar;\n"
@@ -866,7 +880,12 @@ module Railcar
                  when "delete" then "delete"
                  else "get"
                  end
-        io << "        .route(\"#{axum_path}\", #{method}(#{handler}))\n"
+        # Also accept POST with _method for HTML forms (PATCH/DELETE)
+        if {"patch", "put", "delete"}.includes?(route.method.downcase)
+          io << "        .route(\"#{axum_path}\", #{method}(#{handler}).post(#{handler}))\n"
+        else
+          io << "        .route(\"#{axum_path}\", #{method}(#{handler}))\n"
+        end
       end
       if app.routes.root_controller
         io << "        .route(\"/\", get(controllers::index))\n"
