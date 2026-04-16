@@ -28,6 +28,9 @@ Source file (.rb or .cr)
        |
        +---> Python filters -> Cr2Py -> PyAST -> .py output
        |
+       +---> Rust filters -> Cr2Rs -> .rs models/controllers
+       |                  -> RustViewEmitter -> .rs view functions
+       |
        +---> TypeScript filters -> Cr2Ts -> .ts output
        |                       -> EjsConverter -> .ejs templates
 ```
@@ -156,6 +159,10 @@ Filter order matters. Each filter's documentation notes its dependencies.
 
 All three converters follow the same pattern: after view filters have normalized the AST, they walk the `_buf`-based AST and emit template tags in the target syntax.
 
+### Rust Emitter (`src/emitter/rust/`)
+
+**Cr2Rs Emitter** (`cr2rs.cr`) -- walks Crystal AST and emits Rust model source. Generates `#[derive(Debug, Clone, Default)]` structs, `impl Model` trait (table_name, from_row, run_validations), concrete `save`/`update`/`delete` methods with cloned values for borrow checker compliance, association methods (has_many via where_eq, belongs_to via find), and `impl Broadcaster` with after_save/after_delete callbacks. Each model generates its own SQL to avoid `Box<dyn ToSql>` complexity.
+
 ### Python Emitter (`src/emitter/python/`)
 
 A two-stage Crystal AST -> Python pipeline:
@@ -194,6 +201,8 @@ A two-stage Crystal AST -> Python pipeline:
 
 **GoGenerator** (`src/generator/go_generator.cr`) -- orchestrates Go output. Models use the AST pipeline: `SourceParser.parse` -> `BroadcastsTo` -> `ModelBoilerplatePython` -> `Cr2Go` emitter (broadcast callbacks extracted from pre-filtered AST). Views use GoViewEmitter: ERB -> ErbCompiler -> shared view filters -> ViewCleanup -> Go functions returning strings (no template engine). Controllers and tests are generated structurally from AppModel metadata. Target: net/http + database/sql + modernc.org/sqlite + nhooyr.io/websocket.
 
+**RustGenerator** (`src/generator/rust_generator.cr`) -- orchestrates Rust output. Models use the AST pipeline: `SourceParser.parse` -> `BroadcastsTo` -> `ModelBoilerplatePython` -> `Cr2Rs` emitter (broadcast callbacks extracted from pre-filtered AST). Views use string-building functions (same approach as Go). Controllers are Axum async handlers. Tests use cargo test with axum-test. Target: Axum + rusqlite (bundled) + tokio + Axum WebSocket.
+
 ### Runtime
 
 **Crystal** (`src/runtime/`): A Crystal ORM mirroring ActiveRecord -- base model class with macros, Relation query builder, CollectionProxy, view helpers.
@@ -213,6 +222,10 @@ A two-stage Crystal AST -> Python pipeline:
 **Go** (`src/runtime/go/`):
 - `base.cr` -- Crystal source used only for `program.semantic()` type checking (not emitted)
 - `railcar.go` -- hand-written Go runtime: Model interface, generic CRUD (Find, All, Where, Save, Delete) with database/sql, Broadcaster interface with AfterSave/AfterDelete callbacks, CableServer (in-memory pub/sub), CableHandler (Action Cable WebSocket with `actioncable-v1-json` subprotocol), turbo-stream HTML generation, partial renderer registry, configurable logging via LOG_LEVEL env var
+
+**Rust** (`src/runtime/rust/`):
+- `base.cr` -- Crystal source used only for `program.semantic()` type checking (not emitted)
+- `railcar.rs` -- hand-written Rust runtime: Model trait, generic CRUD (find, all, where_eq) with rusqlite, Broadcaster trait with after_save/after_delete callbacks, CableServer (RwLock + mpsc channels), cable_handler (Axum WebSocket with `actioncable-v1-json` subprotocol), turbo-stream HTML generation, partial renderer registry, configurable logging via LOG_LEVEL env var
 
 ### Shared data models
 
@@ -272,7 +285,7 @@ make test     # runs all Crystal specs (313)
 crystal spec spec/filters_spec.cr   # run a specific spec file
 ```
 
-CI generates and tests all five targets:
+CI generates and tests all six targets:
 
 | Target | What CI runs |
 |--------|-------------|
@@ -280,6 +293,7 @@ CI generates and tests all five targets:
 | Elixir | `mix test --no-start` on generated blog (21 tests) |
 | Go | `go test ./...` on generated blog (21 tests) |
 | Python | `pytest tests/ -v` on generated blog (21 tests) |
+| Rust | `cargo test -- --test-threads=1` on generated blog (21 tests) |
 | TypeScript | `npx tsx --test tests/*.test.ts` on generated blog (21 tests) |
 
 Crystal tests are organized by component:

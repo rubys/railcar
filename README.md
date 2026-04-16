@@ -1,14 +1,15 @@
 # Railcar
 
-Seven things in one:
+Eight things in one:
 
 1. **Crystal transpiler** -- converts a Ruby on Rails application into a Crystal web application
 2. **Elixir transpiler** -- converts a Ruby on Rails application into an Elixir web application
 3. **Go transpiler** -- converts a Ruby on Rails application into a Go web application
 4. **Python transpiler** -- converts a Ruby on Rails application into a Python web application
-5. **TypeScript transpiler** -- converts a Ruby on Rails application into a TypeScript web application
-6. **Framework** -- a Rails-compatible runtime for Crystal, currently covering ActiveRecord and Hotwire, with more to come
-7. **RBS generator** -- produces RBS type signatures for existing Rails apps, using Crystal's semantic type inference to determine method return types and instance variable types
+5. **Rust transpiler** -- converts a Ruby on Rails application into a Rust web application
+6. **TypeScript transpiler** -- converts a Ruby on Rails application into a TypeScript web application
+7. **Framework** -- a Rails-compatible runtime for Crystal, currently covering ActiveRecord and Hotwire, with more to come
+8. **RBS generator** -- produces RBS type signatures for existing Rails apps, using Crystal's semantic type inference to determine method return types and instance variable types
 
 These mix and match. Both Ruby and Crystal input files are supported in the same project, so you can start with a Rails app, generate the Crystal version, then gradually rewrite individual files in Crystal. The pipeline handles both seamlessly.
 
@@ -16,14 +17,14 @@ These mix and match. Both Ruby and Crystal input files are supported in the same
 
 ## Demo
 
-Railcar transpiles a [Rails blog app](https://ruby2js.github.io/ruby2js/releases/demo-blog.tar.gz) (built by this [creation script](https://github.com/ruby2js/ruby2js/blob/master/test/blog/create-blog)) into Crystal, Elixir, Go, Python, and TypeScript.
+Railcar transpiles a [Rails blog app](https://ruby2js.github.io/ruby2js/releases/demo-blog.tar.gz) (built by this [creation script](https://github.com/ruby2js/ruby2js/blob/master/test/blog/create-blog)) into Crystal, Elixir, Go, Python, Rust, and TypeScript.
 
 - **[Browse the generated code](https://rubys.github.io/railcar/)** -- compare the original Ruby source side-by-side with each target's output
 - **[Run the blog in your browser](https://ruby2js.github.io/ruby2js/blog/)** -- an in-browser version of the same app, powered by ruby2js
 
 ## What it does
 
-Given a Rails app directory, Railcar parses the source code, applies a chain of AST transformations, and generates a Crystal, Elixir, Go, Python, or TypeScript application.
+Given a Rails app directory, Railcar parses the source code, applies a chain of AST transformations, and generates a Crystal, Elixir, Go, Python, Rust, or TypeScript application.
 
 ```
 Source (.rb or .cr)
@@ -45,6 +46,8 @@ Shared filter chain (Rails-specific transformations)
     |
     +--> Python filters --> Cr2Py --> PyAST --> .py output
     |
+    +--> Rust filters --> Cr2Rs --> .rs output
+    |
     +--> TypeScript filters --> Cr2Ts --> .ts/.ejs output
 ```
 
@@ -58,6 +61,7 @@ The shared filters normalize Rails conventions (instance variables, params, resp
 - Optional: [Elixir](https://elixir-lang.org/install.html) >= 1.17 (for Elixir target)
 - Optional: [Go](https://go.dev/dl/) >= 1.21 (for Go target)
 - Optional: [Node.js](https://nodejs.org/) >= 18 (for TypeScript target)
+- Optional: [Rust](https://www.rust-lang.org/tools/install) >= 1.75 (for Rust target)
 - Optional: [uv](https://docs.astral.sh/uv/) (for Python target)
 - Optional: [tailwindcss](https://tailwindcss.com/docs/installation) or `gem install tailwindcss-rails` for styled output
 
@@ -103,11 +107,16 @@ cd /path/to/output
 go mod tidy
 go run .
 
+# Generate a Rust app
+build/railcar --rust /path/to/rails/app /path/to/output
+cd /path/to/output
+cargo run
+
 # Generate RBS type signatures
 build/railcar --rbs /path/to/rails/app /path/to/output
 ```
 
-Target flags also accept short forms: `--cr`, `--ex`, `--go`, `--py`, `--ts`, or `--target=go`.
+Target flags also accept short forms: `--cr`, `--ex`, `--go`, `--py`, `--rs`, `--ts`, or `--target=rust`.
 
 ## Test
 
@@ -115,7 +124,7 @@ Target flags also accept short forms: `--cr`, `--ex`, `--go`, `--py`, `--ts`, or
 make test
 ```
 
-Downloads a sample Rails blog app and runs the spec suite (313 Crystal specs). CI also generates and tests the Crystal blog (compiled + crystal spec), the Elixir blog (21 ExUnit tests), the Go blog (21 go test tests), the Python blog (21 pytest tests), and the TypeScript blog (21 node:test tests).
+Downloads a sample Rails blog app and runs the spec suite (313 Crystal specs). CI also generates and tests the Crystal blog (compiled + crystal spec), the Elixir blog (21 ExUnit tests), the Go blog (21 go test tests), the Python blog (21 pytest tests), the Rust blog (21 cargo test tests), and the TypeScript blog (21 node:test tests).
 
 ## Try it
 
@@ -158,19 +167,25 @@ mix run --no-halt
 cd go-blog && go mod tidy
 go test ./...
 go run .
+
+# Rust
+./build/railcar --rust blog rust-blog
+cd rust-blog
+cargo test -- --test-threads=1
+cargo run
 ```
 
 Open multiple browser tabs to see real-time Turbo Streams updates.
 
 ## What works
 
-The blog demo exercises these patterns across Crystal, Elixir, Go, Python, and TypeScript targets:
+The blog demo exercises these patterns across Crystal, Elixir, Go, Python, Rust, and TypeScript targets:
 
 - **Models** -- `has_many`, `belongs_to`, `validates` (presence, length), `dependent: :destroy`
 - **Controllers** -- CRUD actions, `before_action`, strong params, `respond_to`, `redirect_to` with flash, `render` with status codes
-- **Views** -- ERB to ECR (Crystal), EEx templates (Elixir), Go view functions, Python string functions, or EJS templates (TypeScript); `link_to`, `button_to`, `form_with`, partials, `render @collection`
+- **Views** -- ERB to ECR (Crystal), EEx templates (Elixir), Go/Rust view functions, Python string functions, or EJS templates (TypeScript); `link_to`, `button_to`, `form_with`, partials, `render @collection`
 - **Routes** -- `resources`, nested resources, `root`
-- **Tests** -- Minitest to Crystal spec, ExUnit, go test, pytest, or node:test; model and controller tests; fixtures
+- **Tests** -- Minitest to Crystal spec, ExUnit, go test, pytest, cargo test, or node:test; model and controller tests; fixtures
 - **Real-time** -- ActionCable/WebSocket with Turbo Streams broadcasting
 
 **Crystal:** 313 specs passing, compiled binary, full ActiveRecord-like runtime with macros.
@@ -180,6 +195,8 @@ The blog demo exercises these patterns across Crystal, Elixir, Go, Python, and T
 **Go:** 21 tests passing (9 model + 12 controller), net/http server, hand-written ORM runtime with modernc.org/sqlite, view functions (no template engine), Tailwind CSS, Turbo Streams with ActionCable WebSocket via nhooyr.io/websocket.
 
 **Python:** 21 tests passing (9 model + 12 controller), aiohttp async server, hand-written ORM runtime with direct attribute access, Tailwind CSS, Turbo Streams with ActionCable WebSocket.
+
+**Rust:** 21 tests passing (9 model + 12 controller), Axum async server, hand-written ORM runtime with rusqlite (bundled), view functions (no template engine), Tailwind CSS, Turbo Streams with ActionCable WebSocket via Axum WebSocket.
 
 **TypeScript:** 21 tests passing (9 model + 12 controller), Express server, hand-written ORM runtime with better-sqlite3, EJS templates, Tailwind CSS, Turbo Streams with ActionCable WebSocket via ws.
 
@@ -197,7 +214,7 @@ The implementation, however, is held together with bailing wire and chewing gum.
 
 These shortcuts are in place not because the problems are hard, but because they are known to be solvable -- each has a clear path to a proper implementation. The goal at this stage was to prove the pipeline works end to end.
 
-Despite all of this, the proof of concept produces real, observable results: a Rails blog app with models, controllers, views, nested resources, validations, and tests transpiles to five languages and runs.
+Despite all of this, the proof of concept produces real, observable results: a Rails blog app with models, controllers, views, nested resources, validations, and tests transpiles to six languages and runs.
 
 ## What needs work
 

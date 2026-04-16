@@ -328,12 +328,51 @@ jobs:
           path: build/go-blog
           retention-days: 7
 
+  test-rust:
+    needs: [build, download-demo]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download railcar binary
+        uses: actions/download-artifact@v4
+        with:
+          name: railcar-binary
+          path: build
+
+      - name: Download demo blog
+        uses: actions/download-artifact@v4
+        with:
+          name: demo-blog
+          path: build/demo/blog
+
+      - name: Make binary executable
+        run: chmod +x build/railcar
+
+      - name: Generate Rust blog
+        run: build/railcar --rust build/demo/blog build/rust-blog
+
+      - name: Test Rust blog
+        run: |
+          cd build/rust-blog
+          cargo test -- --test-threads=1
+
+      - name: Upload Rust blog
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-rust
+          path: build/rust-blog
+          retention-days: 7
+
   # ===========================================================================
   # Stage 3: Build GitHub Pages site
   # ===========================================================================
 
   build-site:
-    needs: [test-crystal, test-elixir, test-go, test-python, test-typescript]
+    needs: [test-crystal, test-elixir, test-go, test-python, test-rust, test-typescript]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -375,9 +414,15 @@ jobs:
           name: generated-go
           path: artifacts/go
 
+      - name: Download Rust blog
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-rust
+          path: artifacts/rust
+
       - name: Build file manifests
         run: |
-          for lang in ruby crystal elixir go python typescript; do
+          for lang in ruby crystal elixir go python rust typescript; do
             node pages/build-manifest.js "artifacts/$lang" "$lang" > "artifacts/${lang}.json"
           done
 
@@ -392,6 +437,7 @@ jobs:
           cp artifacts/elixir.json _site/
           cp artifacts/go.json _site/
           cp artifacts/python.json _site/
+          cp artifacts/rust.json _site/
           cp artifacts/typescript.json _site/
 
       - name: Upload Pages artifact
