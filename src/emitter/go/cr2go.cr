@@ -19,7 +19,8 @@ module Railcar
         "Nil"     => "nil",
       }
 
-      def emit_model(node : Crystal::ClassDef, class_name : String, schema : TableSchema, app_name : String) : String
+      def emit_model(node : Crystal::ClassDef, class_name : String, schema : TableSchema, app_name : String,
+                     broadcast_ast : Crystal::ASTNode? = nil) : String
         io = IO::Memory.new
         singular = Inflector.underscore(class_name)
         table_name = Inflector.pluralize(singular)
@@ -98,6 +99,35 @@ module Railcar
         # Default Delete if no destroy override was generated
         unless has_destroy
           io << "func (m *#{class_name}) Delete() error { return railcar.Delete(m) }\n\n"
+        end
+
+        # Extract broadcast callbacks from the pre-filtered AST
+        after_save_stmts = [] of Crystal::ASTNode
+        after_delete_stmts = [] of Crystal::ASTNode
+        if broadcast_ast
+          broadcast_body = case broadcast_ast
+                          when Crystal::ClassDef
+                            case broadcast_ast.as(Crystal::ClassDef).body
+                            when Crystal::Expressions then broadcast_ast.as(Crystal::ClassDef).body.as(Crystal::Expressions).expressions
+                            else [broadcast_ast.as(Crystal::ClassDef).body]
+                            end
+                          else [] of Crystal::ASTNode
+                          end
+          broadcast_body.each do |expr|
+            # after_save/after_destroy are Call nodes, but BroadcastsTo returns
+            # Expressions containing them, so also check Expressions
+            collect_callbacks(expr, after_save_stmts, after_delete_stmts)
+          end
+        end
+
+        # After save/delete callbacks → AfterSave/AfterDelete methods (Broadcaster interface)
+        unless after_save_stmts.empty? && after_delete_stmts.empty?
+          io << "func (m *#{class_name}) AfterSave() {\n"
+          after_save_stmts.each { |stmt| emit_callback_body(stmt, io, class_name) }
+          io << "}\n\n"
+          io << "func (m *#{class_name}) AfterDelete() {\n"
+          after_delete_stmts.each { |stmt| emit_callback_body(stmt, io, class_name) }
+          io << "}\n\n"
         end
 
         # Static functions: Find, All, Count, Last, Create
@@ -439,6 +469,120 @@ module Railcar
 
       def go_field_name(name : String) : String
         name.split("_").map(&.capitalize).join("")
+      end
+
+      private def collect_callbacks(node : Crystal::ASTNode,
+                                    save_stmts : Array(Crystal::ASTNode),
+                                    delete_stmts : Array(Crystal::ASTNode))
+        case node
+        when Crystal::Call
+          if node.name == "after_save" && node.block
+            save_stmts << node.block.not_nil!.body
+          elsif node.name == "after_destroy" && node.block
+            delete_stmts << node.block.not_nil!.body
+          end
+        when Crystal::Expressions
+          node.expressions.each { |e| collect_callbacks(e, save_stmts, delete_stmts) }
+        end
+      end
+
+      private def emit_callback_body(node : Crystal::ASTNode, io : IO, class_name : String)
+        case node
+        when Crystal::Expressions
+          node.expressions.each { |e| emit_callback_body(e, io, class_name) }
+        when Crystal::Call
+          name = node.name
+          case name
+          when "broadcast_replace_to", "broadcast_append_to", "broadcast_prepend_to", "broadcast_remove_to"
+            func = case name
+                   when "broadcast_replace_to" then "railcar.BroadcastReplaceTo"
+                   when "broadcast_append_to"  then "railcar.BroadcastAppendTo"
+                   when "broadcast_prepend_to" then "railcar.BroadcastPrependTo"
+                   when "broadcast_remove_to"  then "railcar.BroadcastRemoveTo"
+                   else "railcar.BroadcastReplaceTo"
+                   end
+            # First arg is channel expression, second (optional) is target
+            channel = node.args.first? ? emit_callback_expr(node.args.first, class_name) : "\"\""
+            target = node.args[1]? ? emit_callback_expr(node.args[1], class_name) : "\"\""
+            # Also check named arg "target"
+            if target == "\"\"" && (named = node.named_args)
+              if target_arg = named.find { |na| na.name == "target" }
+                target = emit_callback_expr(target_arg.value, class_name)
+              end
+            end
+            # If called on an object (e.g., article.broadcast_replace_to), use that object
+            if obj = node.obj
+              if obj.is_a?(Crystal::Call)
+                # Association method call (e.g., article → m.Article()) returns (value, error)
+                assoc_name = obj.as(Crystal::Call).name
+                go_method = "m.#{go_field_name(assoc_name)}()"
+                io << "\tif #{assoc_name}, err := #{go_method}; err == nil {\n"
+                io << "\t\t#{func}(#{assoc_name}, #{channel}, #{target})\n"
+                io << "\t}\n"
+              else
+                obj_expr = emit_callback_expr(obj, class_name)
+                io << "\t#{func}(#{obj_expr}, #{channel}, #{target})\n"
+              end
+            else
+              io << "\t#{func}(m, #{channel}, #{target})\n"
+            end
+          else
+            # Other calls in callbacks (e.g., article method calls)
+            if node.obj
+              io << "\t#{emit_callback_expr(node, class_name)}\n"
+            end
+          end
+        when Crystal::ExceptionHandler
+          # rescue nil → just emit the body, ignore errors
+          emit_callback_body(node.body, io, class_name)
+        end
+      end
+
+      private def emit_callback_expr(node : Crystal::ASTNode, class_name : String) : String
+        case node
+        when Crystal::StringLiteral
+          node.value.inspect
+        when Crystal::StringInterpolation
+          # "article_#{article_id}_comments" → fmt.Sprintf("article_%d_comments", m.ArticleId)
+          format_parts = [] of String
+          go_args = [] of String
+          node.expressions.each do |part|
+            case part
+            when Crystal::StringLiteral
+              format_parts << part.value.gsub("%", "%%")
+            when Crystal::Call
+              if part.name.ends_with?("_id") || part.name == "id"
+                format_parts << "%d"
+              else
+                format_parts << "%v"
+              end
+              go_args << emit_callback_expr(part, class_name)
+            else
+              format_parts << "%v"
+              go_args << emit_callback_expr(part, class_name)
+            end
+          end
+          if go_args.empty?
+            format_parts.join.inspect
+          else
+            "fmt.Sprintf(#{format_parts.join.inspect}, #{go_args.join(", ")})"
+          end
+        when Crystal::Call
+          obj = node.obj
+          if obj
+            obj_str = emit_callback_expr(obj, class_name)
+            "#{obj_str}.#{go_field_name(node.name)}()"
+          else
+            # Bare method call → receiver method on m
+            "m.#{go_field_name(node.name)}"
+          end
+        when Crystal::InstanceVar
+          "m.#{go_field_name(node.name.lchop("@"))}"
+        when Crystal::Var
+          node.name == "self" ? "m" : node.name
+        else
+          emit_go_expr(node)
+        end
       end
     end
   end

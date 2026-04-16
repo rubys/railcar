@@ -3,10 +3,18 @@
 package railcar
 
 import (
+	"context"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"strings"
+	"sync"
 	"time"
+
+	"nhooyr.io/websocket"
 )
 
 // DB is the shared database connection.
@@ -40,6 +48,12 @@ type Model interface {
 	ScanRow(*sql.Rows) error
 	ColumnValues() []any
 	ColumnValuesForUpdate() []any
+}
+
+// Broadcaster is the optional interface for models with after_save/after_delete hooks.
+type Broadcaster interface {
+	AfterSave()
+	AfterDelete()
 }
 
 // Find loads a model by ID.
@@ -124,10 +138,21 @@ func Save(m Model) error {
 
 	now := time.Now().UTC().Format("2006-01-02 15:04:05.000000")
 
+	var err error
 	if m.Persisted() {
-		return doUpdate(m, now)
+		err = doUpdate(m, now)
+	} else {
+		err = doInsert(m, now)
 	}
-	return doInsert(m, now)
+	if err != nil {
+		return err
+	}
+
+	// Run after_save callback if model implements Broadcaster
+	if b, ok := m.(Broadcaster); ok {
+		b.AfterSave()
+	}
+	return nil
 }
 
 func doInsert(m Model, now string) error {
@@ -208,7 +233,14 @@ func doUpdate(m Model, now string) error {
 // Delete removes a record from the database.
 func Delete(m Model) error {
 	_, err := DB.Exec("DELETE FROM "+m.TableName()+" WHERE id = ?", m.ID())
-	return err
+	if err != nil {
+		return err
+	}
+	// Run after_delete callback if model implements Broadcaster
+	if b, ok := m.(Broadcaster); ok {
+		b.AfterDelete()
+	}
+	return nil
 }
 
 // Pluralize returns a simple English pluralization.
@@ -228,4 +260,221 @@ func Truncate(text string, length int) string {
 		return text[:length]
 	}
 	return text[:length-3] + "..."
+}
+
+// ── Broadcasting ──
+
+// RenderPartialFunc is a function that renders a model to HTML for broadcasting.
+type RenderPartialFunc func(m Model) string
+
+// partialRenderers maps model type names to their partial render functions.
+var partialRenderers = map[string]RenderPartialFunc{}
+
+// RegisterPartial registers a partial renderer for a model type.
+func RegisterPartial(typeName string, fn RenderPartialFunc) {
+	partialRenderers[typeName] = fn
+}
+
+// TurboStreamHTML generates a turbo-stream HTML fragment.
+func TurboStreamHTML(action, target, content string) string {
+	if content != "" {
+		return fmt.Sprintf(`<turbo-stream action="%s" target="%s"><template>%s</template></turbo-stream>`, action, target, content)
+	}
+	return fmt.Sprintf(`<turbo-stream action="%s" target="%s"></turbo-stream>`, action, target)
+}
+
+// DomIDFor returns the dom_id for a model instance.
+func DomIDFor(m Model) string {
+	name := strings.TrimSuffix(m.TableName(), "s") // simple singularize
+	return fmt.Sprintf("%s_%d", name, m.ID())
+}
+
+// RenderPartial renders a model using its registered partial renderer.
+func RenderPartial(m Model) string {
+	typeName := fmt.Sprintf("%T", m)
+	if i := strings.LastIndex(typeName, "."); i >= 0 {
+		typeName = typeName[i+1:]
+	}
+	typeName = strings.TrimPrefix(typeName, "*")
+	if fn, ok := partialRenderers[typeName]; ok {
+		return fn(m)
+	}
+	return fmt.Sprintf("<div>%v</div>", m)
+}
+
+// BroadcastReplaceTo broadcasts a replace turbo-stream to the given channel.
+func BroadcastReplaceTo(m Model, channel string, target string) {
+	if target == "" {
+		target = DomIDFor(m)
+	}
+	html := RenderPartial(m)
+	stream := TurboStreamHTML("replace", target, html)
+	Cable.Broadcast(channel, stream)
+}
+
+// BroadcastAppendTo broadcasts an append turbo-stream to the given channel.
+func BroadcastAppendTo(m Model, channel string, target string) {
+	if target == "" {
+		target = m.TableName()
+	}
+	html := RenderPartial(m)
+	stream := TurboStreamHTML("append", target, html)
+	Cable.Broadcast(channel, stream)
+}
+
+// BroadcastPrependTo broadcasts a prepend turbo-stream to the given channel.
+func BroadcastPrependTo(m Model, channel string, target string) {
+	if target == "" {
+		target = m.TableName()
+	}
+	html := RenderPartial(m)
+	stream := TurboStreamHTML("prepend", target, html)
+	Cable.Broadcast(channel, stream)
+}
+
+// BroadcastRemoveTo broadcasts a remove turbo-stream to the given channel.
+func BroadcastRemoveTo(m Model, channel string, target string) {
+	if target == "" {
+		target = DomIDFor(m)
+	}
+	stream := TurboStreamHTML("remove", target, "")
+	Cable.Broadcast(channel, stream)
+}
+
+// ── CableServer (Action Cable WebSocket pub/sub) ──
+
+type subscriber struct {
+	conn       *websocket.Conn
+	ctx        context.Context
+	identifier string
+}
+
+// CableServer manages WebSocket subscriptions and broadcasts.
+type CableServer struct {
+	mu       sync.RWMutex
+	channels map[string][]subscriber
+}
+
+// Cable is the global CableServer instance.
+var Cable = &CableServer{channels: make(map[string][]subscriber)}
+
+// Subscribe adds a WebSocket connection to a channel.
+func (cs *CableServer) Subscribe(channel string, conn *websocket.Conn, ctx context.Context, identifier string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	cs.channels[channel] = append(cs.channels[channel], subscriber{conn, ctx, identifier})
+}
+
+// Unsubscribe removes a WebSocket connection from all channels.
+func (cs *CableServer) Unsubscribe(conn *websocket.Conn) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	for ch, subs := range cs.channels {
+		var kept []subscriber
+		for _, s := range subs {
+			if s.conn != conn {
+				kept = append(kept, s)
+			}
+		}
+		if len(kept) > 0 {
+			cs.channels[ch] = kept
+		} else {
+			delete(cs.channels, ch)
+		}
+	}
+}
+
+// Broadcast sends a message to all subscribers of a channel.
+func (cs *CableServer) Broadcast(channel string, html string) {
+	cs.mu.RLock()
+	subs := cs.channels[channel]
+	cs.mu.RUnlock()
+
+	for _, s := range subs {
+		msg, _ := json.Marshal(map[string]string{
+			"type":       "message",
+			"identifier": s.identifier,
+			"message":    html,
+		})
+		s.conn.Write(s.ctx, websocket.MessageText, msg)
+	}
+}
+
+// CableHandler handles Action Cable WebSocket connections at /cable.
+func CableHandler(w http.ResponseWriter, r *http.Request) {
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		Subprotocols: []string{"actioncable-v1-json"},
+	})
+	if err != nil {
+		log.Println("WebSocket accept error:", err)
+		return
+	}
+	defer func() {
+		Cable.Unsubscribe(conn)
+		conn.Close(websocket.StatusNormalClosure, "")
+	}()
+
+	ctx := r.Context()
+
+	// Send welcome
+	welcome, _ := json.Marshal(map[string]string{"type": "welcome"})
+	conn.Write(ctx, websocket.MessageText, welcome)
+
+	// Start ping loop
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case t := <-ticker.C:
+				ping, _ := json.Marshal(map[string]any{"type": "ping", "message": t.Unix()})
+				if err := conn.Write(ctx, websocket.MessageText, ping); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	// Read messages
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+
+		var msg map[string]string
+		if err := json.Unmarshal(data, &msg); err != nil {
+			continue
+		}
+
+		if msg["command"] == "subscribe" {
+			identifier := msg["identifier"]
+			// Decode channel from identifier: {"channel":"...","signed_stream_name":"base64--sig"}
+			var idData map[string]string
+			json.Unmarshal([]byte(identifier), &idData)
+			signed := idData["signed_stream_name"]
+			// Extract base64 portion before "--"
+			parts := strings.SplitN(signed, "--", 2)
+			if len(parts) == 0 {
+				continue
+			}
+			decoded, err := base64.StdEncoding.DecodeString(parts[0])
+			if err != nil {
+				continue
+			}
+			// Decoded is a JSON string, e.g., "\"articles\"" or "\"article_1_comments\""
+			var channel string
+			json.Unmarshal(decoded, &channel)
+
+			Cable.Subscribe(channel, conn, ctx, identifier)
+
+			confirm, _ := json.Marshal(map[string]string{
+				"type":       "confirm_subscription",
+				"identifier": identifier,
+			})
+			conn.Write(ctx, websocket.MessageText, confirm)
+		}
+	}
 }

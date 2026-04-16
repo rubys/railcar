@@ -34,6 +34,7 @@ module Railcar
   class GoGenerator
     getter app : AppModel
     getter rails_dir : String
+    getter broadcast_asts : Hash(String, Crystal::ASTNode) = {} of String => Crystal::ASTNode
 
     def initialize(@app, @rails_dir)
     end
@@ -79,6 +80,10 @@ module Railcar
         # Same filter chain as Python/TypeScript
         ast = SourceParser.parse(source_path)
         ast = ast.transform(BroadcastsTo.new)
+
+        # Save broadcast callbacks before ModelBoilerplate strips them
+        @broadcast_asts[name] = ast.clone
+
         ast = ast.transform(ModelBoilerplatePython.new(schema, model))
 
         asts[name] = ast
@@ -94,7 +99,10 @@ module Railcar
 
       go 1.21
 
-      require modernc.org/sqlite v1.37.1
+      require (
+        modernc.org/sqlite v1.37.1
+        nhooyr.io/websocket v1.8.17
+      )
       MOD
       puts "  go.mod"
     end
@@ -125,7 +133,8 @@ module Railcar
         schema = schema_map[table_name]?
         next unless schema
 
-        source = emitter.emit_model(ast.as(Crystal::ClassDef), name, schema, app_name)
+        broadcast_ast = broadcast_asts[name]?
+        source = emitter.emit_model(ast.as(Crystal::ClassDef), name, schema, app_name, broadcast_ast)
         singular = Inflector.underscore(name)
 
         File.write(File.join(models_dir, "#{singular}.go"), source)
@@ -586,6 +595,7 @@ module Railcar
       io << "\t\"#{app_name}/controllers\"\n"
       io << "\t\"#{app_name}/models\"\n"
       io << "\t\"#{app_name}/railcar\"\n"
+      io << "\t\"#{app_name}/views\"\n"
       io << "\t_ \"modernc.org/sqlite\"\n"
       io << ")\n\n"
 
@@ -627,9 +637,36 @@ module Railcar
       io << "\tdefer db.Close()\n"
       io << "\tseedDB()\n\n"
 
+      # Register partial renderers for broadcasting
+      app.models.each do |name, model|
+        singular = Inflector.underscore(name)
+        plural = Inflector.pluralize(singular)
+        # Check if there's a partial template for this model
+        partial_path = File.join(rails_dir, "app/views/#{plural}/_#{singular}.html.erb")
+        if File.exists?(partial_path)
+          # Determine if partial needs parent context (belongs_to association)
+          parent_assoc = model.associations.find { |a| a.kind == :belongs_to }
+          if parent_assoc
+            parent_name = parent_assoc.name
+            parent_model = Inflector.classify(parent_name)
+            io << "\trailcar.RegisterPartial(\"#{name}\", func(m railcar.Model) string {\n"
+            io << "\t\trec := m.(*models.#{name})\n"
+            io << "\t\tparent, _ := rec.#{parent_name.capitalize}()\n"
+            io << "\t\treturn views.Render#{name}Partial(parent, rec)\n"
+            io << "\t})\n"
+          else
+            io << "\trailcar.RegisterPartial(\"#{name}\", func(m railcar.Model) string {\n"
+            io << "\t\treturn views.Render#{name}Partial(m.(*models.#{name}))\n"
+            io << "\t})\n"
+          end
+        end
+      end
+      io << "\n"
+
       # Routes
       io << "\tmux := http.NewServeMux()\n"
-      io << "\tmux.Handle(\"GET /static/\", http.StripPrefix(\"/static/\", http.FileServer(http.Dir(\"static\"))))\n\n"
+      io << "\tmux.Handle(\"GET /static/\", http.StripPrefix(\"/static/\", http.FileServer(http.Dir(\"static\"))))\n"
+      io << "\tmux.HandleFunc(\"GET /cable\", railcar.CableHandler)\n\n"
 
       # Routes from AppModel
       app.routes.routes.each do |route|
