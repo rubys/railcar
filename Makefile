@@ -3,7 +3,7 @@ BUILD_DIR := build
 LIB_DIR := $(BUILD_DIR)/lib
 BLOG_URL := https://ruby2js.github.io/ruby2js/releases/demo-blog.tar.gz
 
-all: $(BUILD_DIR)/railcar
+all: $(BUILD_DIR)/railcar $(BUILD_DIR)/railcar-ast
 
 $(LIB_DIR)/libprism.a:
 	@if [ -z "$(PRISM_GEM)" ]; then echo "Error: prism gem not found. Install with: gem install prism"; exit 1; fi
@@ -22,6 +22,9 @@ lib/llvm: shard.yml
 
 $(BUILD_DIR)/railcar: $(LIB_DIR)/libprism.a lib/llvm $(shell find src -name '*.cr' 2>/dev/null)
 	CRYSTAL_CONFIG_PATH="lib:$(CRYSTAL_STDLIB)" CRYSTAL_STDLIB="$(CRYSTAL_STDLIB)" crystal build src/cli.cr -o $(BUILD_DIR)/railcar
+
+$(BUILD_DIR)/railcar-ast: $(LIB_DIR)/libprism.a lib/llvm $(shell find src -name '*.cr' 2>/dev/null)
+	CRYSTAL_CONFIG_PATH="lib:$(CRYSTAL_STDLIB)" CRYSTAL_STDLIB="$(CRYSTAL_STDLIB)" crystal build src/cli/ast.cr -o $(BUILD_DIR)/railcar-ast
 
 test: $(LIB_DIR)/libprism.a $(BUILD_DIR)/demo/blog/Gemfile
 	CRYSTAL_CONFIG_PATH="lib:$(CRYSTAL_STDLIB)" crystal spec
