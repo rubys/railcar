@@ -119,10 +119,17 @@ module Railcar
       ] + defs)
 
       begin
-        program.semantic(program.normalize(full_ast))
+        # cleanup: false skips the cleanup_transformer step which would
+        # otherwise substitute expanded forms for original source shapes
+        # (StringInterpolation → String.interpolation call, ArrayLiteral,
+        # HashLiteral, etc.) and flatten named_args into positional args.
+        # Types still propagate correctly because main_visitor calls
+        # `node.bind_to expanded` before cleanup would have run. This
+        # gives us typed nodes that still have the original source shape —
+        # which is exactly what emitters downstream need.
+        program.semantic(program.normalize(full_ast), cleanup: false)
       rescue ex
         STDERR.puts "  view semantic analysis failed:"
-        # Crystal TypeException#to_s gives the full chained explanation.
         ex.to_s.lines.first(30).each { |ln| STDERR.puts "    #{ln.chomp}" }
         return false
       end

@@ -66,6 +66,16 @@ module Railcar
     private def to_go_call(node : Crystal::Call) : String
       name = node.name
       obj = node.obj
+
+      # Crystal's semantic pass normalizes `"x_#{y}_z"` string interpolations
+      # into `String.interpolation("x_", y, "_z")` calls. Recognize this
+      # shape and route it through the sprintf emitter so it renders as a
+      # proper Go format string, not a literal String.Interpolation(...) call.
+      if name == "interpolation" && obj.is_a?(Crystal::Path) &&
+         obj.as(Crystal::Path).names == ["String"]
+        return emit_sprintf_from_args(node.args)
+      end
+
       args = node.args.map { |a| to_go(a) }
 
       # Named args → additional args
@@ -203,16 +213,22 @@ module Railcar
 
     # Convert StringInterpolation to fmt.Sprintf
     private def emit_sprintf(node : Crystal::StringInterpolation) : String
+      emit_sprintf_from_args(node.expressions)
+    end
+
+    # Shared sprintf generator for a list of parts. Used both by
+    # StringInterpolation nodes (source-form) and by the normalized
+    # `String.interpolation(...)` call that Crystal's semantic pass produces.
+    private def emit_sprintf_from_args(parts : Array(Crystal::ASTNode)) : String
       format_parts = [] of String
       go_args = [] of String
 
-      node.expressions.each do |part|
+      parts.each do |part|
         case part
         when Crystal::StringLiteral
           format_parts << part.value.gsub("\\", "\\\\").gsub("%", "%%").gsub("`", "` + \"`\" + `")
         else
           expr = to_go(part)
-          # Determine format verb
           format_parts << "%v"
           go_args << expr
         end
@@ -220,7 +236,6 @@ module Railcar
 
       format_str = format_parts.join
       if go_args.empty?
-        # Pure string literal — use backtick
         "`#{format_str}`"
       else
         "fmt.Sprintf(`#{format_str}`, #{go_args.join(", ")})"
@@ -238,6 +253,15 @@ module Railcar
         if target.is_a?(Crystal::Var) && target.name == "_buf"
           if value.is_a?(Crystal::StringLiteral) && value.value == ""
             io << "#{indent}var buf strings.Builder\n"
+          elsif (rhs = extract_buf_concat_rhs(value))
+            # `_buf = _buf + X` — the shape Crystal's normalizer produces
+            # for `_buf += X` after program.semantic(). Treat it exactly
+            # like the OpAssign case below.
+            if rhs.is_a?(Crystal::StringLiteral)
+              io << "#{indent}buf.WriteString(#{to_go(rhs)})\n"
+            else
+              io << "#{indent}buf.WriteString(#{escape_if_needed(rhs)})\n"
+            end
           else
             io << "#{indent}buf.WriteString(#{to_go(value)})\n"
           end
@@ -446,6 +470,17 @@ module Railcar
     # Infer the receiver type for MethodMap lookup.
     private def infer_type(node : Crystal::ASTNode) : String
       @resolver.resolve(node)
+    end
+
+    # If `value` matches `_buf + X` (the normalized form of `_buf += X`
+    # after Crystal's semantic pass lowers OpAssign), return X. Otherwise
+    # nil so the caller falls through to the default path.
+    private def extract_buf_concat_rhs(value : Crystal::ASTNode) : Crystal::ASTNode?
+      return nil unless value.is_a?(Crystal::Call)
+      return nil unless value.name == "+"
+      obj = value.obj
+      return nil unless obj.is_a?(Crystal::Var) && obj.name == "_buf"
+      value.args.first?
     end
 
     private def go_field_name(name : String) : String

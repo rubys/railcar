@@ -17,6 +17,9 @@
 # typed-AST override in the future.
 
 require "compiler/crystal/syntax"
+# semantic is required so `node.type?` resolves — the primary-path for
+# typed-AST resolution depends on it.
+require "../semantic"
 require "./app_model"
 require "./schema_extractor"
 require "./inflector"
@@ -52,7 +55,16 @@ module Railcar
     # Resolve an AST node to a normalized receiver-type name.
     # Returns one of: "String", "Numeric", "Array", "Hash", "Bool", "Nil",
     # a model name (e.g., "Article"), or "Any".
+    #
+    # When the node carries a semantic type (`node.type?` populated by a
+    # prior `program.semantic()` pass), the authoritative answer comes
+    # from Crystal's type inference. Otherwise this falls back to
+    # metadata-based resolution derived from AppModel + local bindings.
     def resolve(node : Crystal::ASTNode) : String
+      if resolved = resolve_semantic(node)
+        return resolved
+      end
+
       case node
       when Crystal::StringLiteral, Crystal::StringInterpolation
         "String"
@@ -83,6 +95,16 @@ module Railcar
       else
         "Any"
       end
+    end
+
+    # If the node has a type set by Crystal's semantic analyzer, return its
+    # normalized form. Otherwise return nil so the metadata path takes over.
+    private def resolve_semantic(node : Crystal::ASTNode) : String?
+      t = node.type? rescue nil
+      return nil unless t
+      normalized = TypeResolver.normalize_crystal_type(t.to_s)
+      return nil if normalized == "Any"
+      normalized
     end
 
     # Resolve a bare name — loop var, controller-ivar-turned-local, or

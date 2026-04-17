@@ -29,9 +29,13 @@ require "../filters/view_cleanup"
 require "../emitter/go/cr2go"
 require "./go_view_emitter"
 require "./type_resolver"
+require "./view_semantic_analyzer"
+require "ast-builder"
 
 module Railcar
   class GoGenerator
+    include CrystalAST::Builder
+
     getter app : AppModel
     getter rails_dir : String
     getter broadcast_asts : Hash(String, Crystal::ASTNode) = {} of String => Crystal::ASTNode
@@ -322,6 +326,8 @@ module Railcar
       views_dir = File.join(output_dir, "views")
       Dir.mkdir_p(views_dir)
 
+      all_partial_names = collect_partial_names(rails_views)
+
       app.controllers.each do |info|
         controller_name = Inflector.underscore(info.name).chomp("_controller")
         singular = Inflector.singularize(controller_name)
@@ -391,11 +397,13 @@ module Railcar
             # Determine function parameters and set emitter param_names
             model_name = Inflector.classify(singular)
             emitter.param_names = Set(String).new
+            typed_args = [] of Crystal::Arg
             if is_partial
               partial_name = basename.lchop("_")
               if partial_name == "form"
                 io << "func #{func_name}(#{singular} *models.#{model_name}) string {\n"
                 emitter.param_names << singular
+                typed_args << arg(singular, restriction: path(model_name))
               else
                 partial_model_name = Inflector.classify(partial_name)
                 model_info = app.models[partial_model_name]?
@@ -406,9 +414,12 @@ module Railcar
                   io << "func #{func_name}(#{parent_name} *models.#{parent_model}, #{partial_name} *models.#{partial_model_name}) string {\n"
                   emitter.param_names << parent_name
                   emitter.param_names << partial_name
+                  typed_args << arg(parent_name, restriction: path(parent_model))
+                  typed_args << arg(partial_name, restriction: path(partial_model_name))
                 else
                   io << "func #{func_name}(#{partial_name} *models.#{partial_model_name}) string {\n"
                   emitter.param_names << partial_name
+                  typed_args << arg(partial_name, restriction: path(partial_model_name))
                 end
               end
             else
@@ -416,10 +427,24 @@ module Railcar
               param_type = basename == "index" ? "[]*models.#{model_name}" : "*models.#{model_name}"
               io << "func #{func_name}(#{param} #{param_type}) string {\n"
               emitter.param_names << param
+              if basename == "index"
+                array_rest = Crystal::Parser.parse("x : Array(#{model_name})")
+                  .as(Crystal::TypeDeclaration).declared_type
+                typed_args << arg(param, restriction: array_rest)
+              else
+                typed_args << arg(param, restriction: path(model_name))
+              end
+              typed_args << arg("notice", default_value: str(""), restriction: path("String"))
             end
 
-            # Emit function body
-            emitter.emit_stmt(body, io, "\t")
+            # Type the view body via semantic analysis with cleanup: false,
+            # which preserves source shape (named_args, StringInterpolation,
+            # etc.) while still attaching types via bind_to. On success the
+            # emitter sees a body where every expression has `.type?` set.
+            typed_body = attempt_semantic(basename, body, typed_args, all_partial_names)
+            body_to_emit = typed_body || body
+
+            emitter.emit_stmt(body_to_emit, io, "\t")
             io << "}\n\n"
           rescue ex
             STDERR.puts "  WARN: #{func_name}: #{ex.message}"
@@ -437,6 +462,32 @@ module Railcar
         File.write(out_path, io.to_s)
         puts "  views/#{plural}.go"
       end
+    end
+
+    # Scan the views tree for partials (files beginning with _) and return
+    # their base names (without underscore or .html.erb). Used to populate
+    # `partial_names` on ViewSemanticAnalyzer so render_<x>_partial calls
+    # have stubs during view semantic analysis.
+    private def collect_partial_names(rails_views : String) : Array(String)
+      names = Set(String).new
+      Dir.glob(File.join(rails_views, "**/_*.html.erb")).each do |path|
+        names << File.basename(path, ".html.erb").lchop("_")
+      end
+      names.to_a
+    end
+
+    # Wrap a filtered view body in a typed Def, run it through semantic
+    # analysis, and return the typed body on success (or nil on failure).
+    # Failure falls back to the untyped body so emission can still proceed.
+    private def attempt_semantic(basename : String, body : Crystal::ASTNode,
+                                  typed_args : Array(Crystal::Arg),
+                                  partial_names : Array(String)) : Crystal::ASTNode?
+      view_def = def_("render", typed_args, body, return_type: path("String"))
+      analyzer = ViewSemanticAnalyzer.new(app)
+      analyzer.partial_names = partial_names
+      analyzer.add_view(basename, view_def)
+      return nil unless analyzer.analyze
+      analyzer.typed_body_for(basename)
     end
 
     private def build_view_filters : Array(Crystal::Transformer)

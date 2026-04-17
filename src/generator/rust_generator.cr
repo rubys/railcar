@@ -27,10 +27,14 @@ require "../filters/method_map"
 require "./go_view_emitter"
 require "./rust_view_emitter"
 require "./type_resolver"
+require "./view_semantic_analyzer"
 require "./erb_compiler"
+require "ast-builder"
 
 module Railcar
   class RustGenerator
+    include CrystalAST::Builder
+
     getter app : AppModel
     getter rails_dir : String
     getter broadcast_asts : Hash(String, Crystal::ASTNode) = {} of String => Crystal::ASTNode
@@ -298,6 +302,8 @@ module Railcar
       end
       io << "\n"
 
+      all_partial_names = collect_partial_names(rails_views)
+
       app.controllers.each do |info|
         controller_name = Inflector.underscore(info.name).chomp("_controller")
         singular = Inflector.singularize(controller_name)
@@ -346,7 +352,9 @@ module Railcar
               end
             end
 
-            # Emit Rust function
+            # Emit Rust function signature + build parallel typed args for
+            # the semantic analyzer.
+            typed_args = [] of Crystal::Arg
             if is_partial
               partial_name = basename.lchop("_")
               partial_model_name = Inflector.classify(partial_name)
@@ -354,22 +362,37 @@ module Railcar
               parent_assoc = pmodel_info.try(&.associations.find { |a| a.kind == :belongs_to })
               if partial_name == "form"
                 io << "pub fn #{func_name}(#{singular}: &#{model_name}) -> String {\n"
+                typed_args << arg(singular, restriction: path(model_name))
               elsif parent_assoc
                 parent_name = parent_assoc.name
                 parent_model = Inflector.classify(parent_name)
                 io << "pub fn #{func_name}(_#{parent_name}: &#{parent_model}, #{partial_name}: &#{partial_model_name}) -> String {\n"
+                typed_args << arg(parent_name, restriction: path(parent_model))
+                typed_args << arg(partial_name, restriction: path(partial_model_name))
               else
                 io << "pub fn #{func_name}(#{partial_name}: &#{partial_model_name}) -> String {\n"
+                typed_args << arg(partial_name, restriction: path(partial_model_name))
               end
             else
               param = basename == "index" ? plural : singular
               param_type = basename == "index" ? "&[#{model_name}]" : "&#{model_name}"
               io << "pub fn #{func_name}(#{param}: #{param_type}) -> String {\n"
+              if basename == "index"
+                array_rest = Crystal::Parser.parse("x : Array(#{model_name})")
+                  .as(Crystal::TypeDeclaration).declared_type
+                typed_args << arg(param, restriction: array_rest)
+              else
+                typed_args << arg(param, restriction: path(model_name))
+              end
+              typed_args << arg("notice", default_value: str(""), restriction: path("String"))
             end
+
+            typed_body = attempt_semantic(basename, body, typed_args, all_partial_names)
+            body_to_emit = typed_body || body
 
             resolver = TypeResolver.new(app)
             emitter = RustViewEmitter.new(app, singular, resolver)
-            emitter.emit_body(body, io)
+            emitter.emit_body(body_to_emit, io)
 
             io << "}\n\n"
           rescue ex
@@ -393,6 +416,29 @@ module Railcar
         RenderToPartial.new,
         FormToHTML.new,
       ] of Crystal::Transformer
+    end
+
+    # Scan for partial basenames across all view dirs so the semantic
+    # analyzer can stub render_<x>_partial calls.
+    private def collect_partial_names(rails_views : String) : Array(String)
+      names = Set(String).new
+      Dir.glob(File.join(rails_views, "**/_*.html.erb")).each do |p|
+        names << File.basename(p, ".html.erb").lchop("_")
+      end
+      names.to_a
+    end
+
+    # Run a view body through semantic analysis, return typed body on
+    # success or nil on failure (caller falls back to untyped body).
+    private def attempt_semantic(basename : String, body : Crystal::ASTNode,
+                                  typed_args : Array(Crystal::Arg),
+                                  partial_names : Array(String)) : Crystal::ASTNode?
+      view_def = def_("render", typed_args, body, return_type: path("String"))
+      analyzer = ViewSemanticAnalyzer.new(app)
+      analyzer.partial_names = partial_names
+      analyzer.add_view(basename, view_def)
+      return nil unless analyzer.analyze
+      analyzer.typed_body_for(basename)
     end
 
     # ── Controllers ──

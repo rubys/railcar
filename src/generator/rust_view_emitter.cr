@@ -39,6 +39,17 @@ module Railcar
         if target.is_a?(Crystal::Var) && target.name == "_buf"
           if value.is_a?(Crystal::StringLiteral) && value.value == ""
             io << "#{indent}let mut buf = String::new();\n"
+          elsif (rhs = extract_buf_concat_rhs(value))
+            # `_buf = _buf + X` — Crystal's normalizer lowers `_buf += X`
+            # to this shape during program.semantic(). Treat as append.
+            if rhs.is_a?(Crystal::StringLiteral)
+              escaped = rhs.value.gsub("\\", "\\\\").gsub("\"", "\\\"")
+              io << "#{indent}buf.push_str(\"#{escaped}\");\n"
+            elsif rhs.is_a?(Crystal::Call) && rhs.name == "str" && rhs.args.size == 1
+              io << "#{indent}buf.push_str(&#{to_rust(rhs.args[0])});\n"
+            else
+              io << "#{indent}buf.push_str(&#{to_rust(rhs)});\n"
+            end
           end
         else
           val_str = to_rust(value)
@@ -171,6 +182,15 @@ module Railcar
     private def to_rust_call(node : Crystal::Call) : String
       name = node.name
       obj = node.obj
+
+      # Normalized StringInterpolation: `"x_#{y}_z"` becomes
+      # `String.interpolation("x_", y, "_z")` after semantic. Route to the
+      # format! helper so it renders as proper Rust.
+      if name == "interpolation" && obj.is_a?(Crystal::Path) &&
+         obj.as(Crystal::Path).names == ["String"]
+        return emit_format_from_args(node.args)
+      end
+
       args = node.args.map { |a| to_rust(a) }
 
       # Named args
@@ -279,9 +299,15 @@ module Railcar
     end
 
     private def emit_interp(node : Crystal::StringInterpolation) : String
+      emit_format_from_args(node.expressions)
+    end
+
+    # Shared format! emitter used both for StringInterpolation (source form)
+    # and for the normalized `String.interpolation(...)` call form.
+    private def emit_format_from_args(parts : Array(Crystal::ASTNode)) : String
       format_parts = [] of String
       format_args = [] of String
-      node.expressions.each do |part|
+      parts.each do |part|
         case part
         when Crystal::StringLiteral
           format_parts << part.value.gsub("\\", "\\\\").gsub("\"", "\\\"").gsub("{", "{{").gsub("}", "}}")
@@ -295,6 +321,16 @@ module Railcar
       else
         "format!(\"#{format_parts.join}\", #{format_args.join(", ")})"
       end
+    end
+
+    # If `value` matches `_buf + X` (the normalized form of `_buf += X`
+    # after Crystal semantic), return X. Otherwise nil.
+    private def extract_buf_concat_rhs(value : Crystal::ASTNode) : Crystal::ASTNode?
+      return nil unless value.is_a?(Crystal::Call)
+      return nil unless value.name == "+"
+      obj = value.obj
+      return nil unless obj.is_a?(Crystal::Var) && obj.name == "_buf"
+      value.args.first?
     end
 
     # Convert a view expression to a function argument — strip .to_string() for string literals
