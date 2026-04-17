@@ -25,6 +25,16 @@ module Railcar
                    @fixtures = [] of FixtureTable)
     end
 
+    # The set of every column name across every schema — used by view
+    # emitters to distinguish struct-field access from method calls.
+    def column_names : Set(String)
+      names = Set(String).new
+      schemas.each do |schema|
+        schema.columns.each { |c| names << c.name }
+      end
+      names
+    end
+
     # Build an AppModel by extracting from a Rails application directory
     def self.extract(rails_dir : String) : AppModel
       name = File.basename(rails_dir)

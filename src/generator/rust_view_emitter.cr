@@ -262,7 +262,7 @@ module Railcar
       if obj
         obj_str = to_rust(obj)
         field = name
-        if column_names.includes?(field) || field == "id"
+        if app.column_names.includes?(field) || field == "id"
           return "#{obj_str}.#{field}"
         end
         # Association methods return Result — unwrap
@@ -308,12 +308,5 @@ module Railcar
       end
     end
 
-    private def column_names : Set(String)
-      set = Set(String).new
-      app.schemas.each do |schema|
-        schema.columns.each { |c| set << c.name }
-      end
-      set
-    end
   end
 end

@@ -149,12 +149,31 @@ describe Railcar::GoViewEmitter do
     end
   end
 
-  describe "legacy heuristic (fallback when no resolver)" do
-    it "uses AST-shape heuristic when no resolver is attached" do
-      emitter = Railcar::GoViewEmitter.new("articles", Set(String).new)
-      # Literal string is obviously String
-      call = Crystal::Call.new(Crystal::StringLiteral.new("hello"), "downcase")
-      emitter.to_go(call).should eq %(strings.ToLower("hello"))
+  describe "loop body emission with block-arg type binding" do
+    it "binds each-block arg to element type so nested lookups type-check" do
+      # article.comments.each do |c| _buf << str(c.body.empty?) end
+      # c is a Comment, c.body is a String column — empty? should emit the
+      # String mapping (c.Body == "") rather than a generic Any fallback.
+      emitter, _ = Railcar.make_go_emitter
+
+      c_var = Crystal::Var.new("c")
+      body_call = Crystal::Call.new(c_var, "body")
+      empty_call = Crystal::Call.new(body_call, "empty?")
+      str_call = Crystal::Call.new(nil.as(Crystal::ASTNode?), "str",
+        [empty_call] of Crystal::ASTNode)
+      buf_op = Crystal::OpAssign.new(Crystal::Var.new("_buf"), "+", str_call)
+
+      block = Crystal::Block.new([c_var] of Crystal::Var, buf_op)
+      comments = Crystal::Call.new(Crystal::Var.new("article"), "comments")
+      each_call = Crystal::Call.new(comments, "each", block: block)
+
+      io = IO::Memory.new
+      emitter.emit_stmt(each_call, io, "")
+      out = io.to_s
+
+      out.should contain "for _, c := range"
+      out.should contain %(c.Body == "")
     end
   end
+
 end

@@ -20,11 +20,10 @@ module Railcar
     getter known_fields : Set(String)
     # Parameter names available in the current function scope
     property param_names : Set(String) = Set(String).new
-    # Resolves receiver types for MethodMap lookups. When nil, falls back
-    # to the legacy AST-shape heuristic.
-    property resolver : TypeResolver? = nil
+    # Resolves receiver types for MethodMap lookups.
+    property resolver : TypeResolver
 
-    def initialize(@controller, @known_fields = Set(String).new, @resolver = nil)
+    def initialize(@controller, @known_fields, @resolver)
     end
 
     # Emit a Go expression from a Crystal AST node
@@ -307,10 +306,39 @@ module Railcar
         io << "#{indent}for _, #{block_arg} := range #{coll_str} {\n"
       end
 
+      # Bind the block arg's type for the loop body so `item.title.size`
+      # inside `articles.each do |item|` resolves `item` to Article.
+      element_type = loop_element_type(collection)
+      inner = self.class.new(controller, known_fields, @resolver.with_binding(block_arg, element_type))
+      inner.param_names = param_names
+
       if body = block.body
-        emit_stmt(body, io, indent + "\t")
+        inner.emit_stmt(body, io, indent + "\t")
       end
       io << "#{indent}}\n"
+    end
+
+    # Given the collection expression in `coll.each`, infer what type each
+    # element resolves to. has_many associations (Array of ModelX) return
+    # the singular model name; unknown shapes fall back to "Any".
+    private def loop_element_type(collection : Crystal::ASTNode?) : String
+      return "Any" unless collection
+      coll_type = @resolver.resolve(collection)
+      return "Any" unless coll_type == "Array"
+      # For a Call named after a has_many assoc, the element type is the
+      # classified singular of the call name.
+      if collection.is_a?(Crystal::Call)
+        name = collection.as(Crystal::Call).name
+        candidate = Inflector.classify(Inflector.singularize(name))
+        return candidate if @resolver.app.models.has_key?(candidate)
+      end
+      # For a Var named like a model plural (e.g., `articles`), same deal.
+      if collection.is_a?(Crystal::Var)
+        name = collection.as(Crystal::Var).name
+        candidate = Inflector.classify(Inflector.singularize(name))
+        return candidate if @resolver.app.models.has_key?(candidate)
+      end
+      "Any"
     end
 
     private def emit_if(node : Crystal::If, io : IO, indent : String)
@@ -415,31 +443,9 @@ module Railcar
       false
     end
 
-    # Infer the Ruby type of an AST node for MethodMap lookup.
-    # Prefers TypeResolver (metadata-driven) when available; falls back
-    # to an AST-shape heuristic for callers that don't provide one.
+    # Infer the receiver type for MethodMap lookup.
     private def infer_type(node : Crystal::ASTNode) : String
-      if r = @resolver
-        return r.resolve(node)
-      end
-
-      case node
-      when Crystal::StringLiteral, Crystal::StringInterpolation
-        "String"
-      when Crystal::NumberLiteral
-        "Numeric"
-      when Crystal::ArrayLiteral
-        "Array"
-      when Crystal::HashLiteral
-        "Hash"
-      when Crystal::Call
-        if known_fields.includes?(node.name)
-          return "String"
-        end
-        "Any"
-      else
-        "Any"
-      end
+      @resolver.resolve(node)
     end
 
     private def go_field_name(name : String) : String

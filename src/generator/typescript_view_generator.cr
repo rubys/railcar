@@ -46,7 +46,7 @@ module Railcar
 
           resolver = TypeResolver.new(app)
           ejs_source = EjsConverter.convert_file(erb_path, basename, controller_name,
-            view_filters: build_view_filters, known_fields: all_column_names,
+            view_filters: build_view_filters, known_fields: app.column_names,
             resolver: resolver)
 
           File.write(File.join(controller_views_dir, ejs_name), ejs_source)
@@ -59,14 +59,6 @@ module Railcar
       Dir.mkdir_p(layout_dir)
       File.write(File.join(layout_dir, "application.ejs"), generate_layout)
       puts "  views/layouts/application.ejs"
-    end
-
-    private def all_column_names : Set(String)
-      fields = Set(String).new
-      app.schemas.each do |schema|
-        schema.columns.each { |c| fields << c.name }
-      end
-      fields
     end
 
     private def build_view_filters : Array(Crystal::Transformer)

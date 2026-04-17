@@ -330,7 +330,7 @@ module Railcar
         next unless Dir.exists?(template_dir)
 
         resolver = TypeResolver.new(app)
-        emitter = GoViewEmitter.new(controller_name, all_column_names, resolver)
+        emitter = GoViewEmitter.new(controller_name, app.column_names, resolver)
         io = IO::Memory.new
         io << "package views\n\n"
         io << "import (\n"
@@ -449,14 +449,6 @@ module Railcar
         RenderToPartial.new,
         FormToHTML.new,
       ] of Crystal::Transformer
-    end
-
-    private def all_column_names : Set(String)
-      fields = Set(String).new
-      app.schemas.each do |schema|
-        schema.columns.each { |c| fields << c.name }
-      end
-      fields
     end
 
     # ── Controllers ──
