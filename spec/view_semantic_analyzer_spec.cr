@@ -1,7 +1,16 @@
 require "spec"
+require "ast-builder"
 require "../src/generator/view_semantic_analyzer"
 require "../src/generator/prism_translator"
 require "../src/generator/ast_dump"
+
+# Builder helper for concise AST construction in specs. Crystal's spec DSL
+# uses top-level blocks rather than classes, so we expose the builder's
+# methods via a module extended onto itself and reference them as `B.foo`.
+module B
+  extend self
+  include CrystalAST::Builder
+end
 
 module Railcar
   def self.app_for_analyzer_spec : AppModel
@@ -87,17 +96,13 @@ describe Railcar::ViewSemanticAnalyzer do
     #   _buf += article.title
     #   _buf
     # end
-    article_arg = Crystal::Arg.new("article", nil, Crystal::Path.new("Article"))
-    article_var = Crystal::Var.new("article")
-    title_call = Crystal::Call.new(article_var, "title")
-
-    body = Crystal::Expressions.new([
-      Crystal::Assign.new(Crystal::Var.new("_buf"), Crystal::StringLiteral.new("")).as(Crystal::ASTNode),
-      Crystal::OpAssign.new(Crystal::Var.new("_buf"), "+", title_call).as(Crystal::ASTNode),
-      Crystal::Var.new("_buf").as(Crystal::ASTNode),
+    body = B.exprs([
+      B.assign("_buf", B.str("")).as(Crystal::ASTNode),
+      B.op_assign(B.var("_buf"), "+", B.call(B.var("article"), "title")).as(Crystal::ASTNode),
+      B.var("_buf").as(Crystal::ASTNode),
     ])
-    view_def = Crystal::Def.new("render", [article_arg], body,
-      return_type: Crystal::Path.new("String"))
+    view_def = B.def_("render", [B.arg("article", restriction: B.path("Article"))],
+      body, return_type: B.path("String"))
 
     analyzer = Railcar::ViewSemanticAnalyzer.new(app)
     analyzer.add_view("articles/show", view_def)
@@ -120,22 +125,19 @@ describe Railcar::ViewSemanticAnalyzer do
     #   end
     #   _buf
     # end
-    article_arg = Crystal::Arg.new("article", nil, Crystal::Path.new("Article"))
+    each_call = B.call(
+      B.call(B.var("article"), "comments"),
+      "each",
+      block: B.block(["c"], B.op_assign(B.var("_buf"), "+", B.call(B.var("c"), "commenter")))
+    )
 
-    c_var = Crystal::Var.new("c")
-    commenter_call = Crystal::Call.new(c_var, "commenter")
-    block_body = Crystal::OpAssign.new(Crystal::Var.new("_buf"), "+", commenter_call)
-    block = Crystal::Block.new([c_var] of Crystal::Var, block_body)
-    comments_call = Crystal::Call.new(Crystal::Var.new("article"), "comments")
-    each_call = Crystal::Call.new(comments_call, "each", block: block)
-
-    body = Crystal::Expressions.new([
-      Crystal::Assign.new(Crystal::Var.new("_buf"), Crystal::StringLiteral.new("")).as(Crystal::ASTNode),
+    body = B.exprs([
+      B.assign("_buf", B.str("")).as(Crystal::ASTNode),
       each_call.as(Crystal::ASTNode),
-      Crystal::Var.new("_buf").as(Crystal::ASTNode),
+      B.var("_buf").as(Crystal::ASTNode),
     ])
-    view_def = Crystal::Def.new("render", [article_arg], body,
-      return_type: Crystal::Path.new("String"))
+    view_def = B.def_("render", [B.arg("article", restriction: B.path("Article"))],
+      body, return_type: B.path("String"))
 
     analyzer = Railcar::ViewSemanticAnalyzer.new(app)
     analyzer.add_view("articles/show", view_def)
@@ -156,26 +158,23 @@ describe Railcar::ViewSemanticAnalyzer do
 
   it "handles multiple views in one analyzer pass" do
     # Two views share an analyzer; both should be typed in the same semantic run.
-    article_arg = Crystal::Arg.new("article", nil, Crystal::Path.new("Article"))
-    comment_arg = Crystal::Arg.new("comment", nil, Crystal::Path.new("Comment"))
-
-    show_body = Crystal::Expressions.new([
-      Crystal::Assign.new(Crystal::Var.new("_buf"), Crystal::StringLiteral.new("")).as(Crystal::ASTNode),
-      Crystal::OpAssign.new(Crystal::Var.new("_buf"), "+",
-        Crystal::Call.new(Crystal::Var.new("article"), "title")).as(Crystal::ASTNode),
-      Crystal::Var.new("_buf").as(Crystal::ASTNode),
+    show_body = B.exprs([
+      B.assign("_buf", B.str("")).as(Crystal::ASTNode),
+      B.op_assign(B.var("_buf"), "+",
+        B.call(B.var("article"), "title")).as(Crystal::ASTNode),
+      B.var("_buf").as(Crystal::ASTNode),
     ])
-    show_def = Crystal::Def.new("render", [article_arg], show_body,
-      return_type: Crystal::Path.new("String"))
+    show_def = B.def_("render", [B.arg("article", restriction: B.path("Article"))],
+      show_body, return_type: B.path("String"))
 
-    partial_body = Crystal::Expressions.new([
-      Crystal::Assign.new(Crystal::Var.new("_buf"), Crystal::StringLiteral.new("")).as(Crystal::ASTNode),
-      Crystal::OpAssign.new(Crystal::Var.new("_buf"), "+",
-        Crystal::Call.new(Crystal::Var.new("comment"), "body")).as(Crystal::ASTNode),
-      Crystal::Var.new("_buf").as(Crystal::ASTNode),
+    partial_body = B.exprs([
+      B.assign("_buf", B.str("")).as(Crystal::ASTNode),
+      B.op_assign(B.var("_buf"), "+",
+        B.call(B.var("comment"), "body")).as(Crystal::ASTNode),
+      B.var("_buf").as(Crystal::ASTNode),
     ])
-    partial_def = Crystal::Def.new("render", [comment_arg], partial_body,
-      return_type: Crystal::Path.new("String"))
+    partial_def = B.def_("render", [B.arg("comment", restriction: B.path("Comment"))],
+      partial_body, return_type: B.path("String"))
 
     analyzer = Railcar::ViewSemanticAnalyzer.new(app)
     analyzer.add_view("articles/show", show_def)

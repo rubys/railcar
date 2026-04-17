@@ -28,12 +28,15 @@
 # `target_defs.first.body` as the typed view body.
 
 require "../semantic"
+require "ast-builder"
 require "./app_model"
 require "./schema_extractor"
 require "./inflector"
 
 module Railcar
   class ViewSemanticAnalyzer
+    include CrystalAST::Builder
+
     getter app : AppModel
 
     # view id (e.g., "articles/show") → Def supplied by caller
@@ -96,25 +99,21 @@ module Railcar
         # constructor — covers Array(Article), Hash(K,V), and other
         # generics that a simple `T.new` can't express.
         call_args = [] of Crystal::ASTNode
-        renamed.args.each_with_index do |arg, i|
-          restriction = arg.restriction
+        renamed.args.each_with_index do |arg_node, i|
+          restriction = arg_node.restriction
           next unless restriction
           arg_var = "__arg_#{mangled}_#{i}"
           seed_src = "#{arg_var} = uninitialized #{restriction}"
           seed_ast = Crystal::Parser.parse(seed_src)
           defs << seed_ast
-          call_args << Crystal::Var.new(arg_var).as(Crystal::ASTNode)
+          call_args << var(arg_var).as(Crystal::ASTNode)
         end
-        invocation = Crystal::Call.new(nil.as(Crystal::ASTNode?), mangled, call_args)
-        wrapper = Crystal::Assign.new(
-          Crystal::Var.new("__view_#{mangled}"),
-          invocation
-        )
-        defs << wrapper
+        invocation = call(mangled, call_args)
+        defs << assign("__view_#{mangled}", invocation)
         invocations << {id, invocation}
       end
 
-      full_ast = Crystal::Expressions.new([
+      full_ast = exprs([
         Crystal::Require.new("prelude").at(location).as(Crystal::ASTNode),
         stub_ast,
       ] + defs)
