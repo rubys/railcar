@@ -5,3 +5,4 @@
 /build/
 blog_server
 blog.db
+*.swp
