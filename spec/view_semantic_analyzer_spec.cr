@@ -31,8 +31,23 @@ module Railcar
       validations: [] of Validation,
     )
 
+    # Mirror the blog routes: resources :articles with nested :comments.
+    routes = RouteSet.new
+    routes.add(Route.new("GET", "/articles", "articles", "index", "articles"))
+    routes.add(Route.new("POST", "/articles", "articles", "create", nil))
+    routes.add(Route.new("GET", "/articles/new", "articles", "new", "new_article"))
+    routes.add(Route.new("GET", "/articles/:id/edit", "articles", "edit", "edit_article"))
+    routes.add(Route.new("GET", "/articles/:id", "articles", "show", "article"))
+    routes.add(Route.new("PATCH", "/articles/:id", "articles", "update", nil))
+    routes.add(Route.new("DELETE", "/articles/:id", "articles", "destroy", nil))
+    routes.add(Route.new("POST", "/articles/:article_id/comments", "comments",
+      "create", "article_comments"))
+    routes.add(Route.new("DELETE", "/articles/:article_id/comments/:id", "comments",
+      "destroy", "article_comment"))
+
     AppModel.new("blog", [articles, comments],
-      {"Article" => article, "Comment" => comment})
+      {"Article" => article, "Comment" => comment},
+      [] of ControllerInfo, routes)
   end
 
   # Recursively find a Call node whose name matches.

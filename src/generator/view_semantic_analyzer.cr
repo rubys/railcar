@@ -39,6 +39,11 @@ module Railcar
     # view id (e.g., "articles/show") → Def supplied by caller
     getter views : Hash(String, Crystal::Def) = {} of String => Crystal::Def
 
+    # Names of render_<x>_partial helpers that views reference. Callers
+    # declare these so the analyzer can emit stubs; otherwise bare calls
+    # to `render_comment_partial(...)` fail to type.
+    property partial_names : Array(String) = [] of String
+
     # Populated after analyze: view id → typed body of that view
     getter typed_bodies : Hash(String, Crystal::ASTNode) = {} of String => Crystal::ASTNode
 
@@ -84,13 +89,21 @@ module Railcar
         renamed = rename_def(view_def, mangled)
         defs << renamed
 
-        # Build invocation: __view_<mangled> = <mangled>(<Type>.new, ...)
-        call_args = renamed.args.map do |arg|
-          type_name = type_name_of(arg)
-          Crystal::Call.new(
-            Crystal::Path.new(type_name),
-            "new"
-          ).as(Crystal::ASTNode)
+        # Build invocation. For each typed arg, emit a seed variable:
+        #   __arg_<mangled>_<i> = uninitialized <Type>
+        # and pass it to the view invocation. `uninitialized T` is valid
+        # Crystal syntax and doesn't require T to have a parameterless
+        # constructor — covers Array(Article), Hash(K,V), and other
+        # generics that a simple `T.new` can't express.
+        call_args = [] of Crystal::ASTNode
+        renamed.args.each_with_index do |arg, i|
+          restriction = arg.restriction
+          next unless restriction
+          arg_var = "__arg_#{mangled}_#{i}"
+          seed_src = "#{arg_var} = uninitialized #{restriction}"
+          seed_ast = Crystal::Parser.parse(seed_src)
+          defs << seed_ast
+          call_args << Crystal::Var.new(arg_var).as(Crystal::ASTNode)
         end
         invocation = Crystal::Call.new(nil.as(Crystal::ASTNode?), mangled, call_args)
         wrapper = Crystal::Assign.new(
@@ -109,7 +122,9 @@ module Railcar
       begin
         program.semantic(program.normalize(full_ast))
       rescue ex
-        STDERR.puts "  view semantic analysis failed: #{ex.message.to_s.lines.first}"
+        STDERR.puts "  view semantic analysis failed:"
+        # Crystal TypeException#to_s gives the full chained explanation.
+        ex.to_s.lines.first(30).each { |ln| STDERR.puts "    #{ln.chomp}" }
         return false
       end
 
@@ -161,56 +176,151 @@ module Railcar
       "view_" + id.gsub('/', '_').gsub('-', '_').gsub('.', '_')
     end
 
-    # Minimal stubs: prelude is added separately; here we emit just enough
-    # typed class definitions for models used by views. View helpers (link_to,
-    # button_to, path helpers, etc.) are added incrementally as generators
-    # start using this analyzer against real blog views.
+    # Stubs: typed model definitions + view-helper signatures + path helpers.
+    # Crystal's semantic pass uses these to resolve every identifier and
+    # method call inside a view body. Helpers are declared with loose types
+    # (*args, **kwargs) since we don't care about their signatures — we only
+    # care that semantic can resolve them and assign a return type.
     private def build_stub_source : String
       schema_map = {} of String => TableSchema
       app.schemas.each { |s| schema_map[s.name] = s }
 
       String.build do |io|
-        app.models.each do |name, model|
-          table_name = Inflector.pluralize(Inflector.underscore(name))
-          schema = schema_map[table_name]?
-
-          io << "class #{name}\n"
-          io << "  property id : Int64 = 0\n"
-
-          if schema
-            schema.columns.each do |col|
-              next if col.name == "id"
-              ct = SchemaExtractor.crystal_type(col.type)
-              default = default_for(ct)
-              io << "  property #{col.name} : #{ct} = #{default}\n"
-            end
-          end
-
-          # Association accessors
-          model.associations.each do |assoc|
-            case assoc.kind
-            when :has_many
-              target = Inflector.classify(Inflector.singularize(assoc.name))
-              io << "  def #{assoc.name} : Array(#{target})\n"
-              io << "    [] of #{target}\n"
-              io << "  end\n"
-            when :belongs_to
-              target = Inflector.classify(assoc.name)
-              io << "  def #{assoc.name} : #{target}\n"
-              io << "    #{target}.new\n"
-              io << "  end\n"
-            when :has_one
-              target = Inflector.classify(assoc.name)
-              io << "  def #{assoc.name} : #{target}\n"
-              io << "    #{target}.new\n"
-              io << "  end\n"
-            end
-          end
-
-          io << "  def errors : Array(String)\n    [] of String\n  end\n"
-          io << "end\n\n"
-        end
+        emit_model_stubs(io, schema_map)
+        emit_view_helper_stubs(io)
+        emit_path_helper_stubs(io)
+        emit_partial_stubs(io)
       end
+    end
+
+    # Partial-render helpers are named after individual partials. Callers
+    # register them via `partial_names` so their stubs are emitted here.
+    private def emit_partial_stubs(io : IO) : Nil
+      @partial_names.each do |name|
+        io << "def render_#{name}_partial(*args, **kwargs) : String\n"
+        io << "  \"\"\n"
+        io << "end\n"
+      end
+      io << "\n"
+    end
+
+    private def emit_model_stubs(io : IO, schema_map : Hash(String, TableSchema)) : Nil
+      app.models.each do |name, model|
+        table_name = Inflector.pluralize(Inflector.underscore(name))
+        schema = schema_map[table_name]?
+
+        io << "class #{name}\n"
+        io << "  property id : Int64 = 0\n"
+
+        if schema
+          schema.columns.each do |col|
+            next if col.name == "id"
+            ct = SchemaExtractor.crystal_type(col.type)
+            default = default_for(ct)
+            io << "  property #{col.name} : #{ct} = #{default}\n"
+          end
+        end
+
+        # Association accessors
+        model.associations.each do |assoc|
+          case assoc.kind
+          when :has_many
+            target = Inflector.classify(Inflector.singularize(assoc.name))
+            io << "  def #{assoc.name} : Array(#{target})\n"
+            io << "    [] of #{target}\n"
+            io << "  end\n"
+          when :belongs_to
+            target = Inflector.classify(assoc.name)
+            io << "  def #{assoc.name} : #{target}\n"
+            io << "    #{target}.new\n"
+            io << "  end\n"
+          when :has_one
+            target = Inflector.classify(assoc.name)
+            io << "  def #{assoc.name} : #{target}\n"
+            io << "    #{target}.new\n"
+            io << "  end\n"
+          end
+        end
+
+        io << "  def errors : Array(String)\n    [] of String\n  end\n"
+        io << "end\n\n"
+      end
+    end
+
+    # View-helper stubs. Intentionally loosely typed — we don't care about
+    # the helper's signature, only its existence and return type, so semantic
+    # can resolve calls and attach a type to the surrounding expression.
+    private def emit_view_helper_stubs(io : IO) : Nil
+      io << <<-CRYSTAL
+
+        # Rails-style view helpers. All return String so _buf += ... types cleanly.
+
+        def str(x) : String
+          x.to_s
+        end
+
+        def dom_id(*args) : String
+          ""
+        end
+
+        def pluralize(*args) : String
+          ""
+        end
+
+        def truncate(*args, **kwargs) : String
+          ""
+        end
+
+        def link_to(*args, **kwargs) : String
+          ""
+        end
+
+        def button_to(*args, **kwargs) : String
+          ""
+        end
+
+        def turbo_stream_from(*args) : String
+          ""
+        end
+
+        def turbo_cable_stream_tag(*args) : String
+          ""
+        end
+
+        def turbo_stream_tag(*args) : String
+          ""
+        end
+
+        def form_with_open_tag(*args, **kwargs) : String
+          ""
+        end
+
+        def form_submit_tag(*args, **kwargs) : String
+          ""
+        end
+
+        def content_for(*args, **kwargs) : String
+          ""
+        end
+
+        def yield_content(*args) : String
+          ""
+        end
+
+
+      CRYSTAL
+    end
+
+    # Emit one stub per route helper (articles_path, article_path(id), etc.).
+    # Each returns String with loose args — good enough for type resolution.
+    # Rails convention appends `_path` to the helper name.
+    private def emit_path_helper_stubs(io : IO) : Nil
+      app.routes.helpers.each do |helper|
+        io << "def #{helper.name}_path(*args, **kwargs) : String\n"
+        io << "  \"\"\n"
+        io << "end\n"
+      end
+      io << "\n"
     end
 
     private def default_for(crystal_type : String) : String

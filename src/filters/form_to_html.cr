@@ -41,10 +41,10 @@ module Railcar
 
       # Recurse into children
       node.obj = node.obj.try(&.transform(self))
-      node.args = node.args.map { |a| a.transform(self) }
+      node.args = node.args.map { |a| a.transform(self).as(Crystal::ASTNode) }
       if named = node.named_args
         node.named_args = named.map { |na|
-          Crystal::NamedArgument.new(na.name, na.value.transform(self))
+          Crystal::NamedArgument.new(na.name, na.value.transform(self)).as(Crystal::NamedArgument)
         }
       end
       if block = node.block
